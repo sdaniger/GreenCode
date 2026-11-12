@@ -452,3 +452,24 @@ for line in sys.stdin:
     let (saved, messages) = Session::load(&meta.id).unwrap();
     assert_eq!((saved.title.as_str(), messages.len()), ("list files", 2));
 }
+
+#[test]
+fn worktree_isolates_a_thread_and_diff_shows_new_files() {
+    let d = dir("wt");
+    let git = |args: &[&str]| {
+        let ok = std::process::Command::new("git").arg("-C").arg(&d).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).output().unwrap().status.success();
+        assert!(ok, "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    std::fs::write(d.join("a.txt"), "one\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "init"]);
+    let wt = greencode_core::worktree::create(&d, "t1").unwrap();
+    assert_eq!(std::fs::read_to_string(wt.join("a.txt")).unwrap(), "one\n");
+    std::fs::write(wt.join("a.txt"), "two\n").unwrap();
+    std::fs::write(wt.join("new.txt"), "fresh\n").unwrap();
+    let diff = greencode_core::worktree::diff(&wt);
+    assert!(diff.contains("-one") && diff.contains("+two") && diff.contains("+fresh"));
+    // The original checkout is untouched.
+    assert_eq!(greencode_core::worktree::diff(&d), "");
+}

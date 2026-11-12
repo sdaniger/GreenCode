@@ -25,7 +25,10 @@ pub struct Meta {
 impl Meta {
     pub fn new(cwd: PathBuf, model: String, backend: String) -> Meta {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-        Meta { id: format!("{:x}", now.as_nanos()), cwd, title: String::new(), model, backend, created: now.as_secs(), repo: None }
+        // The clock alone can repeat when threads are created back to back.
+        static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Meta { id: format!("{:x}-{seq:x}", now.as_micros()), cwd, title: String::new(), model, backend, created: now.as_secs(), repo: None }
     }
 }
 
