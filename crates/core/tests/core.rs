@@ -354,3 +354,101 @@ fn anthropic_body_is_cacheable() {
     assert_eq!(body["tools"].as_array().unwrap().len(), 6);
     assert_eq!(body["messages"][0], json!({"role":"user","content":[{"type":"text","text":"hi"}]}));
 }
+
+#[tokio::test]
+async fn mcp_stdio_search_and_call() {
+    if std::process::Command::new("python3").arg("--version").output().is_err() {
+        return; // the fake server below needs python3
+    }
+    let d = dir("mcp");
+    std::fs::write(
+        d.join("server.py"),
+        r#"
+import json, sys
+for line in sys.stdin:
+    m = json.loads(line)
+    if "id" not in m: continue
+    if m["method"] == "initialize": r = {"protocolVersion": "2025-06-18", "capabilities": {}, "serverInfo": {"name": "t", "version": "1"}}
+    elif m["method"] == "tools/list": r = {"tools": [
+        {"name": "add", "description": "Add two numbers", "inputSchema": {"type": "object", "properties": {"a": {"type": "number"}, "b": {"type": "number"}}}},
+        {"name": "weather", "description": "Forecast for a city", "inputSchema": {"type": "object"}}]}
+    else:
+        a = m["params"]["arguments"]
+        r = {"content": [{"type": "text", "text": str(a["a"] + a["b"])}]}
+    print(json.dumps({"jsonrpc": "2.0", "id": m["id"], "result": r}), flush=True)
+"#,
+    )
+    .unwrap();
+    std::fs::write(d.join(".mcp.json"), r#"{"mcpServers": {"calc": {"command": "python3", "args": ["server.py"]}}}"#).unwrap();
+    let mcp = tools::mcp::Mcp::load(&d);
+    assert_eq!(mcp.names(), vec!["calc"]);
+    // The tool list stays out of the prompt: only the server name is in the definition.
+    let def = tools::defs(false, &mcp.names()).pop().unwrap();
+    assert!(def.description.contains("calc") && !def.description.contains("weather"));
+    let found = mcp.run(&json!({"action": "search", "query": "add numbers"}), &d).await.unwrap();
+    assert!(found.contains("calc/add") && found.contains("\"a\"") && !found.contains("weather"));
+    let out = mcp.run(&json!({"action": "call", "server": "calc", "tool": "add", "args": {"a": 2, "b": 40}}), &d).await.unwrap();
+    assert_eq!(out, "42");
+    assert!(mcp.run(&json!({"action": "call", "server": "nope", "tool": "x"}), &d).await.is_err());
+}
+
+#[tokio::test]
+async fn acp_backend_streams_asks_and_saves() {
+    if std::process::Command::new("python3").arg("--version").output().is_err() {
+        return; // the fake agent below needs python3
+    }
+    let d = dir("acp");
+    std::fs::write(
+        d.join("agent.py"),
+        r#"
+import json, sys
+def send(m): print(json.dumps(m), flush=True)
+def update(u): send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1", "update": u}})
+for line in sys.stdin:
+    m = json.loads(line)
+    meth = m.get("method")
+    if meth == "initialize": send({"jsonrpc": "2.0", "id": m["id"], "result": {"protocolVersion": 1}})
+    elif meth == "session/new": send({"jsonrpc": "2.0", "id": m["id"], "result": {"sessionId": "s1"}})
+    elif meth == "session/prompt":
+        prompt_id = m["id"]
+        update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "working"}})
+        update({"sessionUpdate": "tool_call", "toolCallId": "c1", "title": "Run ls", "status": "pending", "rawInput": {"command": "ls"}})
+        send({"jsonrpc": "2.0", "id": 99, "method": "session/request_permission", "params": {"sessionId": "s1",
+              "toolCall": {"toolCallId": "c1", "title": "Run ls"},
+              "options": [{"optionId": "yes", "kind": "allow_once"}, {"optionId": "no", "kind": "reject_once"}]}})
+    elif m.get("id") == 99:
+        picked = m["result"]["outcome"].get("optionId")
+        update({"sessionUpdate": "tool_call_update", "toolCallId": "c1", "status": "completed",
+                "content": [{"type": "content", "content": {"type": "text", "text": "picked " + str(picked)}}]})
+        send({"jsonrpc": "2.0", "id": prompt_id, "result": {"stopReason": "end_turn"}})
+"#,
+    )
+    .unwrap();
+    let meta = Meta::new(d.clone(), String::new(), "fake".into());
+    let command = vec!["python3".to_string(), "agent.py".to_string()];
+    let mut acp = greencode_core::acp::Acp::start(&command, &meta, Arc::new(Perms::new(Mode::Ask))).await.unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let events = {
+        let fut = acp.prompt("list files".into(), &tx);
+        tokio::pin!(fut);
+        let mut events = Vec::new();
+        loop {
+            tokio::select! {
+                r = &mut fut => { r.unwrap(); break }
+                Some(ev) = rx.recv() => match ev {
+                    Event::Permission { reply, tool, .. } => { assert_eq!(tool, "Run ls"); let _ = reply.send(Decision::Always); }
+                    ev => events.push(ev),
+                }
+            }
+        }
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+        events
+    };
+    assert!(events.iter().any(|e| matches!(e, Event::Text(t) if t == "working")));
+    // "Always" falls back to allow_once when the agent offers no allow_always.
+    assert_eq!(results(&events), vec![("picked yes".to_string(), false)]);
+    let (saved, messages) = Session::load(&meta.id).unwrap();
+    assert_eq!((saved.title.as_str(), messages.len()), ("list files", 2));
+}

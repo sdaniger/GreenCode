@@ -20,15 +20,6 @@ pub fn create(repo: &Path, id: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Removes the worktree; the branch is kept so its commits are not lost.
-pub fn remove(path: &Path) -> Result<()> {
-    git(path, &["worktree", "remove", "--force", &path.to_string_lossy()]).map(|_| ())
-}
-
-pub fn is_worktree(path: &Path) -> bool {
-    path.starts_with(crate::home().join("worktrees"))
-}
-
 /// Uncommitted changes including new files, as a unified diff. Empty outside a git repo.
 pub fn diff(dir: &Path) -> String {
     let mut out = git(dir, &["diff", "HEAD"]).or_else(|_| git(dir, &["diff"])).unwrap_or_default();

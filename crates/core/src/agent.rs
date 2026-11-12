@@ -35,6 +35,7 @@ pub struct Agent {
     subagent: bool,
     /// Context size of the last request, for the compaction trigger.
     context: u64,
+    started: bool,
 }
 
 async fn ask(tx: &EventTx, tool: &str, summary: String) -> Decision {
@@ -66,6 +67,7 @@ impl Agent {
             perms,
             subagent: false,
             context: 0,
+            started: false,
         }
     }
 
@@ -266,6 +268,7 @@ impl Agent {
                 mcp: self.mcp.clone(),
                 subagent: true,
                 context: 0,
+            started: true,
             };
             let (stx, mut srx) = mpsc::unbounded_channel();
             let result = {
@@ -302,6 +305,11 @@ impl Backend for Agent {
             }
             if let Err(e) = self.lua.refresh().await {
                 let _ = tx.send(Event::Notify(format!("Extension error: {e}")));
+            }
+            if !self.started {
+                self.started = true;
+                self.lua.hook("session_start", json!({ "cwd": self.cwd })).await;
+                self.notes(tx);
             }
             let mut prompt = text;
             if let Some(rest) = prompt.strip_prefix('/') {

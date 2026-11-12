@@ -17,12 +17,15 @@ pub struct Meta {
     /// `native` or the name of an ACP backend.
     pub backend: String,
     pub created: u64,
+    /// Set when `cwd` is a worktree: the repository it was created from.
+    #[serde(default)]
+    pub repo: Option<PathBuf>,
 }
 
 impl Meta {
     pub fn new(cwd: PathBuf, model: String, backend: String) -> Meta {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-        Meta { id: format!("{:x}", now.as_nanos()), cwd, title: String::new(), model, backend, created: now.as_secs() }
+        Meta { id: format!("{:x}", now.as_nanos()), cwd, title: String::new(), model, backend, created: now.as_secs(), repo: None }
     }
 }
 
