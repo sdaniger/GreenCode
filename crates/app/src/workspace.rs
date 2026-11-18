@@ -742,7 +742,6 @@ struct ProviderForm {
 pub struct Workspace {
     cfg: Arc<Config>,
     cfg_error: Option<String>,
-    rt: tokio::runtime::Runtime,
     threads: Vec<Thread>,
     active: usize,
     input: Entity<TextareaState>,
@@ -841,6 +840,8 @@ pub struct Workspace {
     importable: Vec<import::Found>,
     show_archived: bool,
     _subs: Vec<Subscription>,
+    // Drop terminals first so their pipes close before the runtime waits for blocking I/O.
+    rt: tokio::runtime::Runtime,
 }
 
 fn extension_text(text: &str) -> String {
@@ -9231,18 +9232,14 @@ mod tests {
 
     #[test]
     fn terminal_reads_merged_stream() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            use tokio::io::AsyncWriteExt;
-            let (reader, mut writer) = tokio::io::duplex(64);
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-            let task = tokio::spawn(super::terminal_output(reader, tx));
-            writer.write_all(b"output").await.unwrap();
-            drop(writer);
-            task.await.unwrap();
-            assert_eq!(rx.recv().await.unwrap(), "output");
-            assert!(rx.recv().await.is_none());
-        });
+        use std::io::Write;
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        writer.write_all(b"output").unwrap();
+        drop(writer);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        super::terminal_output(reader, tx);
+        assert_eq!(rx.blocking_recv().unwrap(), "output");
+        assert!(rx.blocking_recv().is_none());
     }
 
     #[test]

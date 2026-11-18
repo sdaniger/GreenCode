@@ -102,6 +102,9 @@ impl Term {
             .collect();
         let scroll = ScrollHandle::default();
         scroll.scroll_to_bottom();
+        let mut screen = super::new_screen();
+        // ConPTY can request the cursor position during startup.
+        screen.callbacks_mut().enabled = cfg!(windows);
         Self {
             number,
             input,
@@ -112,7 +115,7 @@ impl Term {
             lines: vec![],
             previous,
             open: false,
-            screen: super::new_screen(),
+            screen,
             selection: None,
             pending_escape: String::new(),
             scroll,
@@ -177,16 +180,13 @@ impl Term {
         }
     }
 
-    /// Feeds program output; returns what the program asked the terminal to answer (private terminals only).
+    /// Feeds program output and returns any terminal query replies.
     pub fn feed(&mut self, text: &str) -> Vec<u8> {
-        if self.private.is_some() {
-            self.screen.process(text.as_bytes());
-            return std::mem::take(&mut self.screen.callbacks_mut().out);
-        }
         let was_full = self.screen.screen().alternate_screen();
         self.screen.process(text.as_bytes());
-        if self.screen.screen().alternate_screen() {
-            return Vec::new();
+        let reply = std::mem::take(&mut self.screen.callbacks_mut().out);
+        if self.private.is_some() || self.screen.screen().alternate_screen() {
+            return reply;
         }
         let text = if was_full {
             text.rsplit_once("\u{1b}[?1049l")
@@ -240,7 +240,7 @@ impl Term {
         self.pending_escape.push_str(&text[end..]);
         super::term_feed(&mut self.lines, &mut self.open, &text[..end]);
         self.scroll.scroll_to_bottom();
-        Vec::new()
+        reply
     }
 
     pub fn save(&self, cwd: &Path) -> std::io::Result<()> {
