@@ -37,6 +37,8 @@ pub struct Config {
     pub compaction_mid_turn: bool,
     /// Compaction method: `summary` or `snap`.
     pub compaction: String,
+    /// Replay older successful reads as previews with a path to the exact result.
+    pub old_read_previews: bool,
     /// Empty means every built-in tool. Otherwise only these names are exposed and accepted.
     pub tools: Vec<String>,
     /// Disables provider tools entirely, even if an allowlist is configured.
@@ -234,6 +236,7 @@ impl Default for Config {
             compaction_enabled: true,
             compaction_mid_turn: true,
             compaction: "summary".into(),
+            old_read_previews: false,
             tools: vec![],
             no_tools: false,
             ext_off: vec![],
@@ -417,6 +420,11 @@ fn search_dirs() -> Vec<std::path::PathBuf> {
     dirs.extend(["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"].map(std::path::PathBuf::from));
     #[cfg(target_os = "macos")]
     dirs.push(std::path::PathBuf::from("/Applications/Antigravity.app/Contents/Resources/app/bin"));
+    #[cfg(windows)]
+    if let Some(program_files) = std::env::var_os("ProgramFiles") {
+        let git = std::path::PathBuf::from(program_files).join("Git");
+        dirs.extend([git.join("bin"), git.join("usr").join("bin")]);
+    }
     dirs
 }
 
@@ -433,7 +441,18 @@ fn is_executable(path: &std::path::Path) -> bool {
 pub fn executable(name: &str) -> Option<std::path::PathBuf> {
     let direct = std::path::Path::new(name);
     if direct.is_absolute() {
-        return is_executable(direct).then(|| direct.to_path_buf());
+        return find_executable(direct.to_path_buf());
     }
-    search_dirs().into_iter().map(|d| d.join(name)).find(|p| is_executable(p))
+    search_dirs().into_iter().find_map(|dir| find_executable(dir.join(name)))
+}
+
+fn find_executable(path: std::path::PathBuf) -> Option<std::path::PathBuf> {
+    if is_executable(&path) {
+        return Some(path);
+    }
+    #[cfg(windows)]
+    if path.extension().is_none() {
+        return ["exe", "cmd", "bat"].into_iter().map(|ext| path.with_extension(ext)).find(|p| is_executable(p));
+    }
+    None
 }

@@ -77,7 +77,7 @@ async fn nonvision_explicit_snap_errors() {
 #[tokio::test]
 async fn default_compaction_uses_summary() {
     let (mut a, _, mock) = agent("summary", "anthropic", "");
-    a.messages.push(Message::user("hello"));
+    a.messages.push(Message::user("old prompt"));
     run(&mut a, "/compact").await.unwrap();
     assert_eq!(mock.seen.lock().unwrap().len(), 1);
     assert!(matches!(&a.messages[0].content[0], Block::Text { text } if text.contains("summary")));

@@ -52,7 +52,12 @@ batch independent tool calls, and read only the lines you need (`offset`/`limit`
 a file with the full text. When a result already answers the question, reply instead of confirming it with \
 another call.\n\
 Use `memory` for durable user/project facts. Read matching skills before work; save reusable, non-trivial \
-procedures to ~/.greencode/skills/<name>/SKILL.md with `name` and `description` frontmatter. If a durable project fact is clear, append one `Lesson:` line; otherwise omit it.";
+procedures to ~/.greencode/skills/<name>/SKILL.md with `name` and `description` frontmatter. If a durable \
+project fact is clear, append one `Lesson:` line; otherwise omit it.\n\
+\nPonytail (full) is the default coding style. Make the smallest complete change. \
+Reuse existing code, then platform APIs or installed dependencies. Avoid speculative options and abstractions. \
+Update affected callers, tests, and docs; verify with the narrowest relevant check. Never cut validation, \
+security, accessibility, or error handling to save code. For coding tasks, end with any skipped checks or known risks.";
 /// Marks an appended workspace-context update. The transcript UI and compaction skip these messages.
 pub const CONTEXT_MARKER: &str = "[greencode context update]";
 
@@ -201,10 +206,22 @@ fn spill(text: &str, id: &str) -> Option<std::path::PathBuf> {
         id.replace(|c: char| !c.is_ascii_alphanumeric(), "_"),
         Sha256::digest(text.as_bytes())
     ));
-    std::fs::create_dir_all(&dir)
-        .and_then(|_| std::fs::write(&path, text))
-        .ok()
-        .map(|_| path)
+    std::fs::create_dir_all(&dir).ok()?;
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    match opts.write(true).create_new(true).open(&path) {
+        Ok(mut file) => file.write_all(text.as_bytes()).ok()?,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists
+            && path.symlink_metadata().is_ok_and(|m| m.is_file() && m.len() == text.len() as u64)
+            && std::fs::read(&path).is_ok_and(|bytes| bytes == text.as_bytes()) => {}
+        Err(_) => return None,
+    }
+    Some(path)
 }
 
 /// Keeps the head and tail of long tool output and saves the whole text to a file.
@@ -213,22 +230,26 @@ pub fn truncate(out: String, id: &str) -> (String, Option<std::path::PathBuf>) {
 }
 
 pub(crate) fn preview(out: String, id: &str, limit: usize) -> (String, Option<std::path::PathBuf>) {
-    if out.len() <= limit {
-        return (out, None);
+    if let Some((preview, path)) = capped(&out, id, limit) {
+        (preview, Some(path))
+    } else {
+        (out, None)
     }
-    let Some(path) = spill(&out, id) else {
-        return (out, None);
-    };
+}
+
+fn capped(out: &str, id: &str, limit: usize) -> Option<(String, std::path::PathBuf)> {
+    if out.len() <= limit {
+        return None;
+    }
+    let path = spill(out, id)?;
     let notice = format!(
         "\n\n[... tool output is capped; full output: {} ...]\n\n",
         path.display()
     );
-    let Some(keep) = limit.checked_sub(notice.len()) else {
-        return (out, None);
-    };
+    let keep = limit.checked_sub(notice.len())?;
     let head = &out[..floor(&out, keep / 2)];
     let tail = &out[out.len() - floor_reverse(&out, keep - keep / 2)..];
-    (format!("{head}{notice}{tail}"), Some(path))
+    Some((format!("{head}{notice}{tail}"), path))
 }
 
 fn floor_reverse(s: &str, mut bytes: usize) -> usize {
@@ -236,6 +257,38 @@ fn floor_reverse(s: &str, mut bytes: usize) -> usize {
         bytes -= 1;
     }
     bytes
+}
+
+/// Keep at least two turns verbatim; advance the preview boundary every other prompt.
+pub(crate) fn preview_old_reads(messages: &mut [crate::Message]) -> bool {
+    use crate::{Block, Role};
+    let is_prompt = |m: &crate::Message| {
+        m.role == Role::User && !is_workspace_update(m)
+            && m.content.iter().any(|b| matches!(b, Block::Text { .. }))
+    };
+    let recent = 2 + messages.iter().filter(|m| is_prompt(m)).count() % 2;
+    let Some(boundary) = messages.iter().enumerate().rev()
+        .filter(|(_, m)| is_prompt(m)).nth(recent - 1).map(|(i, _)| i)
+    else { return false; };
+    let mut changed = false;
+    for i in 1..boundary {
+        let (before, after) = messages.split_at_mut(i);
+        let (calls, results) = (&before[i - 1], &mut after[0]);
+        if calls.role != Role::Assistant || results.role != Role::User { continue; }
+        for block in &mut results.content {
+            let Block::ToolResult { tool_use_id, content, is_error: false } = block else { continue; };
+            if content.len() <= 512
+                || !calls.content.iter().any(|b| matches!(b, Block::ToolUse { id, name, .. } if id == tool_use_id && name == "read"))
+            {
+                continue;
+            }
+            if let Some((preview, _)) = capped(content, tool_use_id, 512) {
+                *content = preview;
+                changed = true;
+            }
+        }
+    }
+    changed
 }
 
 /// Computer captures are file-backed in the transcript.
@@ -317,7 +370,7 @@ pub(crate) fn read_image(path: &Path) -> anyhow::Result<Option<serde_json::Value
     ))
 }
 
-/// Budget all image sources together, newest first. The transcript stays lossless.
+/// Project file-backed screenshots and inline images within the model's wire budget.
 pub fn model_messages(messages: &[crate::Message]) -> anyhow::Result<Vec<crate::Message>> {
     use base64::Engine;
     // shortcut: use one conservative wire budget until providers expose model-specific limits.
@@ -437,6 +490,10 @@ mod tests {
         assert_ne!(path, other);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
         assert_eq!(truncate("short".into(), &id), ("short".into(), None));
+        let corrupted = "x".repeat(body.len());
+        std::fs::write(&path, &corrupted).unwrap();
+        assert_eq!(truncate(body.clone(), &id), (body, None));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), corrupted);
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(other);
     }

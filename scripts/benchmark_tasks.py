@@ -33,6 +33,23 @@ PROMPTS = {
     "lookup": "What is the value of timeout_ms for region eu? Reply with only the value.",
 }
 
+LONG_FILES = ("alpha", "beta", "gamma", "delta", "epsilon", "zeta")
+LONG_TASK = "resume"
+LONG_TURNS = (
+    ("For this session prefix every short answer with `RIVER:` (no space), even after resuming. "
+     "Reply with `RIVER:ready` now.", "RIVER:ready"),
+    *((f"Read all 34 lines of {name}.txt, then reply with the code on its last line, using the agreed format.",
+       f"RIVER:{name}-33") for name in LONG_FILES),
+    ("/compact summary", ""),
+    ("What is the code on the last line of alpha.txt? Re-read that file if needed. Use the agreed format.",
+     "RIVER:alpha-33"),
+)
+
+
+def usage_rows(events):
+    return [{key: event[key] for key in ("input", "cache_read", "cache_write", "output")}
+            for event in events if event.get("type") in ("usage", "usage_aux")]
+
 
 def fixture(project, task):
     files = {
@@ -101,6 +118,8 @@ class ApiTests(unittest.TestCase):
 
 
 def check(project, task, original_test, final_text):
+    if task == LONG_TASK:
+        return final_text.strip() == LONG_TURNS[-1][1]
     if task == "lookup":
         return final_text.strip() == "2750"
     if task in ("bugfix", "feature"):
@@ -118,6 +137,13 @@ def check(project, task, original_test, final_text):
 
 
 def selfcheck():
+    events = [
+        {"type": "usage", "input": 2, "cache_read": 3, "cache_write": 5, "output": 7},
+        {"type": "text", "text": "not usage"},
+        {"type": "usage_aux", "input": 11, "cache_read": 13, "cache_write": 17, "output": 19},
+    ]
+    totals = metrics(usage_rows(events))
+    assert (totals["input"], totals["cache_read"], totals["cache_write"], totals["output"]) == (13, 16, 22, 26)
     with tempfile.TemporaryDirectory(prefix="greencode-task-selfcheck-") as temp:
         for task in PROMPTS:
             project = Path(temp) / task
@@ -199,18 +225,12 @@ def version(command):
         return None
 
 
-def run_one(cli, home, root, harness, task, number, choice, env=None):
-    project = root / f"{harness}-{task}-{number}"
-    project.mkdir()
-    original = fixture(project, task)
-    model = choice["native"] if harness == "native" else f"{choice['ext']}/{choice['id']}"
-    command = [str(cli), "--json", "--mode", "full", "--backend", harness, "--model", model, "-p", PROMPTS[task]]
-    started = time.monotonic()
+def prompt_turn(command, project, env):
     try:
-        result = subprocess.run(command, cwd=project, env=dict(os.environ, GREENCODE_HOME=str(home), **(env or {})),
+        result = subprocess.run(command, cwd=project, env=env, stdin=subprocess.DEVNULL,
                                 capture_output=True, text=True, timeout=300)
         stdout, returncode = result.stdout, result.returncode
-        failure = []
+        failure = [result.stderr.splitlines()[-1]] if returncode and result.stderr else []
     except subprocess.TimeoutExpired as exc:
         stdout = exc.stdout or b""
         if isinstance(stdout, bytes):
@@ -218,7 +238,6 @@ def run_one(cli, home, root, harness, task, number, choice, env=None):
         returncode, failure = None, ["Run timed out after 300 seconds"]
     except OSError as exc:
         stdout, returncode, failure = "", None, [str(exc)]
-    seconds = time.monotonic() - started
     events = []
     for line in stdout.splitlines():
         if line.strip():
@@ -226,26 +245,83 @@ def run_one(cli, home, root, harness, task, number, choice, env=None):
                 events.append(json.loads(line))
             except json.JSONDecodeError:
                 failure.append(f"Invalid JSON event: {line}")
+    return events, returncode, failure
+
+
+def run_one(cli, home, root, harness, task, number, choice, env=None, *, arm=None):
+    project = root / f"{arm or harness}-{task}-{number}"
+    project.mkdir()
+    if task == LONG_TASK:
+        for i, name in enumerate(LONG_FILES):
+            (project / f"{name}.txt").write_text("".join(
+                f"record {j:02}: {i * 8021 + j * 7817:06x} voltage {j % 17} "
+                f"at synthetic station {i}/{j % 7}; code {name}-{j:02}\n"
+                for j in range(34)
+            ))
+        original = None
+        turns = LONG_TURNS
+    else:
+        original = fixture(project, task)
+        turns = ((PROMPTS[task], None),)
+    model = choice["native"] if harness == "native" else f"{choice['ext']}/{choice['id']}"
+    command = [str(cli), "--json", "--mode", "auto-edit" if env and harness == "native" else "full",
+               "--backend", harness, "--model", model]
+    runtime = env if env and harness == "native" else dict(os.environ, GREENCODE_HOME=str(home), **(env or {}))
+    started = time.monotonic()
+    events, failure, turn_failures = [], [], []
+    session_args = []
+    final_text = ""
+    for turn, (prompt, expected) in enumerate(turns, start=1):
+        previous = set(home.glob("sessions/*.jsonl")) if turn == 1 and task == LONG_TASK else set()
+        if env and harness == "native" and task != LONG_TASK:
+            prompt += " The fixture runner will execute the tests after you finish. Do not use the shell or access files outside this project."
+        batch, returncode, problems = prompt_turn([*command, *session_args, "-p", prompt], project, runtime)
+        events.extend(batch)
+        failure.extend(problems)
+        failure.extend(e["text"] for e in batch if e.get("type") == "error")
+        if returncode != 0 or failure:
+            if not failure:
+                failure.append(f"CLI exited with status {returncode}")
+            break
+        # An under-budget /compact can finish without spending any model tokens.
+        needs_usage = not prompt.startswith("/compact ")
+        if not any(e.get("type") == "done" for e in batch):
+            failure.append(f"Turn {turn} did not finish")
+            break
+        if needs_usage and not usage_rows(batch):
+            failure.append(f"Turn {turn} did not report model usage")
+            break
+        final_text = ""
+        for event in batch:
+            if event.get("type") == "tool_start":
+                final_text = ""
+            elif event.get("type") == "text":
+                final_text += event["text"]
+        if expected is not None and final_text.strip() != expected:
+            turn_failures.append(turn)
+        if turn == 1 and task == LONG_TASK:
+            created = set(home.glob("sessions/*.jsonl")) - previous
+            if len(created) != 1:
+                failure.append("Expected exactly one new native session to resume")
+                break
+            session_args = ["--resume", created.pop().stem]
+    seconds = time.monotonic() - started
     states = [e["data"]["model"] for e in events if e.get("type") == "remote" and e.get("command") == "get_state" and e.get("data", {}).get("model")]
     # The first get_state precedes the harness's set_model; the last one is what served the prompt.
-    assert harness == "native" or states, f"no get_state event: cannot confirm the harness used {model}"
+    assert harness == "native" or states or failure, f"no get_state event: cannot confirm the harness used {model}"
     assert all(f"{m['provider']}/{m['id']}" == model for m in states[-1:]), f"Unexpected model, no fallback: {states[-1:]}"
-    usage = [{k: e[k] for k in ("input", "cache_read", "cache_write", "output")} for e in events if e.get("type") == "usage"]
-    final_text = ""
-    for event in events:
-        if event.get("type") == "tool_start":
-            final_text = ""
-        elif event.get("type") == "text":
-            final_text += event["text"]
-    errors = [e["text"] for e in events if e.get("type") == "error"] + failure
-    ok_run = returncode == 0 and not errors
-    return {"harness": harness, "task": task, "run": number,
-            "passed": ok_run and check(project, task, original, final_text), "seconds": seconds,
-            "requests": len(usage), **metrics(usage),
+    usage = usage_rows(events)
+    totals = metrics(usage)
+    ok_run = not failure and bool(usage)
+    return {"harness": arm or harness, "task": task, "run": number,
+            "passed": ok_run and not turn_failures and check(project, task, original, final_text),
+            "turn_failures": turn_failures, "seconds": seconds,
+            "requests": len(usage), "aux_requests": sum(e.get("type") == "usage_aux" for e in events),
+            **totals, "total_tokens": totals["total_input"] + totals["output"],
             "per_request": [metrics([u])["total_input"] for u in usage],
             "first_request_total_input": metrics(usage[:1])["total_input"],
             "tool_calls": sum(e.get("type") == "tool_start" for e in events),
-            "final_text": final_text, "errors": errors, "ok_run": ok_run,
+            "final_text": final_text, "errors": failure, "ok_run": ok_run,
             "models": [f"{m['provider']}/{m['id']}" for m in states[-1:]]}
 
 
@@ -268,8 +344,11 @@ def advisor_usage(home):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cli", type=Path, default=Path(__file__).resolve().parents[1] / "target/debug/greencode-cli")
+    parser.add_argument("--baseline-cli", type=Path, help="interleave a pinned-model native comparison with this binary")
+    parser.add_argument("--candidate-old-read-previews", action="store_true",
+                        help="enable old_read_previews only for the candidate native binary")
     parser.add_argument("--harness", choices=HARNESSES, action="append")
-    parser.add_argument("--tasks", nargs="+", choices=PROMPTS, default=list(PROMPTS))
+    parser.add_argument("--tasks", nargs="+", choices=[*PROMPTS, LONG_TASK])
     parser.add_argument("--runs", type=int, default=1)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--keep-homes", type=Path, help="copy each harness home here before the temp tree is deleted")
@@ -284,7 +363,15 @@ def main():
         parser.error("--output is required unless --selfcheck is used")
     if args.runs < 1:
         parser.error("--runs must be positive")
-    harnesses = list(dict.fromkeys(args.harness or HARNESSES))
+    if args.candidate_old_read_previews and not args.baseline_cli:
+        parser.error("--candidate-old-read-previews requires --baseline-cli")
+    harnesses = list(dict.fromkeys(args.harness or (("native",) if args.baseline_cli else HARNESSES)))
+    tasks = list(dict.fromkeys(args.tasks or ([*PROMPTS, LONG_TASK] if args.baseline_cli else PROMPTS)))
+    isolated = bool(args.baseline_cli or LONG_TASK in tasks)
+    if isolated and (harnesses != ["native"] or args.model != "luna" or args.keep_homes):
+        parser.error("native comparison and resume tasks require only the native harness, --model luna, and no --keep-homes")
+    arms = {"baseline": args.baseline_cli.resolve(), "candidate": args.cli.resolve()} if args.baseline_cli else {
+        harness: args.cli.resolve() for harness in harnesses}
     pi, omp = shutil.which("pi"), shutil.which("omp")
     if "pi" in harnesses and not pi:
         parser.error("pi must be installed and signed in")
@@ -324,11 +411,15 @@ def main():
             "omp-lean": [omp, "--model", pinned, *lean],
             "omp-advisor": [omp, "--model", pinned, *lean, "--advisor"],
         }
-        advisor = {}
-        for harness in harnesses:
-            home = root / (harness + "-home")
+        homes = {}
+        for arm, binary in arms.items():
+            harness = "native" if isolated else arm
+            home = root / (arm + "-home")
             home.mkdir()
+            homes[arm] = home
             config = choice["config"]
+            if arm == "candidate" and args.candidate_old_read_previews:
+                config += "old_read_previews = true\n"
             if harness == "native":
                 if name == "luna":
                     config += LUNA_NATIVE_PROVIDER
@@ -337,26 +428,63 @@ def main():
                 config += f'[[backends]]\nname={json.dumps(harness)}\nprotocol={json.dumps(protocol)}\ncommand={json.dumps(commands[harness])}\n'
             (home / "config.toml").write_text(config)
             if harness == "native":
-                complaint = import_login(cli, home, choice)
+                complaint = import_login(binary, home, choice)
                 if complaint:
                     parser.exit(1, f"Native login import failed; sign in to {'Codex CLI' if name == 'luna' else 'Claude Code'} first: {complaint}\n")
-            for task in dict.fromkeys(args.tasks):
-                for number in range(1, args.runs + 1):
-                    runs.append(run_one(cli, home, root, harness, task, number, choice, None if harness == "native" else env))
-            advisor[harness] = advisor_usage(home)
+        if isolated:
+            user = root / "user"
+            user.mkdir()
+            ordered = list(arms.items())
+            for number in range(1, args.runs + 1):
+                for task in tasks:
+                    for arm, binary in ordered if number % 2 else reversed(ordered):
+                        home = homes[arm]
+                        # No inherited developer keys, proxy, user settings or real project context.
+                        runtime = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(user),
+                                   "GREENCODE_HOME": str(home), "TMPDIR": str(root)}
+                        row = run_one(binary, home, root, "native", task, number, choice, runtime, arm=arm)
+                        runs.append(row)
+                        print(f"{arm} {task}/{number}: {row['total_tokens']} tokens, {'pass' if row['passed'] else 'fail'}",
+                              file=sys.stderr, flush=True)
+                        if not row["ok_run"]:
+                            break
+                    if not runs[-1]["ok_run"]:
+                        break
+                if not runs[-1]["ok_run"]:
+                    break
+        else:
+            for harness, binary in arms.items():
+                home = homes[harness]
+                for task in tasks:
+                    for number in range(1, args.runs + 1):
+                        runs.append(run_one(binary, home, root, harness, task, number, choice,
+                                            None if harness == "native" else env))
+        advisor = {harness: advisor_usage(home) for harness, home in homes.items()} if not isolated else {}
+        for home in homes.values():
             if args.keep_homes:
                 args.keep_homes.mkdir(parents=True, exist_ok=True)
                 shutil.copytree(home, args.keep_homes / home.name, dirs_exist_ok=True)
     summary = {}
-    for harness in harnesses:
+    for harness in arms:
         rows = [r for r in runs if r["harness"] == harness]
+        if not rows:
+            continue
         summary[harness] = {"passed": sum(r["passed"] for r in rows), "of": len(rows),
-                            **{f"{key}_sum": sum(r[key] for r in rows) for key in ("total_input", "output", "requests", "seconds")},
+                            **{f"{key}_sum": sum(r[key] for r in rows) for key in (
+                                "input", "cache_read", "cache_write", "total_input", "output", "total_tokens", "requests",
+                                "aux_requests", "seconds")},
+                            "median_total_tokens_by_task": {
+                                task: statistics.median(values) for task in tasks
+                                if (values := [r["total_tokens"] for r in rows if r["task"] == task and r["ok_run"]])
+                            },
                             "median_first_request_total_input": statistics.median(r["first_request_total_input"] for r in rows)}
     for harness, usage in advisor.items():
         if any(usage.values()):
             summary[harness]["advisor_usage"] = usage
-    report = {"model": choice["id"], "model_choice": args.model, "fallback_reason": reason, "date": date.today().isoformat(), "harnesses": harnesses, "versions": versions, "runs": runs, "summary": summary}
+    report = {"model": choice["id"], "model_choice": args.model, "fallback_reason": reason, "date": date.today().isoformat(),
+              "harnesses": list(arms), "versions": versions, "runs": runs, "summary": summary}
+    if args.candidate_old_read_previews:
+        report["candidate_old_read_previews"] = True
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
     print("| Harness | Passed | Total input | Cache-read share | Output | Requests | Seconds | Median first-request input |")
@@ -365,6 +493,8 @@ def main():
         rows = [r for r in runs if r["harness"] == harness]
         share = sum(r["cache_read"] for r in rows) / s["total_input_sum"] if s["total_input_sum"] else 0
         print(f'| {harness} | {s["passed"]}/{s["of"]} | {s["total_input_sum"]} | {share:.1%} | {s["output_sum"]} | {s["requests_sum"]} | {s["seconds_sum"]:.1f} | {s["median_first_request_total_input"]:g} |')
+    if isolated and any(not row["ok_run"] for row in runs):
+        parser.exit(1, "Native measurement incomplete; see recorded CLI errors in the report.\n")
 
 
 if __name__ == "__main__":

@@ -2,22 +2,75 @@ use gpui_kit::{rgb, Hsla};
 
 use gpui_kit::component::input::InputState;
 use gpui_kit::{Entity, Keystroke, ScrollHandle, SharedString, Subscription};
+#[cfg(unix)]
+use std::{os::fd::{AsRawFd, OwnedFd}, time::Duration};
+#[cfg(windows)]
+use std::io;
 use std::{
     collections::HashMap,
     hash::{Hash, Hasher},
-    os::fd::{AsRawFd, OwnedFd},
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
 };
+
+#[cfg(unix)]
+pub(super) type Master = Arc<OwnedFd>;
+#[cfg(windows)]
+pub(super) type Master = Box<dyn portable_pty::MasterPty + Send>;
+#[cfg(unix)]
+pub(super) type Writer = tokio::fs::File;
+#[cfg(windows)]
+pub(super) type Writer = tokio::io::WriteHalf<tokio::io::SimplexStream>;
+#[cfg(unix)]
+pub(super) type Process = Arc<tokio::sync::Mutex<tokio::process::Child>>;
+
+#[cfg(windows)]
+pub(super) struct Process(Box<dyn portable_pty::Child + Send + Sync>);
+
+#[cfg(windows)]
+impl Drop for Process {
+    fn drop(&mut self) {
+        if !matches!(self.0.try_wait(), Ok(Some(_))) {
+            let _ = self.0.kill();
+        }
+    }
+}
+
+#[cfg(windows)]
+pub(super) fn windows_pty(
+    rt: &tokio::runtime::Runtime,
+    cwd: &Path,
+    (rows, cols): (u16, u16),
+) -> io::Result<(Process, Master, Box<dyn io::Read + Send>, Writer)> {
+    let size = portable_pty::PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
+    let pty = portable_pty::native_pty_system().openpty(size).map_err(io::Error::other)?;
+    let stdout = pty.master.try_clone_reader().map_err(io::Error::other)?;
+    let mut stdin = pty.master.take_writer().map_err(io::Error::other)?;
+    let mut cmd = portable_pty::CommandBuilder::new(std::env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into()));
+    cmd.cwd(cwd);
+    cmd.arg("/D");
+    let child = pty.slave.spawn_command(cmd).map_err(io::Error::other)?;
+    let (mut from_ui, to_pty) = tokio::io::simplex(8192);
+    let handle = rt.handle().clone();
+    rt.spawn_blocking(move || {
+        use tokio::io::AsyncReadExt;
+        let mut buf = [0; 8192];
+        while let Ok(n @ 1..) = handle.block_on(from_ui.read(&mut buf)) {
+            if stdin.write_all(&buf[..n]).is_err() {
+                break;
+            }
+        }
+    });
+    Ok((Process(child), pty.master, stdout, to_pty))
+}
 
 pub(super) struct Term {
     pub number: usize,
     pub input: Entity<InputState>,
     pub _subscription: Subscription,
-    pub process: Option<Arc<tokio::sync::Mutex<tokio::process::Child>>>,
-    pub stdin: Option<Arc<tokio::sync::Mutex<tokio::fs::File>>>,
-    pub master: Option<Arc<OwnedFd>>,
+    pub process: Option<Process>,
+    pub stdin: Option<Arc<tokio::sync::Mutex<Writer>>>,
+    pub master: Option<Master>,
     pub lines: Vec<SharedString>,
     pub previous: Vec<SharedString>,
     pub open: bool,
@@ -37,9 +90,9 @@ impl Term {
         number: usize,
         input: Entity<InputState>,
         subscription: Subscription,
-        process: Option<Arc<tokio::sync::Mutex<tokio::process::Child>>>,
-        stdin: Option<Arc<tokio::sync::Mutex<tokio::fs::File>>>,
-        master: Option<Arc<OwnedFd>>,
+        process: Option<Process>,
+        stdin: Option<Arc<tokio::sync::Mutex<Writer>>>,
+        master: Option<Master>,
         cwd: &Path,
     ) -> Self {
         let previous = std::fs::read_to_string(log_path(cwd, number))
@@ -102,15 +155,25 @@ impl Term {
         }
         self.screen.set_size(rows, cols);
         if let Some(master) = &self.master {
-            let size = libc::winsize {
-                ws_row: rows.get(),
-                ws_col: cols.get(),
-                ws_xpixel: 0,
-                ws_ypixel: 0,
-            };
-            unsafe {
-                libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ as _, &size);
+            #[cfg(unix)]
+            {
+                let size = libc::winsize {
+                    ws_row: rows.get(),
+                    ws_col: cols.get(),
+                    ws_xpixel: 0,
+                    ws_ypixel: 0,
+                };
+                unsafe {
+                    libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ as _, &size);
+                }
             }
+            #[cfg(windows)]
+            let _ = master.resize(portable_pty::PtySize {
+                rows: rows.get(),
+                cols: cols.get(),
+                pixel_width: 0,
+                pixel_height: 0,
+            });
         }
     }
 
@@ -476,6 +539,7 @@ pub(super) fn screen_row(
 /// Owns a private terminal's child until its whole process group is gone: waits for the child, or ends it when `kill`
 /// fires or is dropped (SIGTERM, then SIGKILL after 3 s). Only a group that is verifiably empty counts as exited, so no
 /// descendant can still write the session when the caller reconciles it.
+#[cfg(unix)]
 pub(super) async fn supervise(
     mut child: tokio::process::Child,
     kill: tokio::sync::oneshot::Receiver<()>,

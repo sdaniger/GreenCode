@@ -25,6 +25,10 @@ use std::future::Future;
 const COMPACT_PROMPT: &str = "Stop here and do not call tools. Write a summary of this conversation that lets you continue the work \
 without the history: the user's goals, decisions made, files touched, the current state, and the next steps. Do not copy workspace instruction or memory snapshots; current files are supplied separately.";
 
+const READ_PREVIEW_GUIDE: &str = "\nAn old read may show an excerpt and a `full output:` path under GreenCode's spill directory. \
+If you need omitted information, call `read` on that exact saved path before answering. \
+The saved result is available even if the original file changed or was deleted.";
+
 enum Method {
     Summary,
     Snap,
@@ -461,13 +465,13 @@ impl Agent {
     }
 
     /// `GREENCODE_DUMP_REQUESTS=<dir>` appends one line per request with its component sizes.
-    fn dump_request(&self, tools: &[ToolDef], messages: &[Message]) {
+    fn dump_request(&self, system: &str, tools: &[ToolDef], messages: &[Message]) {
         let Ok(dir) = std::env::var("GREENCODE_DUMP_REQUESTS") else {
             return;
         };
         let size = |v: serde_json::Value| v.to_string().len();
         let line = json!({
-            "system": self.system.len(),
+            "system": system.len(),
             "tools": size(json!(tools.iter().map(|t| json!({"name": t.name, "description": t.description, "schema": t.schema})).collect::<Vec<_>>())),
             "messages": size(json!(messages)),
             "count": messages.len(),
@@ -492,6 +496,14 @@ impl Agent {
         });
     }
 
+    fn can_preview_old_reads(&self) -> bool {
+        self.cfg.old_read_previews && !self.cfg.no_tools
+            && !matches!(self.review, Some(Review::Remote))
+            && !self.lua.has_hook("context")
+            && (self.cfg.tools.is_empty() || self.cfg.tools.iter().any(|name| name == "read"))
+            && self.allowed.as_ref().is_none_or(|allowed| allowed.iter().any(|name| name == "read"))
+    }
+
     /// Summary and sub-agent calls count toward usage, not the main thread's displayed context.
     async fn request(
         &self,
@@ -506,10 +518,15 @@ impl Agent {
             all.push(Message::user(self.prompt_context.clone()));
         }
         all.extend(context::model_messages(messages)?);
-        self.dump_request(&tools, &all);
+        let start = usize::from(!self.prompt_context.is_empty());
+        let recovery_prompt = (!summarize && self.can_preview_old_reads()
+            && context::preview_old_reads(&mut all[start..]))
+            .then(|| format!("{}{READ_PREVIEW_GUIDE}", self.system));
+        let system = recovery_prompt.as_deref().unwrap_or(&self.system);
+        self.dump_request(system, &tools, &all);
         let req = Request {
             model: &self.model,
-            system: &self.system,
+            system,
             messages: &all,
             tools: &tools,
             max_tokens: self.cfg.max_tokens,
@@ -530,7 +547,7 @@ impl Agent {
 
     async fn compact(&mut self, tx: &EventTx, method: Method) -> Result<()> {
         context::archive_computer_images(&mut self.messages)?;
-        let history: Vec<_> = self
+        let mut history: Vec<_> = self
             .messages
             .iter()
             .filter(|m| !context::is_workspace_update(m))
@@ -539,9 +556,9 @@ impl Agent {
         if history.is_empty() {
             return Ok(());
         }
+        let split = crate::snap::split_point(&history, crate::snap::KEEP_CHARS);
         if matches!(method, Method::Snap) {
             let edge = self.snap_edge().ok_or_else(|| anyhow::anyhow!("snap compaction needs a model that reads images (Anthropic or OpenAI); use /compact summary"))?;
-            let split = crate::snap::split_point(&history, crate::snap::KEEP_CHARS);
             let start = usize::from(self.snap_source.is_some());
             let archived = if split >= start {
                 crate::snap::serialize(&history[start..split])
@@ -587,10 +604,16 @@ impl Agent {
             )));
             return Ok(());
         }
+        // Keep exact user/assistant turns if only old reads need shortening and no rebase is pending.
+        if split == 0 && self.context <= self.compact_at() && history.len() == self.messages.len()
+            && self.can_preview_old_reads() && context::preview_old_reads(&mut history)
+        {
+            let _ = tx.send(Event::Notify("Keeping exact history; older reads are already previewed for the model.".into()));
+            return Ok(());
+        }
         let _ = tx.send(Event::Notify("Compacting conversation…".into()));
         // Summarize only the old span and replay the recent tail verbatim.
         let mut messages = history;
-        let split = crate::snap::split_point(&messages, crate::snap::KEEP_CHARS);
         let tail = if split == 0 {
             Vec::new()
         } else {

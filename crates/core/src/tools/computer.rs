@@ -20,14 +20,19 @@ pub fn def() -> ToolDef {
     let (s, n) = (json!({"type": "string"}), json!({"type": "number"}));
     ToolDef {
         name: "computer".into(),
-        description: "Operate macOS apps in the background; the user's cursor and focus stay put. \
-`get_app_state` returns numbered elements and a screenshot; actions return the new state. \
-Prefer `index`; `x`/`y` are screenshot pixels."
+        description: "Operate macOS apps in the background like Codex Computer Use; the user's cursor and focus stay put. \
+            `app`: name, bundle id or path (launched if closed). `get_app_state` returns indexed elements (secondary actions in []) \
+            and a screenshot; actions return the new state, as a diff of the last one unless `disable_diff`. Prefer `element_index`; \
+            x/y are screenshot pixels. `key` uses xdotool names (super+c, Return). Confirm with the user before deleting, \
+            sending, buying or changing system settings."
             .into(),
         schema: json!({"type": "object", "required": ["action"], "properties": {
-            "action": {"enum": ["list_apps", "get_app_state", "click", "set_value", "type_text", "press_key", "scroll", "drag", "perform_action"]},
-            "app": s, "index": {"type": "integer"}, "x": n, "y": n, "to_x": n, "to_y": n, "dx": n, "dy": n,
-            "button": {"enum": ["left", "right"]}, "count": {"type": "integer"}, "text": s, "key": s, "ax_action": s,
+            "action": {"enum": ["list_apps", "get_app_state", "click", "drag", "paste", "perform_secondary_action", "press_key", "scroll", "select_text", "set_value", "type_text"]},
+            "app": s, "element_index": {"type": "integer"}, "x": n, "y": n, "from_x": n, "from_y": n, "to_x": n, "to_y": n,
+            "mouse_button": {"enum": ["left", "right", "middle"]}, "click_count": {"type": "integer"}, "key": s, "duration": n,
+            "direction": {"enum": ["up", "down", "left", "right"]}, "pages": n, "text": s, "value": s, "format": {"enum": ["text", "md", "html"]},
+            "secondary_action": s, "prefix": s, "suffix": s, "selection_type": {"enum": ["text", "cursor_before", "cursor_after"]},
+            "disable_diff": {"type": "boolean"},
         }}),
     }
 }

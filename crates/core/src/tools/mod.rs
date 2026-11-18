@@ -455,8 +455,14 @@ pub async fn run(name: &str, input: &Value, cwd: &Path) -> Result<String> {
 /// `sh -c`, wrapped in a write-restricting sandbox when `SANDBOX` is on.
 pub(super) fn shell(command: &str, cwd: &Path) -> Result<tokio::process::Command> {
     if !SANDBOX.load(Ordering::Relaxed) {
+        #[cfg(not(windows))]
         let mut c = tokio::process::Command::new("sh");
+        #[cfg(windows)]
+        let mut c = tokio::process::Command::new(crate::config::executable("sh.exe")
+            .context("sh.exe not found; install Git for Windows or add a POSIX shell to PATH")?);
         c.arg("-c").arg(command);
+        #[cfg(windows)]
+        c.env("PATH", crate::config::agent_path()?);
         return Ok(c);
     }
     if !cfg!(target_os = "macos") {

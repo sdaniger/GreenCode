@@ -157,6 +157,77 @@ input (1.02x), 114 vs 119 requests, 4,797 vs 6,352 output tokens; first request 
 used less input on refactor and more on bugfix; the bugfix traces show both harnesses spending a request on the
 missing `python` binary, so the per-task gaps are within run-to-run variance at this N.
 
+## Native old-read previews — not adopted
+
+In the paired GPT-6 Luna run, both arms used
+low effort and three runs per generated task. The candidate sent a 512-byte preview of older successful
+`read` results, kept at least the latest two turns verbatim, and saved the original text for retrieval. It did not
+shorten the input to summary compaction. Total tokens include uncached input, cache reads and writes,
+and output, including the compaction request.
+
+| Task | Baseline median tokens | Candidate median tokens | Change | Baseline passed | Candidate passed |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Resume + summary compaction | 61,834 | 50,247 | −18.7% | 2/3 | 1/3 |
+| Lookup | 4,740 | 4,468 | −5.7% | 3/3 | 3/3 |
+| Bug fix | 7,874 | 7,843 | −0.4% | 3/3 | 3/3 |
+
+All misses were on the final turn after compaction. The candidate omitted the `RIVER:` prefix twice;
+the baseline kept it but added a space once. The candidate met the token threshold (at least 10% less
+on the long task and no more than 5% extra on the short tasks) but failed the quality gate. The
+prototype and its opt-in setting were removed. The short tasks never reached the preview boundary, so
+their deltas are run-to-run variation, not measured savings from this feature.
+
+## Native prompt and compaction costs — not adopted
+
+Shorter built-in instructions and tool descriptions left tool names, argument schemas, user messages,
+and tool results unchanged. The local wire fixture measured 613 → 453 system bytes and
+6,553 → 6,406 tool declaration bytes, with the resumed cache prefix intact. Bytes are not token counts.
+
+An initial trial skipped summary compaction
+whenever the whole history fit the retained tail. It recovered all three exact answers after resume,
+but the long-task median rose from 60,072 to 65,139 total tokens (+8.4%): the follow-up replayed
+thousands of tokens, and some runs performed extra reads.
+
+A second candidate skipped compaction only for text-only histories under 2,000 bytes and asked the
+summarizer to preserve exact constraints and formats. GPT-6 Luna used low effort in both arms.
+The first batch stopped after two pairs; the third used fresh isolated homes and the same binaries
+and fixtures. Counts include cache hits, cache writes, output, and auxiliary requests.
+
+| Task | Baseline runs (tokens) | Candidate runs (tokens) | Median change | Passed (baseline → candidate) |
+| --- | ---: | ---: | ---: | ---: |
+| Resume + summary compaction | 62,569 / 60,162 / 60,919 | 55,381 / 57,211 / 57,187 | -6.1% | 1/3 → 3/3 |
+| Lookup | 2,957 / 2,947 / 4,468 | 8,968 / 4,233 / 2,785 | +43.2% | 3/3 → 3/3 |
+| Bug fix | 7,889 / 7,874 / 7,837 | 7,430 / 7,456 / 7,412 | -5.6% | 3/3 → 3/3 |
+
+The narrower candidate missed both the long-task target (at least 10% fewer tokens) and the short-task
+limit (at most 5% more). The prompt, tool descriptions, and compaction behavior were restored.
+
+## Native recoverable read previews — opt-in
+
+`old_read_previews = true` shortens older successful reads only on the model wire. It leaves the
+original prompts and results in the session, saves exact results for retrieval with `read`, and
+adds recovery instructions only to requests containing excerpts. With no workspace rebase pending,
+the option also avoids a lossy summary when the whole history fits the tail and the context is below
+the compaction threshold. None of this changes the default request prefix.
+
+The paired run used GPT-6 Luna at low
+effort. The lookup task took five pairs because its live tool choices varied; the other tasks took
+three. Total tokens include cached input, cache writes, output, and auxiliary requests.
+
+| Task | Baseline median | Preview median | Change | Passed (baseline → preview) |
+| --- | ---: | ---: | ---: | ---: |
+| Resume + summary compaction | 58,497 | 50,233 | −14.1% | 1/3 → 3/3 |
+| Lookup | 4,465 | 4,462 | −0.1% | 5/5 → 5/5 |
+| Bug fix | 8,016 | 7,882 | −1.7% | 3/3 → 3/3 |
+
+Short tasks did not reach the preview boundary. The local protocol fixture confirmed identical
+request bodies for a short tool turn, so their measured deltas are not attributed to the option.
+In three additional live recovery cases, the model reread a saved snapshot after the source file
+was deleted and returned the exact omitted value with the original required answer format.
+
+Reproduce with `--baseline-cli PATH --cli PATH --model luna --candidate-old-read-previews --tasks resume lookup bugfix --runs 3`.
+To extend the short lookup comparison, use `--tasks lookup --runs 5`.
+
 ## Provider references
 
 - [OpenAI prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching)
@@ -164,3 +235,10 @@ missing `python` binary, so the per-task gaps are within run-to-run variance at 
 - [Anthropic prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)
 
 Run the live coding-task comparison with `python3 scripts/benchmark_tasks.py --output docs/benchmarks/tasks-<date>.json` (`--keep-homes DIR` copies each harness home before the temp tree is deleted; OMP advisor turns are billed outside the CLI usage events, so the script sums them from `__advisor.jsonl` into `summary.<harness>.advisor_usage`). It uses GPT-6 Luna on the user's subscription; with `--model auto` (default) one probe prompt decides whether GPT is rate-limited, and only then the whole run uses Claude Haiku 5.5 through the Claude Code login (`fallback_reason` in the report records why). Results are small-N and should not be treated as conclusive.
+
+Use `--baseline-cli PATH --cli PATH --model luna --runs 3` to compare two native binaries.
+The runner alternates them on the same generated tasks in separate homes, without local project
+instructions or inherited credentials other than the imported subscription login. `--tasks resume lookup bugfix`
+includes a resumed multi-turn session with summary compaction and two short tasks. The report separates
+uncached input, cache reads, cache writes and output, counts `usage_aux`, and records each turn that missed
+its expected answer. Compare `median_total_tokens_by_task`, not cache-hit percentage alone.

@@ -2256,6 +2256,44 @@ async fn compaction_replaces_history() {
 }
 
 #[tokio::test]
+async fn previewed_read_keeps_exact_history_when_compacted_and_resumed() {
+    let meta = Meta::new(dir("compact-preview"), "mock/m".into(), "native".into());
+    let session = Session::create(&meta).unwrap();
+    let id = format!("old-read-{}", meta.id);
+    let result = format!("{}INTERIOR{}", "old head\n".repeat(70), "\nold tail".repeat(70));
+    let rule = "Use the exact RIVER: prefix even after resume.";
+    session.append(&Message::user(rule)).unwrap();
+    session.append(&Message { role: Role::Assistant, content: vec![call(&id, "read", json!({"path": "gone.txt"}))] }).unwrap();
+    session.append(&Message { role: Role::User, content: vec![Block::ToolResult {
+        tool_use_id: id, content: result.clone(), is_error: false,
+    }] }).unwrap();
+    for prompt in ["second prompt", "third prompt", "fourth prompt"] {
+        session.append(&Message::user(prompt)).unwrap();
+        session.append(&Message { role: Role::Assistant, content: vec![text("reply")] }).unwrap();
+    }
+    let raw = std::fs::read(Session::path(&meta.id)).unwrap();
+    let mock = Mock::new(vec![vec![text("RIVER:answer")]]);
+    let mut cfg = Config { old_read_previews: true, ..Config::default() };
+    cfg.learning.auto = false;
+    let cfg = Arc::new(cfg);
+    let mut agent = Agent::with_provider(cfg.clone(), &meta, Arc::new(Perms::new(Mode::Full)), mock.clone(), "m".into());
+    run(&mut agent, "/compact summary", Decision::Deny).await.0.unwrap();
+    assert!(mock.seen.lock().unwrap().is_empty());
+    assert_eq!(std::fs::read(Session::path(&meta.id)).unwrap(), raw);
+    drop(agent);
+    let mut resumed = Agent::with_provider(cfg, &meta, Arc::new(Perms::new(Mode::Full)), mock.clone(), "m".into());
+    run(&mut resumed, "continue", Decision::Deny).await.0.unwrap();
+    let seen = mock.seen.lock().unwrap();
+    let messages: Vec<Message> = serde_json::from_str(&seen[0].1).unwrap();
+    assert!(matches!(&messages[1].content[0], Block::Text { text } if text == rule));
+    let Block::ToolResult { content, .. } = &messages[3].content[0] else { panic!("missing preview") };
+    assert!(!content.contains("INTERIOR"));
+    let path = content.split_once("full output: ").unwrap().1.split_once(" ...]").unwrap().0;
+    assert_eq!(std::fs::read_to_string(path).unwrap(), result);
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
 async fn compaction_keeps_a_verbatim_tail() {
     let mock = Mock::new(vec![
         vec![text("seed")],

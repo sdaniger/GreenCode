@@ -18,9 +18,10 @@ mod usage;
 mod voice;
 mod webhooks;
 
-use crate::thread_view::{self, Item, Pal};
+use crate::thread_view::{self, Item, Pal, ThemeId};
 use cite::CiteForm;
 use files::FilesPanel;
+use gpui_kit::base::FocusTrapElement as _;
 use gpui_kit::component::{
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
     ActiveTheme, Theme,
@@ -38,13 +39,14 @@ use login::{method_label, AccountForm, DeviceForm, DeviceKind, KeyForm};
 use models::ModelPicker;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet, VecDeque};
+#[cfg(unix)]
 use std::os::{
     fd::{FromRawFd, OwnedFd},
     unix::process::CommandExt,
 };
 use std::{ops::Range, path::PathBuf, sync::Arc};
 use terminal::{Term, TerminalSet};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, oneshot};
 
 #[derive(Clone, Copy, PartialEq)]
@@ -348,13 +350,13 @@ fn take_utf8(pending: &mut Vec<u8>, chunk: &[u8]) -> String {
     out
 }
 
-async fn terminal_output(
-    mut stdout: impl tokio::io::AsyncRead + Unpin,
+fn terminal_output(
+    mut stdout: impl std::io::Read,
     tx: mpsc::UnboundedSender<String>,
 ) {
     let mut buf = [0u8; 8192];
     let mut pending = Vec::new();
-    while let Ok(n) = stdout.read(&mut buf).await {
+    while let Ok(n) = stdout.read(&mut buf) {
         if n == 0 {
             break;
         }
@@ -368,13 +370,14 @@ async fn terminal_output(
     }
 }
 
+#[cfg(unix)]
 fn terminal_command(
     cwd: &std::path::Path,
     launch: Option<&greencode_core::handoff::Launch>,
 ) -> std::io::Result<(
     tokio::process::Command,
     Arc<OwnedFd>,
-    tokio::fs::File,
+    std::fs::File,
     tokio::fs::File,
 )> {
     let mut master = -1;
@@ -399,7 +402,7 @@ fn terminal_command(
     }
     let master = unsafe { std::fs::File::from_raw_fd(master) };
     let slave = unsafe { std::fs::File::from_raw_fd(slave) };
-    let reader = tokio::fs::File::from_std(master.try_clone()?);
+    let reader = master.try_clone()?;
     let writer = tokio::fs::File::from_std(master.try_clone()?);
     let mut command = if let Some(launch) = launch {
         let program = launch.argv.first().ok_or_else(|| {
@@ -412,8 +415,14 @@ fn terminal_command(
             .env("PATH", &launch.path_env);
         command
     } else {
-        let mut command = std::process::Command::new("/bin/zsh");
-        command.args(["-il"]);
+        let mut command = if cfg!(target_os = "macos") {
+            let mut command = std::process::Command::new("/bin/zsh");
+            command.arg("-l");
+            command
+        } else {
+            std::process::Command::new(std::env::var_os("SHELL").unwrap_or_else(|| "/bin/sh".into()))
+        };
+        command.arg("-i");
         command
     };
     command
@@ -646,7 +655,7 @@ enum Act {
     OpenCodeEffort(Option<String>),
     OpenFile(PathBuf),
     Revoke(String),
-    Theme(Option<bool>),
+    Theme(ThemeId),
     /// A model of any backend; switches the thread's backend, or opens a new thread when it has already started.
     BackendModel(String, String),
     RefreshBackendModels,
@@ -756,6 +765,7 @@ pub struct Workspace {
     palette_skills: Vec<String>,
     palette_scroll: ScrollHandle,
     settings_scroll: ScrollHandle,
+    settings_focus: FocusHandle,
     /// Index into `SETTINGS_TABS`; opening settings starts at 一般.
     settings_tab: usize,
     /// Highlighted palette row; ↑/↓ move it, Enter runs it.
@@ -851,18 +861,18 @@ fn extension_text(text: &str) -> String {
     output
 }
 
-/// Sections of the settings screen, in sidebar order.
-const SETTINGS_TABS: [&str; 6] = [
-    "一般",
-    "モデルと権限",
-    "接続",
-    "ツール",
-    "プロジェクト",
-    "キーとファイル",
+/// Sections of the settings screen, in sidebar order; icons must be among gpui-kit's bundled defaults.
+const SETTINGS_TABS: [(&str, Ic); 6] = [
+    ("一般", Ic::Settings2),
+    ("モデルと権限", Ic::Bot),
+    ("接続", Ic::Network),
+    ("ツール", Ic::SquareTerminal),
+    ("プロジェクト", Ic::Folder),
+    ("キーとファイル", Ic::FileText),
 ];
 
 /// Slash commands handled by the GUI in native threads, for completion.
-const BUILTINS: [&str; 45] = [
+const BUILTINS: [&str; 46] = [
     "skill",
     "webhook",
     "webhook-secret",
@@ -900,6 +910,7 @@ const BUILTINS: [&str; 45] = [
     "update",
     "goal",
     "terminal",
+    "theme",
     "stash",
     "rename",
     "snooze",
@@ -917,6 +928,7 @@ const HELP: &str = "/model [provider/model], /models  モデルを選ぶ（引�
 /fork  スレッドを複製   /export  Markdown に書き出し   /import  Claude Code / Codex セッションを開く
 /attach  ファイルを添付（画像は ⌘V で貼り付け可。ウィンドウへのドラッグ＆ドロップも可）
 /effort [low|medium|high]  思考の強さ   /sandbox  bash の書き込み制限
+/theme [名前]  テーマ切替（emerald / emerald-light / paper / sand / graphite / light / dark / system）
 /settings  設定画面（⌘,）   !コマンド  シェルコマンドを直接実行
 /compact [snap|summary]  会話を圧縮（snap は画像に退避、モデル呼び出しなし）
 /to NAME 指示  サブエージェントに指示
@@ -1029,6 +1041,20 @@ fn speech_text(markdown: &str) -> String {
 
 fn spawn_external(program: &str, args: &[&str]) {
     if !cfg!(test) {
+        #[cfg(not(target_os = "macos"))]
+        if program == "/usr/bin/open" {
+            match args {
+                ["-a", "Visual Studio Code", path] => { let _ = open::with_detached(path, "code"); }
+                ["-R", path] => {
+                    if let Some(dir) = std::path::Path::new(path).parent() {
+                        let _ = open::that_detached(dir);
+                    }
+                }
+                ["-t", target] | [target] => { let _ = open::that_detached(target); }
+                _ => {}
+            }
+            return;
+        }
         let _ = std::process::Command::new(program).args(args).spawn();
     }
 }
@@ -1113,6 +1139,185 @@ fn chip(id: impl Into<ElementId>, label: impl Into<SharedString>, pal: Pal) -> S
         .child(label.into())
 }
 
+/// Settings content laid out as in T3 Code: titled sections, each a bordered card of divided rows.
+struct SettingsPage {
+    pal: Pal,
+    groups: Vec<(&'static str, Vec<AnyElement>)>,
+}
+
+impl SettingsPage {
+    fn section(mut self, title: &'static str) -> Self {
+        self.groups.push((title, Vec::new()));
+        self
+    }
+
+    fn child(mut self, element: impl IntoElement) -> Self {
+        if self.groups.is_empty() {
+            self.groups.push(("", Vec::new()));
+        }
+        self.groups.last_mut().unwrap().1.push(element.into_any_element());
+        self
+    }
+
+    fn children<E: IntoElement>(mut self, elements: impl IntoIterator<Item = E>) -> Self {
+        for element in elements {
+            self = self.child(element);
+        }
+        self
+    }
+
+    fn build(self) -> Div {
+        let pal = self.pal;
+        div().flex().flex_col().gap_6().children(self.groups.into_iter().map(move |(title, rows)| {
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .when(!title.is_empty(), |d| {
+                    d.child(
+                        div()
+                            .px_1()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(pal.muted)
+                            .child(title),
+                    )
+                })
+                .child(
+                    div()
+                        .rounded_xl()
+                        .border_1()
+                        .border_color(pal.line)
+                        .bg(pal.card)
+                        .overflow_hidden()
+                        .children(rows.into_iter().enumerate().map(move |(i, row)| {
+                            div()
+                                .px_4()
+                                .py_2p5()
+                                .when(i > 0, |d| d.border_t_1().border_color(pal.line))
+                                .child(row)
+                        })),
+                )
+        }))
+    }
+}
+
+fn theme_preview(pal: Pal) -> Div {
+    let line = |w: f32| {
+        div().w(relative(w)).h_1().rounded_full().bg(pal.muted.opacity(0.33))
+    };
+    div()
+        .size_full()
+        .flex()
+        .bg(pal.panel)
+        .child(
+            div().w(relative(0.24)).h_full().min_w_0().bg(pal.sidebar)
+                .border_r_1().border_color(pal.line).p_2()
+                .flex().flex_col().gap_2()
+                .child(div().w(relative(0.72)).h_1p5().rounded_full().bg(pal.accent))
+                .child(line(0.83)).child(line(0.65)).child(line(0.76)),
+        )
+        .child(
+            div().flex_1().min_w_0().p_2().flex().flex_col().gap_2()
+                .child(line(0.37))
+                .child(
+                    div().w(relative(0.68)).ml_auto().h_4().rounded_md().bg(pal.selected),
+                )
+                .child(line(0.78))
+                .child(line(0.58))
+                .child(
+                    div().mt_auto().h_5().rounded_md().border_1().border_color(pal.line)
+                        .bg(pal.card).flex().items_center().justify_end().px_1()
+                        .child(div().size_2p5().rounded_sm().bg(pal.accent)),
+                ),
+        )
+}
+
+fn appearance_preview(theme: ThemeId) -> Div {
+    let frame = div().w_full().h(px(112.)).flex().rounded_md().overflow_hidden();
+    if theme == ThemeId::System {
+        frame.children([(ThemeId::Light, false), (ThemeId::Dark, true)].map(|(t, right)| {
+            div().relative().w(relative(0.5)).h_full().overflow_hidden().child(
+                div().absolute().top_0().h_full().w(relative(2.))
+                    .when(right, |d| d.right_0())
+                    .when(!right, |d| d.left_0())
+                    .child(theme_preview(Pal::for_theme(t, false))),
+            )
+        }))
+    } else {
+        frame.child(theme_preview(Pal::for_theme(theme, false)))
+    }
+}
+
+fn theme_settings(current: ThemeId, pal: Pal, cx: &mut Context<Workspace>) -> Div {
+    let tile = |theme: ThemeId, cx: &mut Context<Workspace>| {
+        let selected = theme == current;
+        gpui_kit::base::Button::new((ElementId::from("theme"), theme.id()))
+            .accessibility_label(theme.label())
+            .aria_toggled(if selected { accesskit::Toggled::True } else { accesskit::Toggled::False })
+            .min_w_0()
+            .p_2()
+            .rounded_lg()
+            .border_1()
+            .border_color(if selected { pal.accent } else { pal.line })
+            .bg(if selected { pal.selected } else { pal.card })
+            .text_color(pal.fg)
+            .cursor_pointer()
+            .hover(|s| s.bg(pal.hover))
+            .focus(|s| s.border_color(pal.fg))
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.run(Act::Theme(theme), window, cx)
+            }))
+    };
+    let label = |theme: ThemeId| {
+        div().flex().items_center().gap_1p5().min_w_0().text_sm()
+            .font_weight(FontWeight::MEDIUM)
+            .child(div().min_w_0().truncate().child(theme.label()))
+            .when(theme == current, |d| {
+                d.child(div().flex_shrink_0().text_color(pal.accent).child(Ic::Check))
+            })
+    };
+    let heading = |text| div().text_base().font_weight(FontWeight::SEMIBOLD).child(text);
+    div()
+        .flex().flex_col().gap_3().pb_6()
+        .child(heading("外観モード"))
+        .child(
+            div().grid().grid_cols(3).gap_3().children(
+                [ThemeId::System, ThemeId::Light, ThemeId::Dark].map(|t| {
+                    tile(t, cx).child(
+                        div().w_full().flex().flex_col().items_center().gap_2()
+                            .child(appearance_preview(t))
+                            .child(label(t)),
+                    )
+                }),
+            ),
+        )
+        .child(heading("テーマ").pt_2())
+        .child(
+            div().grid().grid_cols(2).gap_2().children(
+                ThemeId::ALL.into_iter()
+                    .filter(|t| !matches!(t, ThemeId::System | ThemeId::Light | ThemeId::Dark))
+                    .map(|t| {
+                        let swatch = Pal::for_theme(t, false);
+                        tile(t, cx).child(
+                            div().w_full().min_w_0().flex().items_center().gap_2()
+                                .child(
+                                    div().size_7().flex_shrink_0().flex().items_center()
+                                        .justify_center().rounded_full().bg(swatch.sidebar)
+                                        .border_1().border_color(swatch.muted)
+                                        .child(
+                                            div().size_5().flex().items_center().justify_center()
+                                                .rounded_full().bg(swatch.card)
+                                                .child(div().size_2p5().rounded_full().bg(swatch.accent)),
+                                        ),
+                                )
+                                .child(label(t)),
+                        )
+                    }),
+            ),
+        )
+}
+
 type Ic = gpui_kit::assets::IconName;
 
 /// A 26px square, borderless button for toolbars; `icon` is an icon or a text glyph.
@@ -1187,8 +1392,10 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Self {
         Theme::sync_system_appearance(Some(window), cx);
-        cx.observe_window_appearance(window, |_, window, cx| {
-            Theme::sync_system_appearance(Some(window), cx)
+        cx.observe_window_appearance(window, |this, window, cx| {
+            if this.theme_id() == ThemeId::System {
+                this.apply_theme(window, cx);
+            }
         })
         .detach();
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -1285,6 +1492,7 @@ impl Workspace {
             palette_skills: Vec::new(),
             palette_scroll: ScrollHandle::default(),
             settings_scroll: ScrollHandle::default(),
+            settings_focus: cx.focus_handle(),
             settings_tab: 0,
             palette_ix: 0,
             fetched_models: vec![],
@@ -1408,17 +1616,7 @@ impl Workspace {
             }
         }
         // Settings chosen in earlier runs.
-        if let Some(dark) = this.ui["theme"].as_bool() {
-            Theme::change(
-                if dark {
-                    gpui_kit::component::ThemeMode::Dark
-                } else {
-                    gpui_kit::component::ThemeMode::Light
-                },
-                Some(window),
-                cx,
-            );
-        }
+        this.apply_theme(window, cx);
         // Scheduled prompts are checked twice a minute while the app runs. Not in UI tests, which drive time themselves.
         if !cfg!(test) {
             cx.spawn(async move |this, cx| loop {
@@ -1755,11 +1953,14 @@ impl Workspace {
             if let Err(e) = term.save(&cwd) {
                 self.fail(format!("ターミナルの出力を保存できません: {e}"));
             }
+            #[cfg(unix)]
             if let Some(process) = term.process.take() {
                 self.rt.spawn(async move {
                     let _ = process.lock().await.kill().await;
                 });
             }
+            #[cfg(windows)]
+            drop(term.process.take());
         }
         if self.active_terminal().is_none() {
             self.terminal_visible = false;
@@ -1789,6 +1990,11 @@ impl Workspace {
         }
         if self.thread().perms.mode() == Mode::Plan {
             self.fail("プランモードでは端末 UI に引き継げません");
+            return;
+        }
+        // shortcut: require a verified empty process tree before supporting session handoff on Windows.
+        if cfg!(windows) {
+            self.fail("Windows では Pi / OMP の端末 UI に引き継げません");
             return;
         }
         if self.handoffs.contains(&meta.id) || greencode_core::handoff::is_open(&meta.id) {
@@ -1913,11 +2119,20 @@ impl Workspace {
         let mut stdin = None;
         let mut master = None;
         let mut receiver = None;
+        #[allow(unused_mut)]
         let mut private_kill = None;
-        let mut private_wait = None;
+        #[allow(unused_mut)]
+        let mut private_wait: Option<tokio::task::JoinHandle<Result<std::process::ExitStatus, String>>> = None;
         if !cfg!(test) || launch.is_some() {
-            let (mut command, fd, stdout, input) =
-                match terminal_command(&cwd, launch.as_ref().map(|(launch, _)| launch)) {
+            #[cfg(unix)]
+            let (fd, stdout, input) = {
+                let launched = terminal_command(&cwd, launch.as_ref().map(|(launch, _)| launch))
+                    .and_then(|(mut command, fd, stdout, input)| {
+                        // tokio::process requires a runtime even on the GPUI main thread.
+                        let _guard = self.rt.enter();
+                        Ok((command.spawn()?, fd, stdout, input))
+                    });
+                let (child, fd, stdout, input) = match launched {
                     Ok(pty) => pty,
                     Err(e) => {
                         if let Some((_, meta)) = &launch {
@@ -1928,30 +2143,30 @@ impl Workspace {
                         return;
                     }
                 };
-            // `tokio::process` needs a runtime context; this runs on the GPUI main thread.
-            let child = match self.rt.block_on(async { command.spawn() }) {
-                Ok(child) => child,
+                if launch.is_some() {
+                    let (kill, rx) = oneshot::channel();
+                    private_kill = Some(kill);
+                    private_wait = Some(self.rt.spawn(terminal::supervise(child, rx)));
+                } else {
+                    process = Some(Arc::new(tokio::sync::Mutex::new(child)));
+                }
+                (fd, stdout, input)
+            };
+            #[cfg(windows)]
+            let (fd, stdout, input) = match terminal::windows_pty(&self.rt, &cwd, TERM_SIZE) {
+                Ok((child, fd, stdout, input)) => {
+                    process = Some(child);
+                    (fd, stdout, input)
+                }
                 Err(e) => {
-                    if let Some((_, meta)) = &launch {
-                        let _ = greencode_core::handoff::abandon(meta);
-                        self.handoffs.remove(&meta.id);
-                    }
                     self.fail(format!("PTY を起動できません: {e}"));
                     return;
                 }
             };
-            drop(command);
             master = Some(fd);
-            if launch.is_some() {
-                let (kill, rx) = oneshot::channel();
-                private_kill = Some(kill);
-                private_wait = Some(self.rt.spawn(terminal::supervise(child, rx)));
-            } else {
-                process = Some(Arc::new(tokio::sync::Mutex::new(child)));
-            }
             stdin = Some(Arc::new(tokio::sync::Mutex::new(input)));
             let (tx, rx) = mpsc::unbounded_channel();
-            self.rt.spawn(terminal_output(stdout, tx));
+            self.rt.spawn_blocking(move || terminal_output(stdout, tx));
             receiver = Some(rx);
         }
         let state = cx.new(|cx| InputState::new(window, cx).placeholder("PTY に入力して ⏎"));
@@ -1979,7 +2194,7 @@ impl Workspace {
                         handle.spawn(async move {
                             let mut stdin = stdin.lock().await;
                             let _ = stdin.write_all(text.as_bytes()).await;
-                            let _ = stdin.write_all(b"\n").await;
+                            let _ = stdin.write_all(b"\r").await;
                             let _ = stdin.flush().await;
                         });
                     }
@@ -2524,6 +2739,15 @@ impl Workspace {
                 cx,
             ),
             "settings" => self.run(Act::Settings, window, cx),
+            "theme" => {
+                if arg.is_empty() {
+                    self.open_palette("テーマ: ", window, cx);
+                } else if let Some(t) = ThemeId::parse(arg) {
+                    self.run(Act::Theme(t), window, cx);
+                } else {
+                    self.fail("使い方: /theme [system|emerald|emerald-light|paper|sand|graphite|light|dark]");
+                }
+            }
             "diff" => self.run(Act::ToggleDiff, window, cx),
             "provider" => self.run(Act::AddProvider, window, cx),
             "login" => {
@@ -2577,6 +2801,42 @@ impl Workspace {
         }
         cx.notify();
         true
+    }
+
+    fn theme_id(&self) -> ThemeId {
+        ThemeId::from_json(&self.ui["theme"])
+    }
+
+    fn window_is_dark(window: &Window) -> bool {
+        matches!(
+            window.appearance(),
+            gpui_kit::WindowAppearance::Dark | gpui_kit::WindowAppearance::VibrantDark
+        )
+    }
+
+    fn pal(&self, cx: &App) -> Pal {
+        Pal::for_theme(self.theme_id(), cx.theme().is_dark())
+    }
+
+    fn apply_theme(&self, window: &mut Window, cx: &mut App) {
+        let id = self.theme_id();
+        if id == ThemeId::System {
+            Theme::sync_system_appearance(Some(window), cx);
+        } else {
+            let dark = id.is_dark(Self::window_is_dark(window));
+            Theme::change(
+                if dark {
+                    gpui_kit::component::ThemeMode::Dark
+                } else {
+                    gpui_kit::component::ThemeMode::Light
+                },
+                Some(window),
+                cx,
+            );
+        }
+        let dark = cx.theme().is_dark();
+        let pal = Pal::for_theme(id, dark);
+        Theme::update(cx, |t| pal.sync_kit_theme(t, dark));
     }
 
     fn thread(&self) -> &Thread {
@@ -4017,10 +4277,12 @@ impl Workspace {
                 "設定を開く: allow（許可ルール）".into(),
                 Act::OpenFile(greencode_core::home().join("allow")),
             ),
-            ("テーマ: システムに合わせる".into(), Act::Theme(None)),
-            ("テーマ: ライト".into(), Act::Theme(Some(false))),
-            ("テーマ: ダーク".into(), Act::Theme(Some(true))),
         ];
+        let active_theme = self.theme_id();
+        v.extend(ThemeId::ALL.into_iter().map(|t| {
+            let suffix = if t == active_theme { " ✓" } else { "" };
+            (format!("{}{suffix}", t.palette_label()), Act::Theme(t))
+        }));
         v.extend(greencode_core::agents::AGENTS.iter().map(|a| {
             (
                 format!("エージェントをインストール/更新: {}", a.name),
@@ -4954,6 +5216,7 @@ impl Workspace {
                     self.settings = Some((fields, subs));
                     self.settings_tab = 0;
                     self.settings_scroll = ScrollHandle::default();
+                    self.settings_focus.focus(window, cx);
                     self.refresh_agent_versions(cx);
                 }
             }
@@ -5559,21 +5822,10 @@ impl Workspace {
                     None => self.notice(format!("許可ルールを削除しました: {key}")),
                 }
             }
-            Act::Theme(dark) => {
-                self.ui["theme"] = json!(dark);
+            Act::Theme(theme) => {
+                self.ui["theme"] = theme.to_json();
                 self.save_ui();
-                match dark {
-                    Some(dark) => Theme::change(
-                        if dark {
-                            gpui_kit::component::ThemeMode::Dark
-                        } else {
-                            gpui_kit::component::ThemeMode::Light
-                        },
-                        Some(window),
-                        cx,
-                    ),
-                    None => Theme::sync_system_appearance(Some(window), cx),
-                }
+                self.apply_theme(window, cx);
             }
             Act::ImportSessionFiles => {
                 let rx = cx.prompt_for_paths(PathPromptOptions {
@@ -6508,7 +6760,7 @@ impl Workspace {
     }
 
     fn item(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
-        let pal = Pal::new(cx.theme().is_dark());
+        let pal = self.pal(cx);
         let mono = cx.theme().mono_font_family.clone();
         let t = &self.threads[self.active];
         let Some(item) = t.items.get(ix) else {
@@ -7084,7 +7336,7 @@ impl Workspace {
                     .rounded_md()
                     .text_sm()
                     .cursor_pointer()
-                    .when(primary, |b| b.bg(pal.accent).text_color(gpui_kit::white()))
+                    .when(primary, |b| b.bg(pal.accent).text_color(pal.accent_fg))
                     .when(!primary, |b| b.bg(pal.hover).hover(|s| s.bg(pal.selected)))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.answer(d, cx)))
                     .child(label)
@@ -7233,7 +7485,7 @@ impl Workspace {
                                     b.bg(pal.fg).text_color(pal.panel)
                                 })
                                 .when(can_send && status != Status::Idle, |b| {
-                                    b.bg(pal.accent).text_color(gpui_kit::white())
+                                    b.bg(pal.accent).text_color(pal.accent_fg)
                                 })
                                 .when(!can_send, |b| b.bg(pal.selected))
                                 .child(if !can_send {
@@ -7832,22 +8084,13 @@ impl Workspace {
     fn settings_view(&self, pal: Pal, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let (fields, _) = self.settings.as_ref()?;
         let t = self.thread();
-        let heading = |text: &'static str| {
-            div()
-                .pt_3()
-                .pb_1()
-                .text_xs()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(pal.muted)
-                .child(text)
-        };
         let row = |label: SharedString, control: AnyElement| {
             div()
                 .flex()
                 .items_center()
                 .justify_between()
                 .gap_3()
-                .py_0p5()
+                .min_h(px(28.))
                 .child(div().flex_1().truncate().child(label))
                 .child(control)
         };
@@ -7856,7 +8099,9 @@ impl Workspace {
         let mut button = |value: String, act: Act, cx: &mut Context<Self>| {
             n += 1;
             chip(("setting", n), value, pal)
-                .bg(pal.hover)
+                .border_1()
+                .border_color(pal.line)
+                .bg(pal.panel)
                 .text_color(pal.fg)
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.run(act.clone(), window, cx)
@@ -7886,7 +8131,6 @@ impl Workspace {
             })
             .collect();
         let modes = [Mode::Ask, Mode::AutoEdit, Mode::Full, Mode::Plan];
-        let theme = self.ui["theme"].as_bool();
         let effort = self.cfg.effort.clone();
         let next_effort = match effort.as_deref() {
             None => Some("low"),
@@ -7916,67 +8160,86 @@ impl Workspace {
         });
 
         let tab = self.settings_tab.min(SETTINGS_TABS.len() - 1);
+        // Full-window page as in T3 Code: a sidebar of sections, then the section's cards.
         let nav = div()
+            .w(px(224.))
+            .h_full()
             .flex()
             .flex_col()
-            .gap_0p5()
-            .w(px(150.))
-            .flex_none()
-            .pr_3()
+            .flex_shrink_0()
+            .bg(pal.sidebar)
             .border_r_1()
             .border_color(pal.line)
-            .children(SETTINGS_TABS.iter().enumerate().map(|(i, name)| {
-                let item = div()
-                    .id(("settings-tab", i))
+            // Room for the traffic lights; the strip also drags the window.
+            .child(
+                div()
+                    .h(px(44.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .pl(px(78.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
+                    .child("設定"),
+            )
+            .child(div().flex().flex_col().gap_0p5().px_2().children(
+                SETTINGS_TABS.iter().enumerate().map(|(i, (name, icon))| {
+                    div()
+                        .id(("settings-tab", i))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(pal.hover))
+                        .map(|d| {
+                            if i == tab {
+                                d.bg(pal.selected).text_color(pal.fg)
+                            } else {
+                                d.text_color(pal.muted)
+                            }
+                        })
+                        .child(*icon)
+                        .child(*name)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.run(Act::SettingsTab(i), window, cx)
+                        }))
+                }),
+            ))
+            .child(div().flex_1())
+            .child(
+                div()
+                    .id("settings-back")
+                    .m_2()
+                    .flex()
+                    .items_center()
+                    .gap_2()
                     .px_2()
                     .py_1()
                     .rounded_md()
+                    .text_color(pal.muted)
                     .cursor_pointer()
-                    .child(*name)
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        this.run(Act::SettingsTab(i), window, cx)
-                    }));
-                if i == tab {
-                    item.bg(pal.hover).text_color(pal.fg)
-                } else {
-                    item.text_color(pal.muted)
-                }
-            }));
-        let header = div()
-            .flex()
-            .justify_between()
-            .child(div().font_weight(FontWeight::MEDIUM).child("設定"))
-            .child(button("閉じる  esc".into(), Act::Settings, cx));
-        let mut col = div()
-            .id("settings-body")
-            .flex_1()
-            .min_w_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.settings_scroll)
-            .flex()
-            .flex_col()
-            .pl_4();
+                    .hover(|s| s.bg(pal.hover).text_color(pal.fg))
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.run(Act::Settings, window, cx)
+                    }))
+                    .child(Ic::ArrowLeft)
+                    .child("戻る")
+                    .child(div().flex_1())
+                    .child(div().text_xs().child("esc")),
+            );
+        let title = div()
+            .pb_4()
+            .text_xl()
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(SETTINGS_TABS[tab].0);
+        let mut col = SettingsPage { pal, groups: Vec::new() };
         match tab {
             0 => {
                 col = col
-                    .child(heading("表示と通知"))
-                    .child(row(
-                        "テーマ".into(),
-                        button(
-                            match theme {
-                                None => "システム",
-                                Some(false) => "ライト",
-                                Some(true) => "ダーク",
-                            }
-                            .into(),
-                            Act::Theme(match theme {
-                                None => Some(false),
-                                Some(false) => Some(true),
-                                Some(true) => None,
-                            }),
-                            cx,
-                        ),
-                    ))
+                    .section("表示と通知")
                     .child(row(
                         "完了・承認待ちの通知".into(),
                         button(
@@ -7993,7 +8256,7 @@ impl Workspace {
                             cx,
                         ),
                     ))
-                    .child(heading("入力"))
+                    .section("入力")
                     .child(row(
                         "実行中に送信したメッセージ".into(),
                         button(
@@ -8044,7 +8307,7 @@ impl Workspace {
                             cx,
                         ),
                     ))
-                    .child(heading("スレッドの自動保管"))
+                    .section("スレッドの自動保管")
                     .child(row(
                         "非アクティブ 7 日で保管".into(),
                         button(
@@ -8077,7 +8340,7 @@ impl Workspace {
                             cx,
                         ),
                     ))
-                    .child(heading("リモートアクセス"))
+                    .section("リモートアクセス")
                     .child(
                         div()
                             .flex()
@@ -8099,7 +8362,7 @@ impl Workspace {
             }
             1 => {
                 col = col
-                    .child(heading("モデル"))
+                    .section("モデル")
                     .child(row(
                         format!("新規スレッドの既定モデル: {}", self.cfg.model).into(),
                         button(
@@ -8116,7 +8379,7 @@ impl Workspace {
                             cx,
                         ),
                     ))
-                    .child(heading("権限"))
+                    .section("権限")
                     .child(row(
                         "新規スレッドの権限".into(),
                         button(
@@ -8157,7 +8420,7 @@ impl Workspace {
                             cx,
                         ),
                     ))
-                    .child(heading("許可ルール（常に許可）"))
+                    .section("許可ルール（常に許可）")
                     .children(
                         t.perms
                             .allowed()
@@ -8171,10 +8434,10 @@ impl Workspace {
                         )
                     }))
             }
-            2 => col = col.child(self.connections_view(pal, cx)),
+            2 => {}
             3 => {
                 col = col
-                    .child(heading("コンテキストと学習"))
+                    .section("コンテキストと学習")
                     .child(compaction_row)
                     .child(row(
                         "自己改善の自動学習".into(),
@@ -8184,12 +8447,12 @@ impl Workspace {
                             cx,
                         ),
                     ))
-                    .child(heading("拡張ツール（ext・OMP 相当）"))
+                    .section("拡張ツール（ext・OMP 相当）")
                     .children(ext_rows)
             }
             4 => {
                 col =
-                    col.child(heading("このプロジェクトの既定"))
+                    col.section("このプロジェクトの既定")
                         .child(row(
                             SharedString::from(
                                 match (default["model"].as_str(), default["backend"].as_str()) {
@@ -8210,7 +8473,7 @@ impl Workspace {
                                 .child(button("解除".into(), Act::ClearProjectDefault, cx))
                                 .into_any_element(),
                         ))
-                        .child(heading("ワークツリー"))
+                        .section("ワークツリー")
                         .child(
                             div()
                                 .text_xs()
@@ -8293,7 +8556,7 @@ impl Workspace {
                 }
             }
             _ => {
-                col = col.child(heading("キーバインド（キー → スラッシュコマンド）"));
+                col = col.section("キーバインド（キー → スラッシュコマンド）");
                 for (key, command) in self.ui["keys"].as_object().into_iter().flatten() {
                     col = col.child(row(
                         format!("{key}  →  {}", command.as_str().unwrap_or("")).into(),
@@ -8311,7 +8574,7 @@ impl Workspace {
                             .child(div().flex_1().child(Input::new(&fields[1])))
                             .child(button("追加".into(), Act::Bind, cx)),
                     )
-                    .child(heading("設定ファイル"))
+                    .section("設定ファイル")
                     .child(
                         div()
                             .flex()
@@ -8334,29 +8597,67 @@ impl Workspace {
                     );
             }
         }
-        let panel = div()
-            .w(px(920.))
-            .h(relative(0.85))
-            .flex()
-            .flex_col()
-            .p_4()
-            .self_start()
-            .rounded_xl()
-            .border_1()
-            .border_color(pal.line)
-            .bg(pal.card)
-            .shadow_lg()
-            .child(header)
-            .children(banner)
-            .child(div().flex().flex_1().min_h_0().pt_3().child(nav).child(col));
+        let content = if tab == 2 {
+            // The connection list and detail scroll on their own, so this page fills the height.
+            div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .px_8()
+                .pb_6()
+                .child(title)
+                .children(banner)
+                .child(div().flex_1().min_h_0().child(self.connections_view(pal, cx)))
+                .into_any_element()
+        } else {
+            div()
+                .id("settings-body")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .track_scroll(&self.settings_scroll)
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(px(760.))
+                        .mx_auto()
+                        .px_8()
+                        .pb_10()
+                        .child(title)
+                        .children(banner.map(|b| b.pb_4()))
+                        .when(tab == 0, |d| d.child(theme_settings(self.theme_id(), pal, cx)))
+                        .child(col.build()),
+                )
+                .into_any_element()
+        };
         Some(
             div()
                 .absolute()
                 .inset_0()
                 .flex()
-                .justify_center()
-                .pt(px(60.))
-                .child(panel),
+                .bg(pal.panel)
+                .occlude()
+                .child(nav)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .flex()
+                        .flex_col()
+                        // Drag strip level with the sidebar's title row.
+                        .child(
+                            div()
+                                .h(px(44.))
+                                .flex_shrink_0()
+                                .on_mouse_down(MouseButton::Left, |_, window, _| {
+                                    window.start_window_move()
+                                }),
+                        )
+                        .child(content),
+                )
+                .focus_trap("settings-focus", &self.settings_focus),
         )
     }
 
@@ -8464,7 +8765,7 @@ impl Render for Workspace {
         if cx.theme().tokens.background.a != 0. {
             Theme::global_mut(cx).tokens.background = gpui_kit::transparent_black().into();
         }
-        let pal = Pal::new(cx.theme().is_dark());
+        let pal = self.pal(cx);
         let sidebar = self.sidebar(pal, cx).into_any_element();
         let main = self.main_panel(pal, window, cx).into_any_element();
         let diff = self
@@ -8833,6 +9134,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[gpui_kit::test]
     async fn tab_in_the_terminal_field_reaches_the_shell(cx: &mut TestAppContext) {
         use std::io::Read;
@@ -12205,6 +12507,140 @@ mod tests {
             .unwrap_or_else(|| panic!("{}", &text[..text.len().min(80)]));
         assert!(path.contains("pastes/paste-"), "{text}");
         assert_eq!(std::fs::metadata(path).unwrap().len(), 40_000);
+    }
+
+    #[test]
+    fn theme_palettes_have_accessible_contrast_and_legacy_compat() {
+        use super::{Pal, ThemeId};
+
+        assert_eq!(ThemeId::from_json(&json!(null)), ThemeId::System);
+        assert_eq!(ThemeId::from_json(&json!(false)), ThemeId::Light);
+        assert_eq!(ThemeId::from_json(&json!(true)), ThemeId::Dark);
+        for t in ThemeId::ALL {
+            assert_eq!(ThemeId::from_json(&t.to_json()), t);
+            assert_eq!(ThemeId::parse(t.id()), Some(t));
+            assert_eq!(ThemeId::parse(t.label()), Some(t));
+        }
+
+        let composite = |fg: gpui_kit::Hsla, bg: gpui_kit::Hsla| -> [f32; 3] {
+            let f: gpui_kit::Rgba = fg.into();
+            let b: gpui_kit::Rgba = bg.into();
+            let a = f.a;
+            [
+                f.r * a + b.r * (1. - a),
+                f.g * a + b.g * (1. - a),
+                f.b * a + b.b * (1. - a),
+            ]
+        };
+        let lum = |c: [f32; 3]| -> f32 {
+            let lin = |v: f32| {
+                if v <= 0.03928 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * lin(c[0]) + 0.7152 * lin(c[1]) + 0.0722 * lin(c[2])
+        };
+        let contrast = |fg: gpui_kit::Hsla, bg: gpui_kit::Hsla| -> f32 {
+            let l1 = lum(composite(fg, bg));
+            let l2 = lum(composite(bg, gpui_kit::white()));
+            let (hi, lo) = if l1 >= l2 { (l1, l2) } else { (l2, l1) };
+            (hi + 0.05) / (lo + 0.05)
+        };
+
+        for t in [
+            ThemeId::Emerald,
+            ThemeId::EmeraldLight,
+            ThemeId::Paper,
+            ThemeId::Sand,
+            ThemeId::Graphite,
+            ThemeId::Light,
+            ThemeId::Dark,
+        ] {
+            let pal = Pal::for_theme(t, false);
+            assert!(contrast(pal.fg, pal.panel) >= 10.0, "{t:?} fg/panel");
+            assert!(contrast(pal.fg, pal.sidebar) >= 10.0, "{t:?} fg/sidebar");
+            assert!(contrast(pal.fg, pal.card) >= 9.0, "{t:?} fg/card");
+            assert!(contrast(pal.muted, pal.panel) >= 4.2, "{t:?} muted/panel");
+            let min_accent = if matches!(t, ThemeId::Light | ThemeId::Dark) {
+                4.0
+            } else {
+                4.5
+            };
+            assert!(
+                contrast(pal.accent, pal.panel) >= min_accent,
+                "{t:?} accent/panel"
+            );
+            let min_accent_fg = if matches!(t, ThemeId::Light | ThemeId::Dark) {
+                3.0
+            } else {
+                5.0
+            };
+            assert!(
+                contrast(pal.accent_fg, pal.accent) >= min_accent_fg,
+                "{t:?} accent_fg/accent"
+            );
+        }
+    }
+
+    #[gpui_kit::test]
+    async fn themes_switch_persist_and_support_slash_command(cx: &mut TestAppContext) {
+        use super::{Pal, ThemeId};
+        use gpui_kit::component::ActiveTheme;
+
+        let (ws, cx) = open(cx);
+        cx.update(|window, cx| {
+            ws.update(cx, |ws, cx| {
+                ws.run(super::Act::Theme(ThemeId::Emerald), window, cx);
+                assert!(cx.theme().is_dark());
+                assert_eq!(ws.theme_id(), ThemeId::Emerald);
+                assert_eq!(
+                    ws.pal(cx).accent,
+                    Pal::for_theme(ThemeId::Emerald, true).accent
+                );
+            });
+        });
+
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(greencode_core::home().join("ui.json")).unwrap())
+                .unwrap();
+        assert_eq!(saved["theme"], json!("emerald"));
+
+        cx.simulate_input("/theme paper");
+        cx.simulate_keystrokes("enter");
+        ws.read_with(cx, |ws, cx| {
+            assert!(!cx.theme().is_dark());
+            assert_eq!(ws.theme_id(), ThemeId::Paper);
+            assert_eq!(
+                ws.pal(cx).panel,
+                Pal::for_theme(ThemeId::Paper, false).panel
+            );
+        });
+
+        cx.simulate_input("/theme");
+        cx.simulate_keystrokes("enter");
+        assert!(ws.read_with(cx, |ws, cx| {
+            ws.palette
+                .as_ref()
+                .is_some_and(|p| p.0.read(cx).value() == "テーマ: ")
+        }));
+        cx.simulate_keystrokes("escape");
+
+        cx.update(|window, cx| {
+            let restored = cx.new(|cx| Workspace::new(Config::default(), None, window, cx));
+            restored.read_with(cx, |ws, cx| {
+                assert!(!cx.theme().is_dark());
+                assert_eq!(ws.theme_id(), ThemeId::Paper);
+            });
+
+            std::fs::write(greencode_core::home().join("ui.json"), r#"{"theme":true}"#).unwrap();
+            let legacy_dark = cx.new(|cx| Workspace::new(Config::default(), None, window, cx));
+            legacy_dark.read_with(cx, |ws, cx| {
+                assert!(cx.theme().is_dark());
+                assert_eq!(ws.theme_id(), ThemeId::Dark);
+            });
+        });
     }
 }
 

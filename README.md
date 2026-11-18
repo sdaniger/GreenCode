@@ -1,8 +1,18 @@
 # GreenCode
 
-A native agent workspace for macOS: Rust + GPUI, no WebView. Native mode runs in-process; external agents are lazy subprocesses.
+A native agent workspace for macOS, Linux and Windows: Rust + GPUI, no WebView. Native mode runs in-process; external agents are lazy subprocesses.
 
 T3 Code / OMP feature parity is in progress, not complete. The [feature ledger](docs/parity.md) records the remaining surface and verification gaps.
+
+## Downloads
+
+Download a [release archive](https://github.com/sdaniger/GreenCode/releases) for macOS (Apple Silicon or Intel),
+Linux x86-64 (built on Ubuntu 24.04), or Windows x86-64. Each contains `greencode` (desktop GUI) and
+`greencode-cli` (CLI/TUI), with `.exe` extensions on Windows. `SHA256SUMS` lists the SHA-256 of each archive.
+
+On Linux, the GUI needs X11 or Wayland, Vulkan, Fontconfig and XKB libraries. On Windows, install
+Git for Windows to use the native `bash` tool. The Windows embedded terminal uses ConPTY;
+Pi/OMP session handoff from the GUI is not available there. In-app updates remain macOS-only.
 
 ## Native terminal UI
 
@@ -17,6 +27,12 @@ This runs GreenCode's Rust agent, not OMP. Use `-p "PROMPT"` for one turn,
 `--text` for line-oriented input, and `--tui` to require a terminal. This is not
 a drop-in OMP replacement: use the installed OMP backend or its own terminal UI
 for OMP-only features. See the [supported mappings and differences](docs/parity.md#omp-execution-features).
+
+The native agent uses Ponytail (full) by default: make the smallest complete change,
+reuse existing code, and verify it without cutting safety or error handling. No
+plugin installation is required. A custom `system_prompt` in `config.toml` (or
+`--system-prompt TEXT` in the CLI) replaces the default, including Ponytail;
+`--append-system-prompt TEXT` keeps it. External backends keep their own prompts.
 
 Type `/help` for commands and `/hotkeys` for active application shortcuts.
 By default, `Alt+M` or `Ctrl+L` opens the model picker, `Ctrl+P` cycles models,
@@ -181,8 +197,10 @@ The listener is local only; a public URL requires your own tunnel, such as `clou
 - **Git**: the header shows the branch; the palette switches branches, commits through the agent, pushes and opens a pull request
   with `gh`. `/branch NAME`, `/push`, `/pr` do the same.
 - **Terminal** (⌘J): project-scoped PTY tabs with 5,000 lines of history; the terminal resizes with the panel. Close or add tabs in the drawer; selected output can be inserted into the composer. The last 500 lines are saved locally when a tab closes or the app exits.
-- **Settings**: open the editable settings window with `⌘,`, `/settings`, or the palette. A sidebar splits it into 一般 (theme, notifications,
-  tool visibility, input, thread settlement, remote access), モデルと権限 (default model, effort, permission modes, sandbox, allow rules),
+- **Settings**: open settings with `⌘,`, `/settings`, or the palette. 一般 shows preview cards for
+  System, Light and Dark, followed by swatches for Emerald, Emerald Light, Paper, Sand and Graphite.
+  Select a card or use `/theme` to switch immediately. The sidebar also offers モデルと権限
+  (default model, effort, permission modes, sandbox, allow rules),
   接続 (providers and agents), ツール (automatic compaction, learning, individual `ext` tools), プロジェクト (project defaults, worktrees)
   and キーとファイル (custom keybindings, config files); it always opens on 一般. Values persist in
   `~/.greencode/ui.json`; custom bindings can also be represented as `{"keys": {"cmd-shift-p": "/plan"}}`.
@@ -251,6 +269,7 @@ compact_at = 250000                       # summarize history above this many co
 model_compact_at = { "openai/gpt-5*" = 120000, "openai/gpt-5.4" = 180000 }
 compaction_mid_turn = true                 # false delays main-agent auto-compaction until the next user turn
 compaction = "summary"                    # summary | snap
+old_read_previews = false                 # opt in to replaying older successful reads as recoverable excerpts
 
 [providers.my-llm]                        # custom provider; the GUI palette's "カスタムプロバイダを追加…" appends this block
 kind = "openai"                           # openai (any OpenAI-compatible server) or anthropic
@@ -272,10 +291,18 @@ xai, groq, deepseek, mistral, together, fireworks, cerebras, deepinfra, perplexi
 github (`GITHUB_TOKEN`), moonshot, zai, and keyless ollama and lmstudio. A `[providers.NAME]` entry of the same name overrides one.
 Bedrock, Vertex AI and Azure deployment URLs use their own authentication and are not built in.
 
-On macOS native threads have a `computer` tool that drives apps in the background through the accessibility API: it reads a
-window's elements and screenshot, clicks, types, presses keys, scrolls and drags without moving your cursor or changing the
-frontmost app. It asks per app (stored as `computer:<app>` in `allow`), needs the Accessibility and Screen Recording permissions
-for GreenCode (or the terminal running it), a vision-capable model, and `swiftc` on first use to build its helper.
+On macOS native threads have a `computer` tool with Codex Computer Use's actions: `list_apps`, `get_app_state`, `click`,
+`drag`, `paste`, `perform_secondary_action`, `press_key`, `scroll`, `select_text`, `set_value` and `type_text`.
+Get the app state first, then use its screenshot coordinates for background clicks (including double-click and
+right-click), drags and scrolling. Input is addressed to that window without moving the physical cursor or
+asking macOS to bring the app forward. Use `element_index` when available; the app can still ignore a synthetic
+event or activate itself. If the target is observed in front afterwards, the reply reports it. `super+a` can select
+all text in a focused background text field through accessibility when the menu shortcut is unavailable.
+`get_app_state` returns indexed elements, secondary actions and a screenshot; later replies return changed elements
+unless `disable_diff` is set. Closed apps are launched in the background. `paste` restores the clipboard afterwards.
+Approvals are scoped per app (`computer:<app>`). The tool needs Accessibility permission (Screen Recording for
+screenshots), a vision-capable model, and `swiftc` on first use. Coordinate input uses macOS's private SkyLight API
+when available; the public fallback may not reach some background apps.
 
 - Claude Code and Codex sessions of the current project appear in the palette as `…のセッションをインポート`.
 - Open any saved Claude Code/Codex transcript from the palette action `Claude Code / Codex セッションをファイルから開く…`, or use `/import PATH` in the GUI. Multiple files can be selected at once; each opens as a new native thread and the source remains unchanged.
@@ -491,14 +518,26 @@ end)
 
 ## Token use
 
-Native threads keep a stable system prompt and initial workspace snapshot across restarts.
+Native threads keep a stable system prompt and initial workspace snapshot across restarts
+unless the configured or built-in system prompt changes.
 On the next prompt, changed project rules, memory, or skills are appended as a superseding
 workspace snapshot, preserving the existing cache prefix. Compaction refreshes the snapshot;
 extension tool changes intentionally change the prefix. OpenAI's supported first-party models and
 Anthropic receive explicit static-prefix cache breakpoints alongside automatic history caching. Hits still depend
 on model thresholds, cache lifetime and provider behavior; they are not guaranteed on every request.
 
-Native `/compact` uses the configured method; `/compact summary` and `/compact snap` override it. Snap archives older history as pixel-font PNG images without a model call and preserves recent turns; it requires an Anthropic or supported first-party OpenAI vision model. Automatic snap compaction falls back to a summary on unsupported providers. Archives and their source are stored in the session.
+Native `/compact` uses the configured method; `/compact summary` and `/compact snap` override it.
+Snap archives older history as pixel-font PNG images without a model call and preserves recent turns;
+it requires an Anthropic or supported first-party OpenAI vision model. Automatic snap compaction falls
+back to a summary on unsupported providers. Archives and their source are stored in the session.
+
+For long native sessions, `old_read_previews = true` keeps the latest two or three turns intact
+and sends excerpts of older successful `read` results. The original stays in the transcript, and
+the excerpt points to a saved copy in `~/.greencode/spill/` that can be read even after the source
+changes. Deleting a thread does not remove these spill files.
+Below the automatic compaction threshold, `/compact summary` can keep the original history without
+a model call if it fits the retained tail, has older reads to preview, and needs no workspace rebase.
+When summary compaction runs, it still receives full results.
 
 Skills cost one catalog line until read; MCP schemas are discovered through one `mcp` tool. Long tool output keeps
 both ends and a path to the complete text. Pi/OMP retain their own prompts, history and caching without an added

@@ -1,7 +1,10 @@
 //! What a thread shows: items built from core events or a saved session.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use gpui_kit::component::text::{TextView, TextViewStyle};
+use gpui_kit::component::{
+    text::{TextView, TextViewStyle},
+    Theme,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use greencode_core::{context, permission, Block, Message, Role};
@@ -104,7 +107,128 @@ pub fn image_item(block: &Value) -> Option<Item> {
     Some(Item::Image(std::sync::Arc::new(Image::from_bytes(format, bytes))))
 }
 
-/// Colors derived from the system appearance; solid, as in T3 Code.
+fn hex(c: u32) -> Hsla {
+    rgb(c).into()
+}
+
+/// Built-in UI color themes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThemeId {
+    System,
+    Emerald,
+    EmeraldLight,
+    Paper,
+    Sand,
+    Graphite,
+    Light,
+    Dark,
+}
+
+impl ThemeId {
+    pub const ALL: [ThemeId; 8] = [
+        Self::System,
+        Self::Emerald,
+        Self::EmeraldLight,
+        Self::Paper,
+        Self::Sand,
+        Self::Graphite,
+        Self::Light,
+        Self::Dark,
+    ];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Emerald => "emerald",
+            Self::EmeraldLight => "emerald-light",
+            Self::Paper => "paper",
+            Self::Sand => "sand",
+            Self::Graphite => "graphite",
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::System => "システム",
+            Self::Emerald => "エメラルド",
+            Self::EmeraldLight => "エメラルド ライト",
+            Self::Paper => "ペーパー",
+            Self::Sand => "サンド",
+            Self::Graphite => "グラファイト",
+            Self::Light => "ライト",
+            Self::Dark => "ダーク",
+        }
+    }
+
+    pub fn palette_label(self) -> &'static str {
+        match self {
+            Self::System => "テーマ: システムに合わせる",
+            Self::Emerald => "テーマ: エメラルド（GreenCode ダーク）",
+            Self::EmeraldLight => "テーマ: エメラルド ライト（GreenCode ライト）",
+            Self::Paper => "テーマ: ペーパー（ウォームライト）",
+            Self::Sand => "テーマ: サンド（ナチュラルモダン）",
+            Self::Graphite => "テーマ: グラファイト（マットダーク）",
+            Self::Light => "テーマ: ライト（ニュートラル）",
+            Self::Dark => "テーマ: ダーク（ニュートラル）",
+        }
+    }
+
+    pub fn from_json(v: &Value) -> Self {
+        match v {
+            Value::Bool(false) => Self::Light,
+            Value::Bool(true) => Self::Dark,
+            Value::String(s) => Self::parse(s).unwrap_or(Self::System),
+            _ => Self::System,
+        }
+    }
+
+    pub fn to_json(self) -> Value {
+        match self {
+            Self::System => Value::Null,
+            other => Value::String(other.id().into()),
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "system" | "auto" | "システム" => Some(Self::System),
+            "emerald" | "emerald-dark" | "greencode" | "エメラルド" => Some(Self::Emerald),
+            "emerald-light" | "エメラルドライト" | "エメラルド ライト" => {
+                Some(Self::EmeraldLight)
+            }
+            "paper" | "ivory" | "ペーパー" => Some(Self::Paper),
+            "sand" | "linen" | "stone" | "サンド" => Some(Self::Sand),
+            "graphite" | "charcoal" | "グラファイト" => Some(Self::Graphite),
+            "light" | "ライト" => Some(Self::Light),
+            "dark" | "ダーク" => Some(Self::Dark),
+            _ => None,
+        }
+    }
+
+    pub fn resolve(self, window_dark: bool) -> Self {
+        match self {
+            Self::System => {
+                if window_dark {
+                    Self::Dark
+                } else {
+                    Self::Light
+                }
+            }
+            other => other,
+        }
+    }
+
+    pub fn is_dark(self, window_dark: bool) -> bool {
+        matches!(
+            self.resolve(window_dark),
+            Self::Dark | Self::Emerald | Self::Graphite
+        )
+    }
+}
+
+/// Resolved UI color palette for the active theme.
 #[derive(Clone, Copy)]
 pub struct Pal {
     pub sidebar: Hsla,
@@ -117,28 +241,178 @@ pub struct Pal {
     pub hover: Hsla,
     pub selected: Hsla,
     pub accent: Hsla,
+    pub accent_fg: Hsla,
     pub added: Hsla,
     pub removed: Hsla,
     pub warn: Hsla,
 }
 
 impl Pal {
-    pub fn new(dark: bool) -> Pal {
-        let fg = if dark { hsla(0., 0., 1., 0.92) } else { hsla(0., 0., 0., 0.88) };
-        Pal {
-            sidebar: if dark { hsla(0., 0., 0.035, 1.) } else { hsla(0., 0., 0.975, 1.) },
-            panel: if dark { hsla(0., 0., 0.035, 1.) } else { hsla(0., 0., 1., 1.) },
-            card: if dark { hsla(0., 0., 0.09, 1.) } else { hsla(0., 0., 0.96, 1.) },
-            fg,
-            muted: fg.opacity(0.5),
-            line: fg.opacity(0.08),
-            hover: fg.opacity(0.06),
-            selected: fg.opacity(0.1),
-            accent: hsla(211. / 360., 1., if dark { 0.56 } else { 0.5 }, 1.),
-            added: hsla(140. / 360., 0.6, if dark { 0.6 } else { 0.32 }, 1.),
-            removed: hsla(0., 0.7, if dark { 0.66 } else { 0.45 }, 1.),
-            warn: hsla(35. / 360., 0.95, 0.5, 1.),
+    pub fn for_theme(theme: ThemeId, window_dark: bool) -> Pal {
+        match theme.resolve(window_dark) {
+            ThemeId::Light => {
+                let fg = hsla(0., 0., 0., 0.88);
+                Pal {
+                    sidebar: hsla(0., 0., 0.975, 1.),
+                    panel: hsla(0., 0., 1., 1.),
+                    card: hsla(0., 0., 0.96, 1.),
+                    fg,
+                    muted: fg.opacity(0.60),
+                    line: fg.opacity(0.08),
+                    hover: fg.opacity(0.06),
+                    selected: fg.opacity(0.10),
+                    accent: hex(0x1D68D8),
+                    accent_fg: gpui_kit::white(),
+                    added: hsla(140. / 360., 0.6, 0.32, 1.),
+                    removed: hsla(0., 0.7, 0.45, 1.),
+                    warn: hsla(35. / 360., 0.95, 0.42, 1.),
+                }
+            }
+            ThemeId::Dark => {
+                let fg = hsla(0., 0., 1., 0.92);
+                Pal {
+                    sidebar: hsla(0., 0., 0.035, 1.),
+                    panel: hsla(0., 0., 0.035, 1.),
+                    card: hsla(0., 0., 0.09, 1.),
+                    fg,
+                    muted: fg.opacity(0.52),
+                    line: fg.opacity(0.08),
+                    hover: fg.opacity(0.06),
+                    selected: fg.opacity(0.10),
+                    accent: hsla(211. / 360., 1., 0.56, 1.),
+                    accent_fg: gpui_kit::white(),
+                    added: hsla(140. / 360., 0.6, 0.6, 1.),
+                    removed: hsla(0., 0.7, 0.66, 1.),
+                    warn: hsla(35. / 360., 0.95, 0.5, 1.),
+                }
+            }
+            ThemeId::Emerald => Pal {
+                sidebar: hex(0x08120F),
+                panel: hex(0x0C1814),
+                card: hex(0x132620),
+                fg: hex(0xE6F2ED),
+                muted: hex(0x85A698),
+                line: hsla(158. / 360., 0.38, 0.55, 0.14),
+                hover: hsla(158. / 360., 0.45, 0.52, 0.08),
+                selected: hsla(158. / 360., 0.52, 0.48, 0.16),
+                accent: hex(0x18BA83),
+                accent_fg: hex(0x051F16),
+                added: hex(0x34D399),
+                removed: hex(0xF07167),
+                warn: hex(0xF2A93B),
+            },
+            ThemeId::EmeraldLight => Pal {
+                sidebar: hex(0xEAF3EE),
+                panel: hex(0xF7FBF9),
+                card: hex(0xEDF5F0),
+                fg: hex(0x0F241C),
+                muted: hex(0x4A6B5D),
+                line: hsla(158. / 360., 0.35, 0.22, 0.11),
+                hover: hsla(158. / 360., 0.40, 0.28, 0.065),
+                selected: hsla(158. / 360., 0.48, 0.32, 0.12),
+                accent: hex(0x067A55),
+                accent_fg: gpui_kit::white(),
+                added: hex(0x067A55),
+                removed: hex(0xC0352E),
+                warn: hex(0xB4690E),
+            },
+            ThemeId::Paper => {
+                let fg = hex(0x1F1D1A);
+                Pal {
+                    sidebar: hex(0xEFECE4),
+                    panel: hex(0xF8F6F0),
+                    card: hex(0xF1EEE6),
+                    fg,
+                    muted: hex(0x69645B),
+                    line: fg.opacity(0.09),
+                    hover: fg.opacity(0.055),
+                    selected: fg.opacity(0.095),
+                    accent: hex(0xAD482B),
+                    accent_fg: gpui_kit::white(),
+                    added: hex(0x2D6A4F),
+                    removed: hex(0xB53832),
+                    warn: hex(0xB06B14),
+                }
+            }
+            ThemeId::Sand => {
+                let fg = hex(0x1C2021);
+                Pal {
+                    sidebar: hex(0xE7E4DC),
+                    panel: hex(0xF3F1EC),
+                    card: hex(0xEAE7DF),
+                    fg,
+                    muted: hex(0x5E6464),
+                    line: fg.opacity(0.095),
+                    hover: fg.opacity(0.06),
+                    selected: fg.opacity(0.10),
+                    accent: hex(0x2A585D),
+                    accent_fg: gpui_kit::white(),
+                    added: hex(0x2E6F52),
+                    removed: hex(0xAE3E38),
+                    warn: hex(0xAD6C16),
+                }
+            }
+            ThemeId::Graphite => {
+                let fg = hex(0xE8E5DE);
+                Pal {
+                    sidebar: hex(0x161615),
+                    panel: hex(0x1C1C1A),
+                    card: hex(0x252522),
+                    fg,
+                    muted: hex(0x9A968D),
+                    line: fg.opacity(0.09),
+                    hover: fg.opacity(0.06),
+                    selected: fg.opacity(0.11),
+                    accent: hex(0xD48E50),
+                    accent_fg: hex(0x181614),
+                    added: hex(0x68B384),
+                    removed: hex(0xDE6F68),
+                    warn: hex(0xDF9F45),
+                }
+            }
+            ThemeId::System => unreachable!("resolved above"),
         }
+    }
+
+    #[cfg(test)]
+    pub fn new(dark: bool) -> Pal {
+        Self::for_theme(if dark { ThemeId::Dark } else { ThemeId::Light }, dark)
+    }
+
+    /// Projects this palette onto `gpui-kit` global theme colors so inputs, markdown, and scrollbars match.
+    pub fn sync_kit_theme(&self, theme: &mut Theme, dark: bool) {
+        let c = &mut theme.colors;
+        c.background = gpui_kit::transparent_black();
+        c.foreground = self.fg;
+        c.muted = self.card;
+        c.muted_foreground = self.muted;
+        c.secondary = self.card;
+        c.secondary_hover = self.hover;
+        c.secondary_foreground = self.fg;
+        c.border = self.line;
+        c.input = self.line;
+        c.caret = self.accent;
+        c.ring = self.accent.opacity(0.45);
+        c.selection = self.accent.opacity(if dark { 0.28 } else { 0.20 });
+        c.primary = self.accent;
+        c.primary_hover = self.accent.opacity(0.9);
+        c.primary_foreground = self.accent_fg;
+        c.accent = self.hover;
+        c.accent_foreground = self.fg;
+        c.link = self.accent;
+        c.link_hover = self.accent.opacity(0.85);
+        c.link_active = self.accent;
+        c.popover = self.card;
+        c.popover_foreground = self.fg;
+        c.sidebar = self.sidebar;
+        c.sidebar_foreground = self.fg;
+        c.sidebar_border = self.line;
+        c.list = self.panel;
+        c.list_hover = self.hover;
+        c.list_active = self.selected;
+        c.list_active_border = self.accent.opacity(0.5);
+        c.scrollbar_thumb = self.fg.opacity(0.18);
+        c.scrollbar_thumb_hover = self.fg.opacity(0.32);
     }
 }
 

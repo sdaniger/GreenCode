@@ -203,11 +203,9 @@ impl Workspace {
             .justify_between()
             .pt_3()
             .pb_1()
-            .child(div().flex().items_center().gap_2().child("接続").child(
-                chip("picker-add-connection", "+", pal).on_click(cx.listener(
-                    |this, _: &ClickEvent, window, cx| this.run(Act::AddProvider, window, cx),
-                )),
-            ))
+            .child(chip("picker-add-connection", "+ 追加", pal).on_click(cx.listener(
+                |this, _: &ClickEvent, window, cx| this.run(Act::AddProvider, window, cx),
+            )))
             .child(
                 div()
                     .flex()
