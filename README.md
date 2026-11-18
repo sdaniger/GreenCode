@@ -12,7 +12,9 @@ Linux x86-64 (built on Ubuntu 24.04), or Windows x86-64. Each contains `greencod
 
 On Linux, the GUI needs X11 or Wayland, Vulkan, Fontconfig and XKB libraries. On Windows, install
 Git for Windows to use the native `bash` tool. The Windows embedded terminal uses ConPTY;
-Pi/OMP session handoff from the GUI is not available there. In-app updates remain macOS-only.
+Pi/OMP session handoff from the GUI is not available there. GreenCode's built-in Claude and
+ChatGPT subscription credential storage and CLI login import require macOS or Linux.
+In-app updates remain macOS-only.
 
 ## Native terminal UI
 

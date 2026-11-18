@@ -846,6 +846,7 @@ impl Workspace {
             "OpenCode でログイン（ターミナル）".into(),
             Act::OpenCodeLogin,
         ));
+        #[cfg(unix)]
         rows.push((
             "既存の Claude Code / ChatGPT ログインを取り込む".into(),
             Act::ImportLogins,

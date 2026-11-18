@@ -47,6 +47,11 @@ jobs:
           export GREENCODE_HOME="$RUNNER_TEMP/greencode-smoke"
           if [ "$RUNNER_OS" = Windows ]; then
             ./target/release/greencode-cli.exe --help
+            if output=$(./target/release/greencode-cli.exe auth import 2>&1); then
+              echo "Expected Windows login import to be rejected" >&2
+              exit 1
+            fi
+            grep -F "requires Unix credential storage" <<< "$output"
           else
             ./target/release/greencode-cli --help
           fi

@@ -634,6 +634,7 @@ enum Act {
     Cite,
     Usage,
     AnthropicLogin,
+    #[cfg(unix)]
     ImportLogins,
     CopilotLogin,
     ChatGptLogin,
@@ -4927,6 +4928,7 @@ impl Workspace {
                 self.fail("anthropic の api_key が config.toml にあるためサブスクリプションを使えません。config.toml から削除してください");
             }
             // Borrows an existing CLI sign-in; the rotating refresh token stays with that CLI.
+            #[cfg(unix)]
             Act::ImportLogins => {
                 let claude = greencode_core::provider::anthropic_oauth::import_into(
                     &greencode_core::provider::anthropic_oauth::path(),

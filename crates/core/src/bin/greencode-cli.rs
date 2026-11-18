@@ -39,6 +39,7 @@ fn auth(cfg: &mut Config, args: &[String]) -> anyhow::Result<()> {
         }
         // Borrows an existing Claude Code / Codex CLI sign-in without copying its rotating refresh
         // token, so those CLIs stay signed in; the borrowed token is used until it expires.
+        #[cfg(unix)]
         "import" => {
             let claude = greencode_core::provider::anthropic_oauth::import_into(&greencode_core::provider::anthropic_oauth::path())?;
             match claude {
@@ -52,6 +53,8 @@ fn auth(cfg: &mut Config, args: &[String]) -> anyhow::Result<()> {
             }
             println!("Refreshing a borrowed token is never attempted: re-run `greencode-cli auth import` after the source CLI renews it (a borrowed token is replaced; a browser login never is).");
         }
+        #[cfg(not(unix))]
+        "import" => anyhow::bail!("Importing Claude Code and Codex CLI logins requires Unix credential storage"),
         "login" => {
             let mut method_flag: Option<String> = None;
             let mut target: Option<String> = None;
@@ -532,6 +535,7 @@ fn main() -> anyhow::Result<()> {
                 println!("greencode-cli --export-html ID [FILE]   write a local HTML transcript without overwriting an existing file");
                 println!("greencode-cli --models BACKEND   list the models an external backend offers");
                 println!("greencode-cli auth login [PROVIDER] [--method METHOD] | auth list | auth logout PROVIDER   manage provider sign-in (API keys, Claude, Copilot, ChatGPT, Antigravity)");
+                #[cfg(unix)]
                 println!("greencode-cli auth import   borrow the existing Claude Code / Codex CLI sign-in without copying its refresh token");
                 println!("greencode-cli --opencode-login [OPENCODE_ARGS...]    sign in using OpenCode's own login flow");
                 println!("Native sub-agents: --subagent-model provider/model (or parent to follow the parent model)");
