@@ -15,7 +15,12 @@ use std::{
 
 enum Transport {
     Stdio(Arc<Rpc>),
-    Http { http: reqwest::Client, url: String, headers: Vec<(String, String)>, session: Mutex<Option<String>> },
+    Http {
+        http: reqwest::Client,
+        url: String,
+        headers: Vec<(String, String)>,
+        session: Mutex<Option<String>>,
+    },
 }
 
 struct Conn {
@@ -30,7 +35,11 @@ pub struct Mcp {
 }
 
 fn pairs(v: &Value) -> Vec<(String, String)> {
-    v.as_object().into_iter().flatten().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect()
+    v.as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+        .collect()
 }
 
 impl Transport {
@@ -38,10 +47,14 @@ impl Transport {
         match self {
             Transport::Stdio(rpc) => rpc.request(method, params).await,
             Transport::Http { .. } => {
-                let v = self.post(json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params})).await?;
+                let v = self
+                    .post(json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}))
+                    .await?;
                 let v = v.ok_or_else(|| anyhow!("no response to `{method}`"))?;
                 match v.get("error") {
-                    Some(e) if !e.is_null() => bail!("{}", e["message"].as_str().unwrap_or(&e.to_string())),
+                    Some(e) if !e.is_null() => {
+                        bail!("{}", e["message"].as_str().unwrap_or(&e.to_string()))
+                    }
                     _ => Ok(v["result"].clone()),
                 }
             }
@@ -51,16 +64,30 @@ impl Transport {
     async fn notify(&self, method: &str) -> Result<()> {
         match self {
             Transport::Stdio(rpc) => rpc.notify(method, json!({})).await,
-            Transport::Http { .. } => self.post(json!({"jsonrpc": "2.0", "method": method})).await.map(|_| ()),
+            Transport::Http { .. } => self
+                .post(json!({"jsonrpc": "2.0", "method": method}))
+                .await
+                .map(|_| ()),
         }
     }
 
     /// Streamable HTTP: the reply is plain JSON or an SSE stream containing it.
     async fn post(&self, body: Value) -> Result<Option<Value>> {
-        let Transport::Http { http, url, headers, session } = self else { unreachable!() };
+        let Transport::Http {
+            http,
+            url,
+            headers,
+            session,
+        } = self
+        else {
+            unreachable!()
+        };
         let sid = session.lock().unwrap().clone();
         let resp = send(|| {
-            let mut r = http.post(url).header("Accept", "application/json, text/event-stream").json(&body);
+            let mut r = http
+                .post(url)
+                .header("Accept", "application/json, text/event-stream")
+                .json(&body);
             for (k, v) in headers {
                 r = r.header(k, v);
             }
@@ -70,10 +97,18 @@ impl Transport {
             r
         })
         .await?;
-        if let Some(s) = resp.headers().get("mcp-session-id").and_then(|v| v.to_str().ok()) {
+        if let Some(s) = resp
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|v| v.to_str().ok())
+        {
             *session.lock().unwrap() = Some(s.to_string());
         }
-        let is_sse = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|c| c.contains("event-stream"));
+        let is_sse = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|c| c.contains("event-stream"));
         if !is_sse {
             let text = resp.text().await?;
             return Ok(serde_json::from_str(&text).ok());
@@ -95,15 +130,26 @@ impl Transport {
 
 impl Mcp {
     pub fn load(cwd: &Path) -> Mcp {
+        Self::load_with_project(cwd, true)
+    }
+
+    pub(crate) fn load_with_project(cwd: &Path, project: bool) -> Mcp {
         let mut servers = BTreeMap::new();
-        for path in [crate::home().join("mcp.json"), cwd.join(".mcp.json")] {
-            let Ok(s) = std::fs::read_to_string(path) else { continue };
-            let Ok(v) = serde_json::from_str::<Value>(&s) else { continue };
+        for path in std::iter::once(crate::home().join("mcp.json")).chain(project.then(|| cwd.join(".mcp.json"))) {
+            let Ok(s) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let Ok(v) = serde_json::from_str::<Value>(&s) else {
+                continue;
+            };
             for (k, v) in v["mcpServers"].as_object().into_iter().flatten() {
                 servers.insert(k.clone(), v.clone());
             }
         }
-        Mcp { servers, conns: Default::default() }
+        Mcp {
+            servers,
+            conns: Default::default(),
+        }
     }
 
     pub fn names(&self) -> Vec<String> {
@@ -116,28 +162,48 @@ impl Mcp {
         if let Some(c) = conns.get(name) {
             return Ok(c.clone());
         }
-        let cfg = self.servers.get(name).ok_or_else(|| anyhow!("unknown MCP server `{name}`"))?;
+        let cfg = self
+            .servers
+            .get(name)
+            .ok_or_else(|| anyhow!("unknown MCP server `{name}`"))?;
         let transport = if let Some(cmd) = cfg["command"].as_str() {
             let mut command = vec![cmd.to_string()];
-            command.extend(cfg["args"].as_array().into_iter().flatten().filter_map(|a| a.as_str().map(String::from)));
+            command.extend(
+                cfg["args"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|a| a.as_str().map(String::from)),
+            );
             // shortcut: server-to-client requests (sampling, roots) are dropped; add a handler if a server needs them.
             Transport::Stdio(Rpc::spawn(&command, &pairs(&cfg["env"]), cwd)?.0)
         } else if let Some(url) = cfg["url"].as_str() {
             // shortcut: no OAuth; servers needing it must be given a token via `headers`.
-            Transport::Http { http: reqwest::Client::new(), url: url.into(), headers: pairs(&cfg["headers"]), session: Mutex::new(None) }
+            Transport::Http {
+                http: reqwest::Client::new(),
+                url: url.into(),
+                headers: pairs(&cfg["headers"]),
+                session: Mutex::new(None),
+            }
         } else {
             bail!("MCP server `{name}` needs `command` or `url`");
         };
         transport
-            .request("initialize", json!({
-                "protocolVersion": "2025-06-18",
-                "capabilities": {},
-                "clientInfo": {"name": "greencode", "version": env!("CARGO_PKG_VERSION")},
-            }))
+            .request(
+                "initialize",
+                json!({
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "greencode", "version": env!("CARGO_PKG_VERSION")},
+                }),
+            )
             .await?;
         transport.notify("notifications/initialized").await?;
         // shortcut: first page only; follow `nextCursor` if a server has more tools than one page.
-        let tools = transport.request("tools/list", json!({})).await?["tools"].as_array().cloned().unwrap_or_default();
+        let tools = transport.request("tools/list", json!({})).await?["tools"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
         let c = Arc::new(Conn { transport, tools });
         conns.insert(name.to_string(), c.clone());
         Ok(c)
@@ -166,24 +232,52 @@ impl Mcp {
                         }
                     }
                 }
-                hits.sort_by(|a, b| b.0.cmp(&a.0));
+                hits.sort_by_key(|a| std::cmp::Reverse(a.0));
                 // Without a query, list names only; schemas are the expensive part.
                 for (_, server, t) in hits.iter().take(if words.is_empty() { 100 } else { 5 }) {
-                    let desc = t["description"].as_str().unwrap_or("").lines().next().unwrap_or("");
-                    out.push_str(&format!("{server}/{} - {desc}\n", t["name"].as_str().unwrap_or("")));
+                    let desc = t["description"]
+                        .as_str()
+                        .unwrap_or("")
+                        .lines()
+                        .next()
+                        .unwrap_or("");
+                    out.push_str(&format!(
+                        "{server}/{} - {desc}\n",
+                        t["name"].as_str().unwrap_or("")
+                    ));
                     if !words.is_empty() {
                         out.push_str(&format!("  args: {}\n", t["inputSchema"]));
                     }
                 }
-                Ok(if out.is_empty() { "no matching tools".into() } else { out })
+                Ok(if out.is_empty() {
+                    "no matching tools".into()
+                } else {
+                    out
+                })
             }
             Some("call") => {
-                let server = input["server"].as_str().ok_or_else(|| anyhow!("missing `server`"))?;
-                let tool = input["tool"].as_str().ok_or_else(|| anyhow!("missing `tool`"))?;
-                let args = if input["args"].is_object() { input["args"].clone() } else { json!({}) };
+                let server = input["server"]
+                    .as_str()
+                    .ok_or_else(|| anyhow!("missing `server`"))?;
+                let tool = input["tool"]
+                    .as_str()
+                    .ok_or_else(|| anyhow!("missing `tool`"))?;
+                let args = if input["args"].is_object() {
+                    input["args"].clone()
+                } else {
+                    json!({})
+                };
                 let conn = self.conn(server, cwd).await?;
-                let r = conn.transport.request("tools/call", json!({"name": tool, "arguments": args})).await?;
-                let text: Vec<&str> = r["content"].as_array().into_iter().flatten().filter_map(|c| c["text"].as_str()).collect();
+                let r = conn
+                    .transport
+                    .request("tools/call", json!({"name": tool, "arguments": args}))
+                    .await?;
+                let text: Vec<&str> = r["content"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|c| c["text"].as_str())
+                    .collect();
                 let text = text.join("\n");
                 if r["isError"].as_bool().unwrap_or(false) {
                     bail!(text);

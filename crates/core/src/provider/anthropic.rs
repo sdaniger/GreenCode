@@ -1,3 +1,4 @@
+use super::anthropic_oauth::{self, BETAS, SYSTEM_PREFIX, TOOL_PREFIX};
 use super::{send, sse, Provider, Reply, Request};
 use crate::{Block, BoxFut, Usage};
 use anyhow::{bail, Result};
@@ -7,6 +8,8 @@ pub struct Anthropic {
     pub http: reqwest::Client,
     pub base: String,
     pub key: String,
+    /// Subscription credentials file; when set, `key` is unused.
+    pub oauth: Option<std::path::PathBuf>,
     pub effort: Option<String>,
 }
 
@@ -16,13 +19,15 @@ const FALLBACK_MODELS: [&str; 5] =
 
 impl Anthropic {
     pub fn body(&self, req: &Request) -> Value {
+        let oauth = self.oauth.is_some();
         // Proxies and other platforms may reject the newer fields.
         let first_party = self.base.contains("api.anthropic.com");
         let tools: Vec<Value> = req
             .tools
             .iter()
             .map(|t| {
-                let mut v = json!({"name": t.name, "description": t.description, "input_schema": t.schema});
+                let name = if oauth { format!("{TOOL_PREFIX}{}", t.name) } else { t.name.clone() };
+                let mut v = json!({"name": name, "description": t.description, "input_schema": t.schema});
                 if first_party {
                     v["eager_input_streaming"] = json!(true);
                 }
@@ -33,13 +38,29 @@ impl Anthropic {
             "model": req.model,
             "max_tokens": req.max_tokens,
             "stream": true,
-            "system": [{"type": "text", "text": req.system}],
+            "system": [{"type": "text", "text": req.system, "cache_control": {"type": "ephemeral"}}],
             "messages": req.messages,
             // Automatic breakpoint on the last block: the whole append-only history is cached.
             "cache_control": {"type": "ephemeral"},
         });
+        if oauth {
+            // The identity must be its own leading block; the cache breakpoint stays on the real prompt.
+            body["system"].as_array_mut().unwrap().insert(0, json!({"type": "text", "text": SYSTEM_PREFIX}));
+            // Replayed calls must match the renamed `tools[]`; results pair by id.
+            for block in body["messages"].as_array_mut().into_iter().flatten().filter_map(|m| m["content"].as_array_mut()).flatten() {
+                if block["type"] == "tool_use" {
+                    if let Some(name) = block["name"].as_str() { block["name"] = json!(format!("{TOOL_PREFIX}{name}")); }
+                }
+            }
+        }
         if !tools.is_empty() {
             body["tools"] = json!(tools);
+        }
+        // Pin the last request's endpoint even when a large tool batch exceeds the lookback window.
+        if let Some((i, message)) = req.messages.iter().enumerate().rev().filter(|(_, m)| m.role == crate::Role::User).nth(1) {
+            if let Some(j) = message.content.iter().rposition(|b| matches!(b, Block::Text { .. } | Block::ToolResult { .. })) {
+                body["messages"][i]["content"][j]["cache_control"] = json!({"type": "ephemeral"});
+            }
         }
         if let Some(e) = &self.effort {
             body["output_config"] = json!({"effort": e});
@@ -55,16 +76,21 @@ impl Provider for Anthropic {
     fn complete<'a>(&'a self, req: Request<'a>, on_text: &'a (dyn Fn(&str) + Send + Sync)) -> BoxFut<'a, Result<Reply>> {
         Box::pin(async move {
             let body = self.body(&req);
+            let auth = match &self.oauth {
+                Some(path) => Some((anthropic_oauth::access_token(path).await?, anthropic_oauth::user_agent().await)),
+                None => None,
+            };
             let resp = send(|| {
-                let mut r = self
-                    .http
-                    .post(format!("{}/v1/messages", self.base))
-                    .header("x-api-key", &self.key)
-                    .header("anthropic-version", "2026-10-21")
-                    .json(&body);
-                if body.get("fallbacks").is_some() {
-                    r = r.header("anthropic-beta", "server-side-fallback-2026-07-01");
-                }
+                let mut r = self.http.post(format!("{}/v1/messages", self.base)).header("anthropic-version", "2026-10-21").json(&body);
+                let fallback = body.get("fallbacks").is_some().then_some("server-side-fallback-2026-07-01");
+                r = match &auth {
+                    Some((token, ua)) => r.bearer_auth(token).header(reqwest::header::USER_AGENT, *ua).header("x-app", "cli")
+                        .header("anthropic-beta", [Some(BETAS), fallback].into_iter().flatten().collect::<Vec<_>>().join(",")),
+                    None => {
+                        let r = r.header("x-api-key", &self.key);
+                        match fallback { Some(beta) => r.header("anthropic-beta", beta), None => r }
+                    }
+                };
                 r
             })
             .await?;
@@ -78,7 +104,15 @@ impl Provider for Anthropic {
                 Ok(false)
             })
             .await?;
-            Ok(acc.finish())
+            let mut reply = acc.finish();
+            if self.oauth.is_some() {
+                for block in &mut reply.blocks {
+                    if let Block::ToolUse { name, .. } = block {
+                        if let Some(bare) = name.strip_prefix(TOOL_PREFIX) { *name = bare.to_string(); }
+                    }
+                }
+            }
+            Ok(reply)
         })
     }
 }

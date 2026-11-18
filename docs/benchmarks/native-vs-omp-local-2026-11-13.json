@@ -1,0 +1,67 @@
+{
+  "date": "2026-11-13",
+  "model": "ollama/paritok-4b-v1:latest (local, via Ollama)",
+  "task": "Use the read tool on a.txt, then reply with its first line only.",
+  "project": "/tmp/gc-visual (git repo, a.txt contains one line)",
+  "method": "greencode-cli --backend {native|omp} --model <model> -p <task>, two fresh runs each; usage lines are the provider's own counts, printed by the CLI.",
+  "runs": {
+    "native": [
+      {
+        "request1": {
+          "input": 1626,
+          "cached": 0,
+          "output": 26
+        },
+        "request2": {
+          "input": 17,
+          "cached": 1651,
+          "output": 2
+        }
+      },
+      {
+        "request1": {
+          "input": 1,
+          "cached": 1625,
+          "output": 32
+        },
+        "request2": {
+          "input": 15,
+          "cached": 1657,
+          "output": 2
+        }
+      }
+    ],
+    "omp": [
+      {
+        "request1": {
+          "input": 7950,
+          "cached": 3,
+          "output": 36
+        },
+        "request2": {
+          "input": 46,
+          "cached": 7988,
+          "output": 34
+        }
+      },
+      {
+        "request1": {
+          "input": 1,
+          "cached": 7952,
+          "output": 31
+        },
+        "request2": {
+          "input": 29,
+          "cached": 7983,
+          "output": 2
+        }
+      }
+    ]
+  },
+  "summary": {
+    "native_prompt_tokens_approx": 1643,
+    "omp_prompt_tokens_approx": 7988,
+    "ratio": 4.86,
+    "note": "Both loops completed the same read-tool task. Prompt size is the provider-reported input plus cached tokens of the second request. The native loop's prompt is about 4.9x smaller; the earlier Pi baseline was 5,563 bytes, so the native prompt is also below Pi's. This is a single-task smoke measurement, not a quality comparison."
+  }
+}

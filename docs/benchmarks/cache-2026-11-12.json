@@ -1,0 +1,126 @@
+{
+  "live_pi": {
+    "model": "openai-codex/gpt-6-luna",
+    "pi_version": "1.5.2",
+    "scope": "live GreenCode/Pi cache smoke test on generated lookup data; not a coding-quality or native-provider A/B benchmark; cache is not forcibly cleared",
+    "turns_verified": 5,
+    "read_tool_calls": 1,
+    "elapsed_seconds": 13.378,
+    "all_requests": {
+      "input": 5704,
+      "cache_read": 17024,
+      "cache_write": 0,
+      "output": 66,
+      "total_input": 22728,
+      "cache_hit_rate": 0.7490320309750088
+    },
+    "followup_requests": {
+      "input": 682,
+      "cache_read": 17024,
+      "cache_write": 0,
+      "output": 32,
+      "total_input": 17706,
+      "cache_hit_rate": 0.9614819835084152
+    },
+    "turns": [
+      {
+        "verified": true,
+        "text": "value_0010",
+        "requests": [
+          {
+            "input": 693,
+            "cache_read": 0,
+            "cache_write": 0,
+            "output": 26
+          },
+          {
+            "input": 4329,
+            "cache_read": 0,
+            "cache_write": 0,
+            "output": 8
+          }
+        ]
+      },
+      {
+        "verified": true,
+        "text": "value_0100",
+        "requests": [
+          {
+            "input": 144,
+            "cache_read": 4224,
+            "cache_write": 0,
+            "output": 8
+          }
+        ]
+      },
+      {
+        "verified": true,
+        "text": "value_0200",
+        "requests": [
+          {
+            "input": 183,
+            "cache_read": 4224,
+            "cache_write": 0,
+            "output": 8
+          }
+        ]
+      },
+      {
+        "verified": true,
+        "text": "value_0300",
+        "requests": [
+          {
+            "input": 222,
+            "cache_read": 4224,
+            "cache_write": 0,
+            "output": 8
+          }
+        ]
+      },
+      {
+        "verified": true,
+        "text": "value_0400",
+        "requests": [
+          {
+            "input": 133,
+            "cache_read": 4352,
+            "cache_write": 0,
+            "output": 8
+          }
+        ]
+      }
+    ]
+  },
+  "native_wire": {
+    "scope": "Capture production native requests on a local fixture server; bytes are not token/cache-hit measurements.",
+    "model": "gpt-6-luna (local protocol fixture, no inference)",
+    "baseline": {
+      "system_bytes": 692,
+      "system_stable_on_resume": false,
+      "updated_project_instructions_applied": true,
+      "requests": 4
+    },
+    "optimized": {
+      "system_bytes": 487,
+      "system_stable_on_resume": true,
+      "updated_project_instructions_applied": true,
+      "requests": 4
+    },
+    "system_byte_reduction": 205,
+    "history_and_tools_unchanged": true
+  },
+  "pi_wire": {
+    "pi_version": "1.5.2",
+    "provider": "deterministic local OpenAI-compatible test server",
+    "model_requests_each": 2,
+    "prompt_fields_equal": true,
+    "prompt_bytes_by_request": [
+      5538,
+      5786
+    ],
+    "added_prompt_bytes": 0,
+    "denied_tool_did_not_execute": true,
+    "scope": "same Pi, model, project, flags and read task; includes tool result round trip; not a quality/billing benchmark"
+  },
+  "model_policy": "gpt-6-luna only for real model benchmark calls; wire fixtures do not run models"
+}

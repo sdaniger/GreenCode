@@ -1,0 +1,94 @@
+{
+  "version": "1.0.0",
+  "agents": [
+    {
+      "id": "agoragentic-acp",
+      "name": "Agoragentic",
+      "version": "1.3.0",
+      "description": "Agent marketplace with 174+ AI capabilities. Browse, invoke, and pay for agent services settled in USDC on Base L2.",
+      "repository": "https://github.com/rhein1/agoragentic-integrations",
+      "website": "https://agoragentic.com",
+      "authors": [
+        "ACRE / Agoragentic"
+      ],
+      "license": "MIT",
+      "license_url": "https://github.com/rhein1/agoragentic-integrations/blob/main/LICENSE",
+      "distribution": {
+        "npx": {
+          "package": "agoragentic-mcp@1.3.0",
+          "args": [
+            "--acp"
+          ]
+        }
+      },
+      "icon": "https://cdn.agentclientprotocol.com/registry/v1/latest/agoragentic-acp.svg"
+    },
+    {
+      "id": "fast-agent",
+      "name": "fast-agent",
+      "version": "0.10.1",
+      "description": "Code and build agents with comprehensive multi-provider support",
+      "repository": "https://github.com/evalstate/fast-agent",
+      "website": "https://fast-agent.ai",
+      "authors": [
+        "enquiries@fast-agent.ai"
+      ],
+      "license": "Apache 2.0",
+      "license_url": "https://github.com/evalstate/fast-agent/blob/main/LICENSE",
+      "distribution": {
+        "uvx": {
+          "package": "fast-agent-acp==0.10.1",
+          "args": [
+            "-x"
+          ],
+          "env": {
+            "FAST_AGENT_MODEL": "codexplan"
+          }
+        }
+      },
+      "icon": "https://cdn.agentclientprotocol.com/registry/v1/latest/fast-agent.svg"
+    },
+    {
+      "id": "amp-acp",
+      "name": "Amp",
+      "version": "0.12.0",
+      "description": "ACP wrapper for Amp - the frontier coding agent",
+      "repository": "https://github.com/tao12345666333/amp-acp",
+      "authors": [
+        "tao12345666333"
+      ],
+      "license": "Apache-2.0",
+      "license_url": "https://github.com/tao12345666333/amp-acp/blob/main/LICENSE",
+      "icon": "https://cdn.agentclientprotocol.com/registry/v1/latest/amp-acp.svg",
+      "distribution": {
+        "binary": {
+          "darwin-aarch64": {
+            "archive": "https://github.com/tao12345666333/amp-acp/releases/download/v0.12.0/amp-acp-darwin-aarch64.tar.gz",
+            "cmd": "./amp-acp",
+            "sha256": "1c5f08f44f3711710769585855cefcdbaed53e4133c2263d59a368b5a1597151"
+          },
+          "darwin-x86_64": {
+            "archive": "https://github.com/tao12345666333/amp-acp/releases/download/v0.12.0/amp-acp-darwin-x86_64.tar.gz",
+            "cmd": "./amp-acp",
+            "sha256": "4245776441b18c05621dd66376064e66aebba90806a0d787592ea558207c5a68"
+          },
+          "linux-aarch64": {
+            "archive": "https://github.com/tao12345666333/amp-acp/releases/download/v0.12.0/amp-acp-linux-aarch64.tar.gz",
+            "cmd": "./amp-acp",
+            "sha256": "f75b1f4a2adc1c243601952070eb24bbcfecf328692f799815b59efeb9791528"
+          },
+          "linux-x86_64": {
+            "archive": "https://github.com/tao12345666333/amp-acp/releases/download/v0.12.0/amp-acp-linux-x86_64.tar.gz",
+            "cmd": "./amp-acp",
+            "sha256": "c25e3635159ee12f8a77bd775dd8a8fc21cc4d25a3a23483ffafec73ccb910fe"
+          },
+          "windows-x86_64": {
+            "archive": "https://github.com/tao12345666333/amp-acp/releases/download/v0.12.0/amp-acp-windows-x86_64.zip",
+            "cmd": "amp-acp.exe",
+            "sha256": "7377158ddac570d50f1eb98e0ce39ca6ecf18990bf917c1930bf628509ae12b4"
+          }
+        }
+      }
+    }
+  ]
+}

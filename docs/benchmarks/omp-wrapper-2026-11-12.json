@@ -1,0 +1,15 @@
+{
+  "pi_version": "omp/18.19.0",
+  "protocol": "omp",
+  "provider": "deterministic local OpenAI-compatible test server",
+  "model_requests_each": 2,
+  "prompt_fields_equal": true,
+  "prompt_bytes_by_request": [
+    13805,
+    14070
+  ],
+  "added_prompt_bytes": 0,
+  "denied_tool_did_not_execute": true,
+  "tool_scope": "read,bash,edit,write; LSP disabled",
+  "scope": "same engine, model, project, flags and read task; includes tool result round trip; not a quality/billing benchmark"
+}
