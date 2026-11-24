@@ -4,6 +4,12 @@ A native agent workspace for macOS, Linux and Windows: Rust + GPUI, no WebView. 
 
 T3 Code / OMP feature parity is in progress, not complete. The [feature ledger](docs/parity.md) records the remaining surface and verification gaps.
 
+Start with [Downloads](#downloads), the [native terminal UI](#native-terminal-ui), or
+[installed agents](#use-installed-agents). For automation, see [thread scripting](#thread-scripting),
+[remote access](#remote-access), and [workflows](#workflows-labs). The
+[cache-efficiency report](docs/cache-efficiency.md) contains benchmarks and reproduction steps.
+Check `greencode-cli --help` for which automation commands your build includes.
+
 ## Downloads
 
 Download a [release archive](https://github.com/sdaniger/GreenCode/releases) for macOS (Apple Silicon or Intel),
@@ -80,6 +86,23 @@ Use `/export [PATH]` in a saved session or `greencode-cli --export-html THREAD_I
 to write a local HTML copy of the Markdown transcript. It contains no executable HTML,
 does not upload anything, and refuses to overwrite an existing file. The default
 destination is `~/.greencode/exports/THREAD_ID.html`. Review the transcript before sharing it.
+
+## Thread scripting
+
+These commands work with locally saved threads; they do not control an active desktop turn.
+
+```sh
+greencode-cli thread list --json
+greencode-cli thread start --project . --wait --json "Summarize the README"
+greencode-cli thread show THREAD_ID         # Markdown; add --json for structured messages
+greencode-cli thread send THREAD_ID --wait "List the setup commands"
+```
+
+Replace `THREAD_ID` with the ID returned by `start`. `start` accepts `--backend`
+and `--model`; `send` uses the thread's saved backend and model. Both accept `-`
+instead of a prompt to read stdin. Without `--wait`, they return the ID and run
+in a background process. Do not send to a thread that is also open in the
+desktop app: the desktop app does not share the CLI's turn lock.
 
 ## Use installed agents
 
@@ -219,6 +242,29 @@ Keep it private, use a trusted network, and avoid exposing the unencrypted HTTP 
 to the internet. The secret is stored in `~/.greencode/remote-token`; restart with
 `--rotate` to invalidate the old URL.
 
+### Login service
+
+On macOS (launchd) or Linux (systemd user session), install from the final
+location of your `greencode-cli` binary: the service records its absolute path.
+
+```sh
+greencode-cli service install
+greencode-cli service status
+greencode-cli service restart
+greencode-cli service uninstall
+```
+
+`service install --lan` enables network access. `serve` reads `KEY=VALUE`
+settings from `~/.greencode/service.env` without shell expansion and the
+service logs to `~/.greencode/service.log`. On Windows, run `serve` manually.
+
+### Guest links
+
+In the remote UI, select a thread and click **Share** to create a read-only
+link to that thread, valid for 24 hours. A guest can read the transcript and
+submit a request, but only the owner can send that request to the agent or
+dismiss it. **Unshare** revokes all guest links for the selected thread.
+
 ### Outside agents via MCP
 
 Run `greencode-cli mcp` as a local newline-delimited stdio MCP server. For Claude Code,
@@ -232,6 +278,34 @@ requests are denied; actions already allowed by the thread's permission mode sti
 same bearer token as remote access, returning JSON rather than SSE. Notifications return
 HTTP 202. This endpoint does not provide OAuth: protect the token and use TLS or a
 trusted local network. Anyone with the token can read threads and run agents.
+
+## Workflows (Labs)
+
+Enable **設定 → ラボ → ワークフロー** or set `"labs_workflows": true` in
+`~/.greencode/ui.json`. Save a definition as `~/.greencode/workflows/check-in.toml`
+(override the definitions directory with `GREENCODE_WORKFLOWS`):
+
+```toml
+name = "check-in"
+
+[[steps]]
+type = "ask"
+id = "review"
+question = "Is the draft ready?"
+options = ["yes", "no"]
+```
+
+Run `greencode-cli workflow start check-in`, then use the returned run ID:
+
+```sh
+greencode-cli workflow show RUN_ID
+greencode-cli workflow answer RUN_ID review yes
+greencode-cli workflow list
+```
+
+Runs are saved under `~/.greencode/workflow-runs/`. Use `resume RUN_ID` for
+a paused run or `cancel RUN_ID` to stop it, both under `greencode-cli workflow`.
+Run only workflow definitions you trust: shell steps execute local commands.
 
 ## Keys
 
