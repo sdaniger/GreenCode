@@ -39,6 +39,22 @@ fn cache_key(shape: &Shape, wire: &Wire) -> Option<String> {
 
 pub fn body(shape: &Shape, wire: &Wire) -> Value {
     let mut input = Vec::new();
+    let cache_instructions = !shape.codex
+        && !shape.system.is_empty()
+        && wire.cache_retention.caching()
+        && modern(shape.model);
+    if cache_instructions {
+        // GPT-6.2+ puts top-level instructions after all cacheable input.
+        input.push(json!({
+            "type": "message",
+            "role": "developer",
+            "content": [{
+                "type": "input_text",
+                "text": shape.system,
+                "prompt_cache_breakpoint": {"mode": "explicit"},
+            }],
+        }));
+    }
     for m in shape.messages {
         let mut content = Vec::new();
         for b in &m.content {
@@ -74,7 +90,6 @@ pub fn body(shape: &Shape, wire: &Wire) -> Value {
     }
     let mut body = json!({
         "model": shape.model,
-        "instructions": shape.system,
         "input": input,
         "tools": tools,
         "tool_choice": "auto",
@@ -85,6 +100,9 @@ pub fn body(shape: &Shape, wire: &Wire) -> Value {
         "include": ["reasoning.encrypted_content"],
         "reasoning": reasoning,
     });
+    if !cache_instructions {
+        body["instructions"] = json!(shape.system);
+    }
     if let Some(key) = cache_key(shape, wire) {
         body["prompt_cache_key"] = json!(key);
     }
@@ -331,11 +349,47 @@ mod tests {
         assert_eq!(codex["store"], false);
         assert_eq!(codex["reasoning"]["effort"], "medium");
         assert_eq!(codex["prompt_cache_key"], "greencode");
+        assert_eq!(codex["instructions"], "sys");
+        assert_eq!(codex["input"][0]["role"], "user");
         let standard = body(&Shape { effort: None, ..shape(&messages) }, &wire(CacheRetention::Auto, false));
         assert!(standard["reasoning"].get("effort").is_none());
         assert_eq!(standard["reasoning"]["summary"], "auto");
         let effort = body(&shape(&messages), &wire(CacheRetention::Auto, false));
         assert_eq!(effort["reasoning"]["effort"], "high");
+    }
+
+    #[test]
+    fn responses_cache_keeps_instructions_before_growing_history() {
+        let w = wire(CacheRetention::Auto, true);
+        let first = [Message::user("first question")];
+        let first_shape = Shape { model: "gpt-6.2-sol", ..shape(&first) };
+        let initial = body(&first_shape, &w);
+        let continued = [Message::user("first question"), Message::user("follow-up")];
+        let next = body(&Shape { messages: &continued, ..first_shape }, &w);
+        let separate = body(&Shape { messages: &[Message::user("unrelated question")], ..first_shape }, &w);
+        assert!(initial.get("instructions").is_none(), "instructions must not be repeated after the cached input");
+        assert_eq!(initial["input"][0], json!({
+            "type": "message",
+            "role": "developer",
+            "content": [{"type": "input_text", "text": "sys", "prompt_cache_breakpoint": {"mode": "explicit"}}],
+        }));
+        assert_eq!(initial["input"][0], separate["input"][0]);
+        assert_eq!(initial["input"].as_array().unwrap(), &next["input"].as_array().unwrap()[..2]);
+        assert_eq!(next["input"][2]["content"][0]["text"], "follow-up");
+        assert!(next.get("prompt_cache_options").is_none(), "automatic caching stays at its implicit default");
+    }
+
+    #[test]
+    fn responses_keeps_legacy_and_disabled_caching_wire_shape() {
+        let messages = [Message::user("question")];
+        let legacy = body(&Shape { model: "gpt-5.5", ..shape(&messages) }, &wire(CacheRetention::Auto, true));
+        let disabled = body(&shape(&messages), &wire(CacheRetention::None, true));
+        for payload in [&legacy, &disabled] {
+            assert_eq!(payload["instructions"], "sys");
+            assert_eq!(payload["input"][0]["role"], "user");
+        }
+        assert_eq!(disabled["prompt_cache_options"]["mode"], "explicit");
+        assert!(disabled["input"][0]["content"][0].get("prompt_cache_breakpoint").is_none());
     }
 
     #[test]

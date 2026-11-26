@@ -8,8 +8,13 @@ fixtures do not call any model. Do not confuse prompt bytes, eligible cache boun
 - Shortened the native base instructions and put worktree-dependent paths after reusable instructions.
 - Native threads keep the initial workspace context across restarts. Changes to rules, memory, or skills are appended as
   superseding snapshots on the next prompt without rewriting the cached prefix; compaction refreshes the snapshot.
-- OpenAI first-party GPT-5.6+ requests keep implicit caching and mark the static system prefix explicitly. Older
-  models get a stable application cache key. OpenAI-specific cache fields are not sent to compatible third-party servers.
+- First-party OpenAI Responses requests for GPT-5.6+ place reusable instructions in the first `developer`
+  message with an explicit breakpoint, without disabling implicit caching for conversation history.
+  GPT-6.2+ otherwise places top-level `instructions` after cacheable input and bills them as uncached on
+  every request. The breakpoint can be reused across threads when the shared prefix reaches 1,024 tokens.
+  This leaves the configured lifetime, ChatGPT/Codex requests, and the caching opt-out unchanged.
+  Older OpenAI models use a stable application cache key. OpenAI-specific cache fields are not sent to
+  compatible third-party servers.
 - Anthropic marks the static system prefix and the preceding user/tool-result endpoint, while automatic caching
   advances over the new history. This preserves an earlier lookup boundary through large tool batches.
 - OpenAI output limits are now sent; cache-write tokens are separated from ordinary input. Compaction and
