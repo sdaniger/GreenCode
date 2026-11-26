@@ -239,7 +239,10 @@ The listener is local only; a public URL requires your own tunnel, such as `clou
 - **Undo** (`/undo`, ⇧⌘Z) removes the last turn, restores files changed by `write`/`edit` (not by `bash`), and puts the prompt
   back in the composer. `/fork` copies the thread; `/export` writes Markdown to `~/.greencode/exports`.
 - **Images**: paste with ⌘V, `/attach`, or name an image file in the prompt (`@shot.png`); screenshots and reasoning are shown in the thread.
-- **File previews**: the right panel refreshes open files as they change; HTML/SVG/PDF use Quick Look thumbnails (no JavaScript), with browser opening and rendered snapshots attachable to the next prompt.
+- **File previews**: click a project file link in a reply or choose a file in the right-hand Files panel (⇧⌘E).
+  On macOS, supported local video and audio files (such as MP4, MOV, and M4A) play in the panel with playback and seek controls.
+  Use **外部で開く** for formats the system player cannot decode or on Windows/Linux.
+  Open files refresh when they change; HTML/SVG/PDF use Quick Look thumbnails (no JavaScript) and can be attached as snapshots.
 - **Sandbox** (`sandbox = true`, macOS): `bash` can write only inside the project, temp directories and `~/.greencode`.
 - **Cost**: add `[prices]` with `"provider/model" = [input, output, cache_read, cache_write]` in USD per million tokens to see dollars.
 - **Composer** (as in T3 Code): ↑/↓ recall sent prompts, ⌘S stashes or restores a draft, ⌥↑ edits the last queued message,

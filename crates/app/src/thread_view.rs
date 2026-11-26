@@ -508,6 +508,7 @@ pub fn render_item(
     pal: Pal,
     mono: SharedString,
     toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    open_link: impl Fn(&SharedString, &ClickEvent, &mut Window, &mut App) + Send + Sync + 'static,
 ) -> AnyElement {
     let row = || div().w_full().max_w(px(760.)).px_6().py_1p5();
     let wrap = |d: Div| div().w_full().flex().justify_center().child(d).into_any_element();
@@ -531,6 +532,15 @@ pub fn render_item(
                         .child("コピー").on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(source.clone()))))
                     .child(div().id("toggle-code-wrap").px_2().py_0p5().rounded_md().text_xs().text_color(pal.muted).cursor_pointer().hover(|s| s.bg(pal.hover))
                         .child(label).on_click(move |_, _, cx| { WRAP_CODE.fetch_xor(true, Ordering::Relaxed); cx.refresh_windows(); }))
+            }).on_link_click(move |url, event, window, cx| {
+                // Match the default Markdown activation; right clicks and long presses don't open files.
+                if match event {
+                    ClickEvent::Mouse(click) => matches!(click.up.button, MouseButton::Left | MouseButton::Middle),
+                    ClickEvent::Keyboard(_) => true,
+                    ClickEvent::Touch(click) => !click.long_press,
+                } {
+                    open_link(url, event, window, cx);
+                }
             });
             wrap(row().child(view))
         }

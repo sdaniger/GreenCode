@@ -3,6 +3,7 @@
 use super::*;
 use gpui_kit::component::text::TextView;
 use std::collections::BTreeSet;
+use std::path::Path;
 
 const MAX_LINES: usize = 5_000;
 const MAX_BYTES: u64 = 2 * 1024 * 1024;
@@ -12,6 +13,7 @@ const MAX_BYTES: u64 = 2 * 1024 * 1024;
 pub(super) enum Content {
     Text(Vec<SharedString>),
     Image(PathBuf),
+    Media,
     /// A thumbnail is being rendered in the background.
     Pending,
     /// First page of a PDF; `None` when rendering failed.
@@ -28,6 +30,8 @@ pub(super) enum Content {
 }
 
 pub(super) struct FilesPanel {
+    #[cfg(target_os = "macos")]
+    player: Option<std::rc::Rc<super::media::Player>>,
     query: Entity<InputState>,
     pub(super) expanded: BTreeSet<String>,
     /// Relative path and its content.
@@ -48,6 +52,8 @@ impl FilesPanel {
             }
         });
         Self {
+            #[cfg(target_os = "macos")]
+            player: None,
             query,
             expanded: BTreeSet::new(),
             open: None,
@@ -55,6 +61,16 @@ impl FilesPanel {
             poll: None,
             render: None,
             _sub,
+        }
+    }
+
+    pub(super) fn close_preview(&mut self) {
+        self.open = None;
+        self.poll = None;
+        self.render = None;
+        #[cfg(target_os = "macos")]
+        {
+            self.player = None;
         }
     }
 }
@@ -141,6 +157,40 @@ fn changed(prev: Option<std::time::SystemTime>, now: Option<std::time::SystemTim
     prev != now
 }
 
+fn is_media(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| {
+        [
+            "mp4", "m4v", "mov", "webm", "mkv", "avi", "mp3", "m4a", "aac", "wav", "aiff",
+            "caf", "flac", "ogg",
+        ]
+        .iter()
+        .any(|kind| ext.eq_ignore_ascii_case(kind))
+    })
+}
+
+/// Assistant links may point at project files, not arbitrary local files or symlink targets.
+fn project_link(project: &Path, link: &str) -> Option<String> {
+    let path = match url::Url::parse(link) {
+        Ok(url) if url.scheme() == "file" && url.host_str().is_none() => url.to_file_path().ok()?,
+        Ok(_) if !Path::new(link).is_absolute() => return None,
+        _ => {
+            let path = link.split(['#', '?']).next().filter(|path| !path.is_empty())?;
+            percent_encoding::percent_decode_str(path).decode_utf8().ok()?.as_ref().into()
+        }
+    };
+    let root = project.canonicalize().ok()?;
+    let relative = if path.is_absolute() {
+        path.strip_prefix(project).or_else(|_| path.strip_prefix(&root)).ok()?
+    } else {
+        path.as_path()
+    };
+    let path = root.join(relative).canonicalize().ok()?;
+    if !path.is_file() {
+        return None;
+    }
+    Some(path.strip_prefix(root).ok()?.to_str()?.replace(std::path::MAIN_SEPARATOR, "/"))
+}
+
 fn snapshot(png: &std::path::Path, dir: &std::path::Path) -> std::io::Result<PathBuf> {
     use std::io::ErrorKind;
     std::fs::create_dir_all(dir)?;
@@ -212,6 +262,31 @@ fn diff_stats(diff: &[SharedString]) -> (usize, usize) {
 }
 
 impl Workspace {
+    /// Returns false only for links handled by the OS, not for invalid local paths.
+    pub(super) fn preview_link(&mut self, link: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !Path::new(link).is_absolute() {
+            if let Ok(url) = url::Url::parse(link) {
+                match url.scheme() {
+                    "http" | "https" | "mailto" | "greencode" => return false,
+                    "file" => {}
+                    _ => return true,
+                }
+            }
+        }
+        if !link.starts_with('#') {
+            if let Some(path) = project_link(&self.thread().meta.cwd, link) {
+                if self.files_panel.is_none() {
+                    self.toggle_files(window, cx);
+                }
+                self.open_file(&path, cx);
+            } else {
+                self.notice("プロジェクト内にこのファイルが見つかりません");
+                cx.notify();
+            }
+        }
+        true
+    }
+
     pub(super) fn toggle_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.files_panel.take().is_none() {
             self.files = None; // the agent may have created files since the list was cached
@@ -271,12 +346,14 @@ impl Workspace {
     }
 
     fn reload_file(&mut self, path: &str, cx: &mut Context<Self>) {
-        let abs = self.thread().meta.cwd.join(path);
+        let project = &self.threads[self.active].meta.cwd;
+        let abs = project.join(path);
         let ext = abs
             .extension()
             .map(|e| e.to_string_lossy().to_lowercase())
             .unwrap_or_default();
         let (content, render) = match ext.as_str() {
+            _ if is_media(&abs) => (Content::Media, false),
             "png" | "jpg" | "jpeg" | "gif" | "webp" => (Content::Image(abs.clone()), false),
             "pdf" | "html" | "htm" | "svg" => (Content::Pending, true),
             "md" => {
@@ -296,6 +373,19 @@ impl Workspace {
             return;
         };
         panel.render = None;
+        #[cfg(target_os = "macos")]
+        {
+            // A file can have been replaced since the link or file list was resolved.
+            panel.player = if matches!(content, Content::Media) && !cfg!(test) {
+                project.canonicalize().ok()
+                    .zip(abs.canonicalize().ok())
+                    .filter(|(root, file)| file.starts_with(root) && file.is_file())
+                    .and_then(|(_, file)| super::media::Player::new(&file))
+                    .map(std::rc::Rc::new)
+            } else {
+                None
+            };
+        }
         panel.open = Some((path.to_string(), content));
         cx.notify();
         if !render || cfg!(test) {
@@ -346,6 +436,7 @@ impl Workspace {
     pub(super) fn files_panel_view(
         &mut self,
         pal: Pal,
+        _unobscured: bool,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement> {
         let panel = self.files_panel.as_ref()?;
@@ -354,11 +445,18 @@ impl Workspace {
         let expanded = panel.expanded.clone();
         let open = panel.open.clone();
         let show_source = panel.show_source;
+        let media = open.as_ref().is_some_and(|(_, content)| matches!(content, Content::Media));
+        #[cfg(target_os = "macos")]
+        let player = panel.player.clone();
+        #[cfg(target_os = "macos")]
+        if let Some(player) = player.as_ref().filter(|_| !_unobscured) {
+            player.hide();
+        }
         let project = self.thread().meta.cwd.clone();
         let mono = cx.theme().mono_font_family.clone();
 
         let frame = div()
-            .w(px(380.))
+            .when_else(media, |d| d.w(relative(0.47)).max_w(px(640.)), |d| d.w(px(380.)))
             .h_full()
             .flex()
             .flex_col()
@@ -434,6 +532,20 @@ impl Workspace {
                     lines_view(lines.clone())
                 }
                 Content::Image(p) => scroll(picture(p)),
+                Content::Media => {
+                    #[cfg(target_os = "macos")]
+                    if let Some(player) = &player {
+                        if _unobscured {
+                            player.clone().element()
+                        } else {
+                            div().flex_1().into_any_element()
+                        }
+                    } else {
+                        note("このファイルはアプリ内で再生できません")
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    note("動画・音声は「外部で開く」で再生できます")
+                }
                 Content::Pending => note("プレビューを作成中…"),
                 Content::Pdf(Some(p)) => scroll(
                     div()
@@ -473,14 +585,35 @@ impl Workspace {
                         cx.notify();
                     }))
                 });
-            let browser = {
-                let abs = abs.clone();
-                chip("file-browser", "ブラウザで開く", pal).on_click(cx.listener(
-                    move |_, _: &ClickEvent, _, _| {
-                        spawn_external("/usr/bin/open", &[&abs.to_string_lossy()]);
-                    },
-                ))
+            let button = |id, label: &'static str| {
+                gpui_kit::base::Button::new(id)
+                    .accessibility_label(label)
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .text_xs()
+                    .text_color(pal.muted)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(pal.hover).text_color(pal.fg))
+                    .child(label)
             };
+            #[cfg(target_os = "macos")]
+            let transport = player.filter(|_| _unobscured).map(|player| {
+                let player = std::rc::Rc::downgrade(&player);
+                button("file-play-pause", "再生 / 一時停止").on_click(move |_, _, _| {
+                    if let Some(player) = player.upgrade() {
+                        player.toggle_playback();
+                    }
+                })
+            });
+            let external = button("file-browser", "外部で開く").on_click(cx.listener(
+                move |this, _: &ClickEvent, _, cx| {
+                    if let Err(err) = open::that_detached(&abs) {
+                        this.fail(format!("ファイルを開けません: {err}"));
+                        cx.notify();
+                    }
+                },
+            ));
             let snapshot = match &content {
                 Content::Rendered { png: Some(p), .. } | Content::Pdf(Some(p)) => Some(p.clone()),
                 _ => None,
@@ -524,26 +657,21 @@ impl Workspace {
                                             .font_weight(FontWeight::MEDIUM)
                                             .child(SharedString::from(name)),
                                     )
-                                    .child(chip("file-close", "閉じる", pal).on_click(
+                                    .child(button("file-close", "閉じる").on_click(
                                         cx.listener(|this, _: &ClickEvent, _, cx| {
                                             if let Some(p) = &mut this.files_panel {
-                                                p.open = None;
-                                                p.poll = None;
-                                                p.render = None;
+                                                p.close_preview();
                                             }
                                             cx.notify();
                                         }),
                                     )),
                             )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_wrap()
-                                    .gap_1()
-                                    .children(toggle)
-                                    .child(browser)
-                                    .children(snapshot),
-                            ),
+                            .child({
+                                let actions = div().flex().flex_wrap().gap_1();
+                                #[cfg(target_os = "macos")]
+                                let actions = actions.children(transport);
+                                actions.children(toggle).child(external).children(snapshot)
+                            }),
                     )
                     .child(body),
             );
@@ -716,7 +844,7 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{changed, snapshot};
+    use super::{changed, is_media, project_link, snapshot};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -727,6 +855,34 @@ mod tests {
         assert!(changed(Some(t), None));
         assert!(changed(None, Some(t)));
         assert!(!changed(None, None));
+    }
+
+    #[test]
+    fn project_links_open_encoded_media_but_not_other_filesystems() {
+        let dir = std::env::temp_dir().join(format!(
+            "greencode-link-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        let project = dir.join("project");
+        let video = project.join("demo #1.MP4");
+        let outside = dir.join("outside.mp4");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(&video, []).unwrap();
+        std::fs::write(&outside, []).unwrap();
+        assert_eq!(project_link(&project, "demo%20%231.MP4").as_deref(), Some("demo #1.MP4"));
+        let file = url::Url::from_file_path(&video).unwrap();
+        assert_eq!(project_link(&project, file.as_str()).as_deref(), Some("demo #1.MP4"));
+        assert!(is_media(&video));
+        assert!(project_link(&project, "../outside.mp4").is_none());
+        assert!(project_link(&project, "https://example.org/video.mp4").is_none());
+        assert!(project_link(&project, "file://example.org/video.mp4").is_none());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, project.join("escape.mp4")).unwrap();
+            assert!(project_link(&project, "escape.mp4").is_none());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

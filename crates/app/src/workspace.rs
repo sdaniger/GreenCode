@@ -9,6 +9,8 @@ mod git;
 mod goal;
 mod links;
 mod login;
+#[cfg(target_os = "macos")]
+mod media;
 mod mentions;
 mod models;
 mod nav;
@@ -3280,6 +3282,11 @@ impl Workspace {
 
     /// Shows thread `ix`, loading it from disk if needed.
     fn activate(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active != ix {
+            if let Some(panel) = &mut self.files_panel {
+                panel.close_preview();
+            }
+        }
         self.active = ix;
         // Items are reloaded or replaced here; the grouping cache may no longer match.
         *self.groups_cache.get_mut() = Default::default();
@@ -7882,6 +7889,16 @@ impl Workspace {
                 cx.notify();
             }
         });
+        let workspace = cx.weak_entity();
+        let open_link = move |url: &SharedString, _: &ClickEvent, window: &mut Window, cx: &mut App| {
+            if let Ok(handled) =
+                workspace.update(cx, |ws, cx| ws.preview_link(url, window, cx))
+            {
+                if !handled {
+                    cx.open_url(url);
+                }
+            }
+        };
         let column = || div().w_full().max_w(px(760.)).px_6().py_1p5();
         let centred = |d: Div| div().w_full().flex().justify_center().child(d);
         // Finished work (tools, thinking) collapses into one row; a click expands it.
@@ -8101,7 +8118,7 @@ impl Workspace {
         });
         div()
             .children(header)
-            .child(thread_view::render_item(ix, item, pal, mono, toggle))
+            .child(thread_view::render_item(ix, item, pal, mono, toggle, open_link))
             .children(copy)
             .children(edit)
             .children(card)
@@ -10266,7 +10283,6 @@ impl Render for Workspace {
         let diff = self
             .show_diff
             .then(|| self.diff_panel(pal, cx).into_any_element());
-        let files_panel = self.files_panel_view(pal, cx).map(|p| p.into_any_element());
         let pr_panel = self.pr_panel_view(pal, cx).map(|p| p.into_any_element());
         let git = self
             .show_git
@@ -10292,6 +10308,20 @@ impl Render for Workspace {
         let usage = self.usage_view(pal, cx).map(|p| p.into_any_element());
         let workflows = self.workflows_view(pal, cx).map(|p| p.into_any_element());
         let device_form = self.device_form_view(pal, cx).map(|p| p.into_any_element());
+        let unobscured = model_picker.is_none()
+            && settings.is_none()
+            && palette.is_none()
+            && provider_form.is_none()
+            && oauth_form.is_none()
+            && key_form.is_none()
+            && welcome.is_none()
+            && account_form.is_none()
+            && cite_form.is_none()
+            && usage.is_none()
+            && workflows.is_none()
+            && device_form.is_none()
+            && theme_editor.is_none();
+        let files_panel = self.files_panel_view(pal, unobscured, cx);
         div()
             .size_full()
             .flex()
