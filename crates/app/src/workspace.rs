@@ -3999,10 +3999,10 @@ impl Workspace {
 
     fn on_event(&mut self, id: &str, ev: Event, cx: &mut Context<Self>) {
         let notify = self.ui["notify_off"] != true;
-        let persist = matches!(&ev, Event::Done)
+        let persist = matches!(&ev, Event::Done { .. })
             || matches!(&ev, Event::Remote { command, .. } if command == "get_state" || command == "acp_state");
         let is_text = matches!(&ev, Event::Text(_));
-        let done = matches!(&ev, Event::Done);
+        let done = matches!(&ev, Event::Done { .. });
         // Orchestration requests that concern the workspace, not this thread's transcript.
         let ev = match ev {
             Event::Dialog { request, reply } if request["method"] == "schedule" => {
@@ -4443,7 +4443,7 @@ impl Workspace {
                 t.items.push(Item::Error(s.into()));
                 changed = Some((n, true));
             }
-            Event::Done => {
+            Event::Done { .. } => {
                 // The end of a silent discovery command, not of a prompt.
                 if t.warmups > 0 {
                     t.warmups -= 1;
@@ -10976,7 +10976,7 @@ mod tests {
         cx.spawn(async move |_, _| {
             while let Some(command) = commands.recv().await {
                 if is_discovery(&command) {
-                    let _ = events.send(Event::Done);
+                    let _ = events.send(Event::Done { waiting_for_delegates: false });
                 }
             }
         })
@@ -11109,7 +11109,7 @@ mod tests {
             for part in ["Hel", "lo"] {
                 ws.on_event(&id, Event::Text(part.into()), cx);
             }
-            ws.on_event(&id, Event::Done, cx);
+            ws.on_event(&id, Event::Done { waiting_for_delegates: false }, cx);
             assert!(matches!(&ws.thread().items[..], [Item::Assistant(t)] if t == "Hello"));
             // A repeated tool id (ACP's stub first, full arguments later) updates the row instead of adding one.
             ws.on_event(&id, Event::ToolStart { id: "c1".into(), name: "shell".into(), input: json!({"cwd": "/x"}) }, cx);
@@ -11289,7 +11289,7 @@ mod tests {
             assert_eq!(ws.thread().queue.front().unwrap(), "draft two");
             ws.stop();
             let id = ws.thread().meta.id.clone();
-            ws.on_event(&id, Event::Done, cx);
+            ws.on_event(&id, Event::Done { waiting_for_delegates: false }, cx);
             assert_eq!(ws.thread().queue.len(), 1);
             assert_eq!(Session::view(&id).unwrap().unwrap().queue, ["draft two"]);
         });
@@ -12804,7 +12804,7 @@ mod tests {
         ws.update(cx, |ws, cx| {
             let id = ws.thread().meta.id.clone();
             ws.on_event(&id, Event::Text("hi".into()), cx);
-            ws.on_event(&id, Event::Done, cx);
+            ws.on_event(&id, Event::Done { waiting_for_delegates: false }, cx);
         });
         cx.update(|window, cx| {
             ws.update(cx, |ws, cx| {
@@ -12886,7 +12886,7 @@ mod tests {
             ws.threads[0].meta.repo = Some("/tmp/example-repo".into());
             let id = ws.thread().meta.id.clone();
             ws.on_event(&id, Event::Text("hi".into()), cx);
-            ws.on_event(&id, Event::Done, cx);
+            ws.on_event(&id, Event::Done { waiting_for_delegates: false }, cx);
         });
         cx.simulate_input("unsent request");
         cx.update(|window, cx| {
@@ -12999,7 +12999,7 @@ mod tests {
         cx.simulate_keystrokes("enter");
         ws.update(cx, |ws, cx| {
             ws.threads[0].queue_held = false;
-            ws.on_event(&id, Event::Done, cx);
+            ws.on_event(&id, Event::Done { waiting_for_delegates: false }, cx);
             let t = ws.thread();
             assert!(
                 !t.queue.iter().any(|q| q.starts_with(super::GOAL_CONTINUE)),
@@ -13186,9 +13186,9 @@ mod tests {
             let id = ws.thread().meta.id.clone();
             ws.threads[0].status = Status::Running;
             ws.threads[0].warmups = 1;
-            ws.on_event(&id, Event::Done, cx);
+            ws.on_event(&id, Event::Done { waiting_for_delegates: false }, cx);
             assert!(ws.thread().status == Status::Running);
-            ws.on_event(&id, Event::Done, cx);
+            ws.on_event(&id, Event::Done { waiting_for_delegates: false }, cx);
             assert!(ws.thread().status == Status::Idle);
         });
     }
@@ -13242,7 +13242,7 @@ mod tests {
                 },
                 cx,
             );
-            ws.on_event(&id, Event::Done, cx);
+            ws.on_event(&id, Event::Done { waiting_for_delegates: false }, cx);
             assert!(ws.thread().deferred.is_none());
         });
         cx.run_until_parked();
@@ -13709,7 +13709,7 @@ mod tests {
             let id = ws.thread().meta.id.clone();
             ws.threads[0].goal = Some(("tests pass".into(), 0));
             ws.on_event(&id, Event::Text("still working".into()), cx);
-            ws.on_event(&id, Event::Done, cx);
+            ws.on_event(&id, Event::Done { waiting_for_delegates: false }, cx);
             assert!(
                 ws.thread()
                     .queue
@@ -13718,7 +13718,7 @@ mod tests {
                     && ws.thread().goal.as_ref().unwrap().1 == 1
             );
             ws.on_event(&id, Event::Text(" ... GOAL MET".into()), cx);
-            ws.on_event(&id, Event::Done, cx);
+            ws.on_event(&id, Event::Done { waiting_for_delegates: false }, cx);
             assert!(ws.thread().goal.is_none() && ws.thread().queue.is_empty());
         });
 

@@ -32,10 +32,16 @@ async fn remote_auth_threads_and_stream() {
         socket.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{body}").as_bytes()).await.unwrap();
     });
     let mut cfg = Config::default();
+    cfg.mode = greencode_core::permission::Mode::Full;
+    cfg.policy = Some(greencode_core::policy::Policy::parse(
+        r#"{"schemaVersion":1,"organization":"test","limits":{"maxMode":"ask"}}"#,
+    ).unwrap());
     cfg.providers.insert("local".into(), ProviderCfg { kind: "anthropic".into(), base_url: format!("http://{fake_addr}"), api_key: Some("test".into()), ..Default::default() });
     let mut meta = Meta::new(home.clone(), "local/test".into(), "native".into());
     meta.title = "test thread".into();
     Session::create(&meta).unwrap();
+    let view = serde_json::from_value(serde_json::json!({"meta":meta,"mode":"plan"})).unwrap();
+    Session::save_view(&view).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let token = remote::token(true).unwrap();

@@ -277,7 +277,7 @@ model = "mock/m"
                     result = &mut fut => { result?; break }
                     Some(event) = rx.recv() => match event {
                         greencode_core::Event::Text(t) => text.push_str(&t),
-                        greencode_core::Event::Done => break,
+                        greencode_core::Event::Done { .. } => break,
                         _ => {}
                     }
                 }

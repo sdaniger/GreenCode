@@ -185,8 +185,8 @@ pub enum Event {
     /// Native provider state, command results, and progress. Not model context.
     Remote { command: String, data: Value },
     Dialog { request: Value, reply: oneshot::Sender<Value> },
-    /// The turn is over (success, error or cancel).
-    Done,
+    /// The turn is over. Capture pending delegates here, before the next turn can consume them.
+    Done { waiting_for_delegates: bool },
 }
 
 pub enum Command {
@@ -564,7 +564,7 @@ pub async fn backend_models(cfg: Arc<config::Config>, backend: &str, cwd: PathBu
                 }
                 Event::Permission { reply, .. } => { let _ = reply.send(Decision::Deny); }
                 Event::Dialog { reply, .. } => { let _ = reply.send(serde_json::json!({"cancelled": true})); }
-                Event::Done => break,
+                Event::Done { .. } => break,
                 _ => {}
             }
         }
@@ -693,13 +693,13 @@ pub fn spawn(
                 Command::Prompt(_) | Command::PromptWithOptions(_, _) | Command::Steer(_) | Command::Remote(_) => {
                     if handed_off {
                         let _ = tx.send(Event::Error(HANDED_OFF.into()));
-                        let _ = tx.send(Event::Done);
+                        finish_backend_turn(&tx, &meta.id);
                         continue;
                     }
                     if let Some(policy) = &cfg.policy {
                         if let Err(e) = policy.check_mode(perms.mode()) {
                             let _ = tx.send(Event::Error(format!("{e:#}")));
-                            let _ = tx.send(Event::Done);
+                            finish_backend_turn(&tx, &meta.id);
                             continue;
                         }
                     }
@@ -708,7 +708,7 @@ pub fn spawn(
                             Ok(b) => backend = Some(b),
                             Err(e) => {
                                 let _ = tx.send(Event::Error(format!("{e:#}")));
-                                let _ = tx.send(Event::Done);
+                                finish_backend_turn(&tx, &meta.id);
                                 continue;
                             }
                         }
@@ -724,7 +724,7 @@ pub fn spawn(
                         }
                         if let Some(e) = error {
                             let _ = tx.send(Event::Error(format!("{e:#}")));
-                            let _ = tx.send(Event::Done);
+                            finish_backend_turn(&tx, &meta.id);
                             continue;
                         }
                     }
@@ -773,13 +773,17 @@ pub fn spawn(
                     }
                     if failed { backend = None; }
                     host.busy.send_replace(false);
-                    let _ = tx.send(Event::Done);
+                    finish_backend_turn(&tx, &meta.id);
                 }
             }
         }
         delegate::unregister(&meta.id);
     });
     (ctx, erx)
+}
+
+fn finish_backend_turn(tx: &EventTx, thread: &str) {
+    let _ = tx.send(Event::Done { waiting_for_delegates: delegate::outstanding(thread) });
 }
 
 pub fn event_json(event: &Event) -> Value {
@@ -796,7 +800,7 @@ pub fn event_json(event: &Event) -> Value {
         Event::Dialog { request, .. } => json!({"type":"dialog","request":request}),
         Event::Notify(text) => json!({"type":"notify","text":text}),
         Event::Error(text) => json!({"type":"error","text":text}),
-        Event::Done => json!({"type":"done"}),
+        Event::Done { .. } => json!({"type":"done"}),
     }
 }
 

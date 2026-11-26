@@ -88,7 +88,7 @@ async fn acp_parent_creates_messages_and_manages_threads_through_greencode() {
                 assert!(request["title"].as_str().unwrap().contains("API_TOKEN"), "{request}");
                 let _ = reply.send(json!({"value": "s3cret"}));
             }
-            Event::Done => break,
+            Event::Done { .. } => break,
             _ => {}
         }
     }

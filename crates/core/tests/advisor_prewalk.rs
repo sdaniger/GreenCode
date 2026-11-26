@@ -112,7 +112,7 @@ async fn advisor_notes_inject_after_the_final_answer() {
     assert!(a.messages.iter().any(|m| m.content.iter().any(|b| matches!(b, Block::Text { text } if text.contains("the file is wrong")))));
 }
 
-/// Prewalk reviews on `turn` mode every interval, and the first edit switches the model to `smol`.
+/// The first successful edit switches the model to `smol`.
 #[tokio::test]
 async fn prewalk_switches_model_at_the_first_edit() {
     let mock = Arc::new(Mock { seen: Default::default() });

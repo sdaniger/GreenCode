@@ -242,7 +242,9 @@ fn run_turn(cfg: Config, meta: Meta, prompt: String, json: bool) -> Result<()> {
                 }
                 let _ = reply.send(answer);
             }
-            Event::Done => { done = true; break; }
+            // Delegated tasks wake this thread for another turn; exiting now would kill them.
+            Event::Done { waiting_for_delegates: true } => {}
+            Event::Done { waiting_for_delegates: false } => { done = true; break; }
             _ => {}
         }
     }

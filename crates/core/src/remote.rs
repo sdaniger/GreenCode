@@ -13,14 +13,26 @@ struct Turn {
     dialog: Mutex<Option<oneshot::Sender<Value>>>,
     /// Dropped when the turn ends so the engine can exit.
     cancel: Mutex<Option<mpsc::UnboundedSender<Command>>>,
-    done: Mutex<bool>,
 }
+
+impl Turn {
+    fn is_done(&self) -> bool {
+        self.events.lock().unwrap().last().is_some_and(|e| e["type"] == "done")
+    }
+}
+
 /// A read-only link to one thread. Requests are guest messages waiting for the owner to send or dismiss them.
 #[derive(Clone, Serialize, Deserialize)]
 struct Guest { token: String, thread: String, expires: u64, requests: Vec<GuestRequest> }
 #[derive(Clone, Serialize, Deserialize)]
 struct GuestRequest { id: String, text: String, at: u64 }
-struct State { token: String, cfg: Arc<Config>, turns: Mutex<HashMap<String, Arc<Turn>>>, guests: Mutex<Vec<Guest>> }
+struct State {
+    token: String,
+    cfg: Arc<Config>,
+    turns: Mutex<HashMap<String, Arc<Turn>>>,
+    guests: Mutex<Vec<Guest>>,
+    guest_changes: watch::Sender<()>,
+}
 
 const GUEST_TTL: u64 = 24 * 3600;
 const GUEST_REQUESTS: usize = 20;
@@ -55,6 +67,7 @@ fn with_guests<R>(state: &State, f: impl FnOnce(&mut Vec<Guest>) -> R) -> R {
     let mut guests = state.guests.lock().unwrap();
     guests.retain(|g| g.expires > now());
     let result = f(&mut guests);
+    state.guest_changes.send_replace(());
     // A failed save only loses links across a restart; the live links keep working.
     let _ = serde_json::to_vec(&*guests).map(|data| write_private(&guests_path(), &data));
     result
@@ -79,7 +92,10 @@ pub fn token(rotate: bool) -> Result<String> {
 /// Serves until the listener is closed or the process exits.
 pub async fn serve(listener: TcpListener, token: String, cfg: Config) -> Result<()> {
     let guests = std::fs::read(guests_path()).ok().and_then(|d| serde_json::from_slice::<Vec<Guest>>(&d).ok()).unwrap_or_default();
-    let state = Arc::new(State { token, cfg: Arc::new(cfg), turns: Mutex::new(HashMap::new()), guests: Mutex::new(guests) });
+    let state = Arc::new(State {
+        token, cfg: Arc::new(cfg), turns: Mutex::new(HashMap::new()), guests: Mutex::new(guests),
+        guest_changes: watch::channel(()).0,
+    });
     with_guests(&state, |_| ());
     if let Ok(addr) = listener.local_addr() {
         let host = if addr.ip().is_unspecified() { format!("127.0.0.1:{}", addr.port()) } else { addr.to_string() };
@@ -159,27 +175,28 @@ struct Share { ttl_secs: Option<u64> }
 fn start(state: &Arc<State>, meta: Meta, text: String) -> Result<(), &'static str> {
     if text.trim().is_empty() { return Err("empty prompt"); }
     if !meta.cwd.is_dir() { return Err("cwd must be a directory"); }
+    let mode = Session::view(&meta.id).map_err(|_| "cannot read thread permissions")?
+        .map_or(state.cfg.mode, |view| view.mode);
     if let Some(policy) = &state.cfg.policy {
-        if policy.check_mode(state.cfg.mode).is_err() || !policy.backend_allowed(&meta.backend) { return Err("blocked by policy"); }
+        if policy.check_mode(mode).is_err() || !policy.backend_allowed(&meta.backend) { return Err("blocked by policy"); }
     }
     let mut turns = state.turns.lock().unwrap();
-    if turns.get(&meta.id).is_some_and(|t| !*t.done.lock().unwrap()) { return Err("turn already running"); }
+    if turns.get(&meta.id).is_some_and(|t| !t.is_done()) { return Err("turn already running"); }
     let (changed, _) = watch::channel(0);
-    let (tx, mut rx) = crate::spawn(&tokio::runtime::Handle::current(), state.cfg.clone(), meta.clone(), Arc::new(Perms::new(state.cfg.mode)));
-    let turn = Arc::new(Turn { events: Mutex::new(Vec::new()), changed, permission: Mutex::new(None), dialog: Mutex::new(None), cancel: Mutex::new(Some(tx.clone())), done: Mutex::new(false) });
+    let (tx, mut rx) = crate::spawn(&tokio::runtime::Handle::current(), state.cfg.clone(), meta.clone(), Arc::new(Perms::new(mode)));
+    let turn = Arc::new(Turn { events: Mutex::new(Vec::new()), changed, permission: Mutex::new(None), dialog: Mutex::new(None), cancel: Mutex::new(Some(tx.clone())) });
     turns.insert(meta.id.clone(), turn.clone());
     let _ = tx.send(Command::Prompt(text));
     tokio::spawn(async move {
         let _tx = tx;
         while let Some(event) = rx.recv().await {
             let value = crate::event_json(&event);
-            let done = matches!(event, Event::Done);
+            let done = matches!(event, Event::Done { .. });
             match event {
                 Event::Permission { reply, .. } => *turn.permission.lock().unwrap() = Some(reply),
                 Event::Dialog { reply, .. } => *turn.dialog.lock().unwrap() = Some(reply),
                 _ => {}
             }
-            if done { *turn.done.lock().unwrap() = true; }
             let mut events = turn.events.lock().unwrap();
             events.push(value);
             turn.changed.send_replace(events.len());
@@ -192,13 +209,12 @@ fn start(state: &Arc<State>, meta: Meta, text: String) -> Result<(), &'static st
     Ok(())
 }
 
-/// Marks a turn finished and publishes one terminal error, unless it already ended.
+/// A closed engine channel still has to terminate every event stream.
 fn finish_turn(turn: &Turn, text: &str) {
-    let mut done = turn.done.lock().unwrap();
-    if *done { return; }
-    *done = true;
     let mut events = turn.events.lock().unwrap();
+    if events.last().is_some_and(|e| e["type"] == "done") { return; }
     events.push(json!({"type":"error","text":text}));
+    events.push(json!({"type":"done"}));
     turn.changed.send_replace(events.len());
 }
 
@@ -219,7 +235,7 @@ async fn stream_events(stream: &mut TcpStream, turn: &Turn, guest: bool) -> Resu
         let events = { let events = turn.events.lock().unwrap(); events[index..].to_vec() };
         for event in events {
             index += 1;
-            if guest && event["type"] == "permission" { continue; }
+            if guest && matches!(event["type"].as_str(), Some("permission" | "dialog")) { continue; }
             stream.write_all(format!("data: {event}\n\n").as_bytes()).await?;
             if event["type"] == "done" { return Ok(()); }
         }
@@ -227,10 +243,25 @@ async fn stream_events(stream: &mut TcpStream, turn: &Turn, guest: bool) -> Resu
     }
 }
 
+async fn wait_for_guest_access_to_end(state: &State, token: &str, expires: u64) {
+    let mut changes = state.guest_changes.subscribe();
+    let elapsed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let deadline = tokio::time::sleep(Duration::from_secs(expires).saturating_sub(elapsed));
+    tokio::pin!(deadline);
+    loop {
+        if !state.guests.lock().unwrap().iter().any(|g| g.token == token) { return; }
+        tokio::select! {
+            _ = &mut deadline => return,
+            _ = changes.changed() => {}
+        }
+    }
+}
+
 async fn guest(stream: &mut TcpStream, state: &Arc<State>, method: &str, rest: &str, body: &[u8]) -> Result<()> {
     let (token, tail) = rest.split_once('/').unwrap_or((rest, ""));
-    let thread = state.guests.lock().unwrap().iter().find(|g| g.token == token && g.expires > now()).map(|g| g.thread.clone());
-    let Some(thread) = thread else { return reply(stream, "404 Not Found", json!({"error":"link expired or revoked"})).await };
+    let guest = state.guests.lock().unwrap().iter()
+        .find(|g| g.token == token && g.expires > now()).map(|g| (g.thread.clone(), g.expires));
+    let Some((thread, expires)) = guest else { return reply(stream, "404 Not Found", json!({"error":"link expired or revoked"})).await };
     match (method, tail) {
         ("GET", "") => response(stream, "200 OK", "text/html; charset=utf-8", include_bytes!("guest.html")).await,
         ("GET", "thread") => match Session::load(&thread) {
@@ -239,8 +270,12 @@ async fn guest(stream: &mut TcpStream, state: &Arc<State>, method: &str, rest: &
         },
         ("GET", "events") => {
             let turn = state.turns.lock().unwrap().get(&thread).cloned();
-            match turn.filter(|t| !*t.done.lock().unwrap()) {
-                Some(turn) => stream_events(stream, &turn, true).await,
+            match turn.filter(|t| !t.is_done()) {
+                Some(turn) => tokio::select! {
+                    biased;
+                    _ = wait_for_guest_access_to_end(state, token, expires) => Ok(()),
+                    result = stream_events(stream, &turn, true) => result,
+                },
                 None => reply(stream, "404 Not Found", json!({"error":"no running turn"})).await,
             }
         }
@@ -364,15 +399,20 @@ async fn handle(mut stream: TcpStream, state: Arc<State>) -> Result<()> {
             return reply(&mut stream, "200 OK", json!(requests)).await;
         }
         if method == "POST" && parts.len() == 6 && parts[3] == "requests" {
-            let text = state.guests.lock().unwrap().iter().filter(|g| g.thread == id).flat_map(|g| &g.requests).find(|r| r.id == parts[4]).map(|r| r.text.clone());
-            let Some(text) = text else { return reply(&mut stream, "404 Not Found", json!({"error":"request not found"})).await };
-            let (status, value) = match parts[5] {
-                "send" => send_prompt(&state, id, text),
-                "dismiss" => ("200 OK", json!({"ok":true})),
-                _ => return reply(&mut stream, "404 Not Found", json!({"error":"not found"})).await,
-            };
-            // A request that could not be sent stays pending.
-            if status.starts_with('2') { with_guests(&state, |guests| guests.iter_mut().for_each(|g| g.requests.retain(|r| r.id != parts[4]))); }
+            let (status, value) = with_guests(&state, |guests| {
+                let request = guests.iter_mut().filter(|g| g.thread == id)
+                    .find_map(|g| g.requests.iter().position(|r| r.id == parts[4]).map(|i| (&mut g.requests, i)));
+                let Some((requests, index)) = request else {
+                    return ("404 Not Found", json!({"error":"request not found"}));
+                };
+                let (status, value) = match parts[5] {
+                    "send" => send_prompt(&state, id, requests[index].text.clone()),
+                    "dismiss" => ("200 OK", json!({"ok":true})),
+                    _ => return ("404 Not Found", json!({"error":"not found"})),
+                };
+                if status.starts_with('2') { requests.remove(index); }
+                (status, value)
+            });
             return reply(&mut stream, status, value).await;
         }
         if parts.len() == 4 {
@@ -416,12 +456,14 @@ mod tests {
     #[test]
     fn a_closed_channel_finishes_the_turn_once() {
         let (changed, _) = watch::channel(0);
-        let turn = Turn { events: Mutex::new(Vec::new()), changed, permission: Mutex::new(None), dialog: Mutex::new(None), cancel: Mutex::new(None), done: Mutex::new(false) };
+        let turn = Turn { events: Mutex::new(Vec::new()), changed, permission: Mutex::new(None), dialog: Mutex::new(None), cancel: Mutex::new(None) };
         finish_turn(&turn, "agent exited before finishing the turn");
         finish_turn(&turn, "second");
-        assert!(*turn.done.lock().unwrap());
+        assert!(turn.is_done());
         let events = turn.events.lock().unwrap();
-        assert_eq!(events.len(), 1, "only one terminal event");
-        assert_eq!(events[0]["type"], "error");
+        assert_eq!(events.as_slice(), [
+            json!({"type":"error","text":"agent exited before finishing the turn"}),
+            json!({"type":"done"}),
+        ]);
     }
 }

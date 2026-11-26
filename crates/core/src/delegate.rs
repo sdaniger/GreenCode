@@ -380,7 +380,7 @@ fn track(child: String, cmd: mpsc::UnboundedSender<Command>, mut rx: mpsc::Unbou
                 Event::Error(e) => error = Some(e.clone()),
                 _ => {}
             }
-            let done = matches!(ev, Event::Done);
+            let done = matches!(ev, Event::Done { .. });
             let _ = view_tx.send(ev);
             if done { finished = true; break; }
         }
@@ -499,7 +499,7 @@ pub fn is_running(id: &str) -> bool {
 }
 
 /// Whether `parent` has async children still running or results not yet delivered.
-pub fn outstanding(parent: &str) -> bool {
+pub(crate) fn outstanding(parent: &str) -> bool {
     TASKS.lock().unwrap().values().any(|t| t.parent == parent && t.wake && !t.delivered)
 }
 
@@ -624,7 +624,7 @@ async fn start_remote(parent: &Meta, env: Environment, target: &Value, task: &st
                         Ok(v) => { let _ = etx.send(Event::Text(v["text"].as_str().unwrap_or_default().into())); }
                         Err(e) => { let _ = etx.send(Event::Error(format!("{e:#}"))); }
                     }
-                    let _ = etx.send(Event::Done);
+                    let _ = etx.send(Event::Done { waiting_for_delegates: false });
                     break;
                 }
             }

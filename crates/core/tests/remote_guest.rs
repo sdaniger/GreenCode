@@ -77,8 +77,18 @@ async fn remote_cancel_and_guest_links_are_scoped_and_expire() {
     let pending: Value = owner(reqwest::Method::GET, format!("/api/threads/{}/requests", first.id)).send().await.unwrap().json().await.unwrap();
     assert_eq!(pending.as_array().unwrap().len(), 0);
 
+    let first_url = format!("/api/threads/{}", first.id);
+    assert_eq!(owner(reqwest::Method::POST, format!("{first_url}/prompt"))
+        .json(&json!({"text":"work"})).send().await.unwrap().status(), 202);
+    let live_guest = client.get(format!("{guest_base}/events")).send().await.unwrap();
+    assert_eq!(live_guest.status(), 200);
     assert_eq!(owner(reqwest::Method::POST, format!("/api/threads/{}/unshare", first.id)).send().await.unwrap().status(), 200);
     assert_eq!(client.get(format!("{guest_base}/thread")).send().await.unwrap().status(), 404, "revoked links stop working");
+    let events = tokio::time::timeout(Duration::from_secs(2), live_guest.text()).await
+        .expect("revoking access closes an already-open guest stream").unwrap();
+    assert!(!events.contains("\"type\":\"done\""), "the owner's turn is still running: {events}");
+    assert_eq!(owner(reqwest::Method::POST, format!("{first_url}/cancel"))
+        .send().await.unwrap().status(), 200);
 
     let expired: Value = owner(reqwest::Method::POST, format!("/api/threads/{}/share", first.id)).json(&json!({"ttl_secs": 0})).send().await.unwrap().json().await.unwrap();
     let expired = format!("{base}/guest/{}", expired["token"].as_str().unwrap());

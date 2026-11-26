@@ -59,20 +59,22 @@ async fn acp_parent_delegates_to_another_backend_and_is_woken_with_the_result() 
         cfg.backends.push(AcpCfg { name: name.into(), command: vec!["python3".into(), format!("{name}.py")], env: Default::default(), protocol: Default::default() });
     }
     let meta = Meta::new(cwd, "default".into(), "parent".into());
+    Session::create(&meta).unwrap();
     let parent = meta.id.clone();
     let (cmd, mut rx) = greencode_core::spawn(&tokio::runtime::Handle::current(), Arc::new(cfg), meta, Arc::new(Perms::new(Mode::Full)));
     cmd.send(Command::Prompt("delegate it".into())).unwrap();
-    let (mut text, mut rows, mut wake, mut dones) = (String::new(), vec![], None, 0);
-    while dones < 2 {
+    let (mut text, mut rows, mut wake, mut dones) = (String::new(), vec![], None, Vec::new());
+    while dones.len() < 2 {
         match tokio::time::timeout(Duration::from_secs(20), rx.recv()).await.expect("event").expect("open") {
             Event::Text(t) => text.push_str(&t),
             Event::Error(e) => panic!("{e}"),
             Event::Remote { command, data } if command == "subagent" => rows.push(data),
             Event::Remote { command, data } if command == "delegate_wake" => wake = data["text"].as_str().map(str::to_string),
-            Event::Done => dones += 1,
+            Event::Done { waiting_for_delegates } => dones.push(waiting_for_delegates),
             _ => {}
         }
     }
+    assert_eq!(dones, [true, false], "only the first turn leaves a delegated result pending");
     assert!(text.starts_with("started running"), "{text}");
     let wake = wake.expect("the finished child woke the idle parent");
     assert!(wake.contains("### kid (child · default") && wake.contains("completed\nchild result"), "{wake}");

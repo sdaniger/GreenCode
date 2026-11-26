@@ -474,7 +474,7 @@ async fn open_session(rpc: &Arc<Rpc>, saved: &Value, init: &Value, meta: &Meta, 
         let r = rpc.request("session/load", json!({"sessionId":id,"cwd":meta.cwd,"mcpServers":mcp})).await?;
         Ok((id.to_string(), r))
     } else {
-        if Session::open(&meta.id).is_some() {
+        if !Session::can_start_external(&meta.id)? {
             anyhow::bail!("this thread predates saved ACP session handles; start a new thread to preserve its transcript");
         }
         let r = rpc.request("session/new", json!({"cwd": meta.cwd, "mcpServers": mcp})).await?;

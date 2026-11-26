@@ -289,7 +289,7 @@ impl Pi {
         }
         if let Some(file) = saved["sessionFile"].as_str() {
             cmd.arg("--session").arg(file);
-        } else if Session::open(&meta.id).is_some() {
+        } else if !Session::can_start_external(&meta.id)? {
             bail!("this thread has no native session handle; start a new thread instead of silently losing its context");
         }
         let mut child = cmd

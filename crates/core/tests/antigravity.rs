@@ -396,7 +396,7 @@ for line in sys.stdin:
                 Event::Thinking(t) => thinking.push_str(&t),
                 Event::Text(t) => answer.push_str(&t),
                 Event::Error(e) => panic!("unexpected error: {e}"),
-                Event::Done => break,
+                Event::Done { .. } => break,
                 _ => {}
             }
         }
@@ -426,7 +426,7 @@ for line in sys.stdin:
         while let Some(ev) = rx2.recv().await {
             match ev {
                 Event::Error(e) => found = Some(e),
-                Event::Done => break,
+                Event::Done { .. } => break,
                 _ => {}
             }
         }

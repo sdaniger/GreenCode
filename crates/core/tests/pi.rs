@@ -98,6 +98,7 @@ fn advertised(events: &[Event], command: &str) -> Vec<String> {
 #[tokio::test]
 async fn rpc_resumes_native_history_and_roundtrips_dialogs_without_replay() {
     let meta = meta("resume");
+    Session::create(&meta).unwrap();
     let perms = Arc::new(Perms::new(Mode::Ask));
     let mut pi = Pi::start(&command(), Protocol::Pi, &meta, perms.clone())
         .await
@@ -109,7 +110,7 @@ async fn rpc_resumes_native_history_and_roundtrips_dialogs_without_replay() {
     let (tx, _) = mpsc::unbounded_channel();
     pi.handoff(&tx).await.unwrap();
     drop(pi);
-    let mut pi = Pi::start(&command(), Protocol::Pi, &meta, perms)
+    let mut pi = Pi::start(&command(), Protocol::Pi, &meta, perms.clone())
         .await
         .unwrap();
     let next = run(&mut pi, "second").await;
@@ -139,6 +140,12 @@ async fn rpc_resumes_native_history_and_roundtrips_dialogs_without_replay() {
     assert!(prompts.iter().all(|p| p.get("messages").is_none()
         && p.get("system").is_none()
         && p.get("tools").is_none()));
+
+    drop(pi);
+    Session::clear_runtime(&meta.id).unwrap();
+    let error = Pi::start(&command(), Protocol::Pi, &meta, perms)
+        .await.err().expect("a thread with history cannot start fresh");
+    assert!(error.to_string().contains("no native session handle"));
 }
 
 #[tokio::test]
@@ -253,7 +260,7 @@ async fn runner_does_not_discard_prompts_received_during_a_turn() {
         while done < 2 {
             match rx.recv().await.unwrap() {
                 Event::Text(t) => text.push_str(&t),
-                Event::Done => done += 1,
+                Event::Done { .. } => done += 1,
                 Event::Error(e) => panic!("{e}"),
                 _ => {}
             }
@@ -280,7 +287,7 @@ async fn idle_command_updates_are_published_before_the_next_prompt() {
         let mut done = false;
         loop {
             match rx.recv().await.unwrap() {
-                Event::Done => done = true,
+                Event::Done { .. } => done = true,
                 Event::Remote { command, data } if command == "available_commands_update" => {
                     assert!(done);
                     assert!(data["commands"].as_array().unwrap().iter().any(|v| v["name"] == "settings"));
@@ -293,7 +300,7 @@ async fn idle_command_updates_are_published_before_the_next_prompt() {
         tx.send(Command::Prompt("/settings".into())).unwrap();
         loop {
             match rx.recv().await.unwrap() {
-                Event::Done => break,
+                Event::Done { .. } => break,
                 Event::Error(e) => panic!("{e}"),
                 _ => {}
             }
@@ -326,7 +333,7 @@ async fn cached_thinking_and_preset_precede_first_prompt() {
         loop {
             match rx.recv().await.unwrap() {
                 Event::Error(e) => panic!("{e}"),
-                Event::Done => break,
+                Event::Done { .. } => break,
                 _ => {}
             }
         }
@@ -430,6 +437,7 @@ async fn pi_jsonl_export_is_routed_to_session_extension() {
 #[tokio::test]
 async fn omp_commands_use_aliases_live_updates_and_rpc_login() {
     let meta = meta("omp-commands");
+    Session::create(&meta).unwrap();
     let mut pi = Pi::start(&command(), Protocol::Omp, &meta, Arc::new(Perms::new(Mode::Ask))).await.unwrap();
     // `info` is an alias of the advertised `session`: it must reach OMP, not a GreenCode shortcut.
     let first = run(&mut pi, "/info").await;
@@ -608,7 +616,7 @@ async fn runner_handoff_is_refused_mid_turn_and_succeeds_after_cancel() {
     assert!(alive(&meta));
     tx.send(Command::Cancel).unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
-        while !matches!(rx.recv().await.unwrap(), Event::Done) {}
+        while !matches!(rx.recv().await.unwrap(), Event::Done { .. }) {}
     })
     .await
     .unwrap();

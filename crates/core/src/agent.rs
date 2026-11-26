@@ -959,25 +959,26 @@ impl Agent {
         }
     }
 
-    /// Runs `spec` from now on: a registry provider gets its own client, a bare model keeps the
-    /// provider that already served this agent. The session meta and the GUI's model state follow.
+    /// Switches only after the target provider has accepted the configuration.
     fn switch_model(&mut self, spec: &str, tx: &EventTx) -> Result<()> {
-        let known = spec.split_once('/').is_some_and(|(p, _)| self.cfg.providers.contains_key(p));
-        match known.then(|| provider::make(&self.cfg, spec)).transpose() {
-            Ok(Some((provider, model))) => {
-                self.provider = provider;
-                self.model = model;
-            }
-            _ => {
-                if let Some((_, model)) = spec.split_once('/') {
-                    self.model = model.to_string();
-                }
-            }
-        }
-        self.meta.model = spec.to_string();
+        let (name, model) = spec.split_once('/').filter(|(name, model)| !name.is_empty() && !model.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("model must be `provider/model`, got `{spec}`"))?;
+        // An injected provider can serve other models under its own name, not a different provider.
+        let injected = !self.cfg.providers.contains_key(name)
+            && self.meta.model.split_once('/').is_some_and(|(current, _)| current == name);
+        let (provider, model) = if injected {
+            (self.provider.clone(), model.to_owned())
+        } else {
+            provider::make(&self.cfg, spec)?
+        };
+        let mut meta = self.meta.clone();
+        meta.model = spec.to_owned();
         if let Some(session) = &self.session {
-            let _ = session.append(&json!({"meta": self.meta.clone()}));
+            session.append(&json!({"meta": meta}))?;
         }
+        self.provider = provider;
+        self.model = model;
+        self.meta = meta;
         let (_, data) = crate::assist::switched_event(spec);
         let _ = tx.send(Event::Remote { command: "model".into(), data });
         Ok(())

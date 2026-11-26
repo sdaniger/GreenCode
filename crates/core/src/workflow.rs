@@ -877,7 +877,7 @@ async fn run_agent(cfg: Arc<crate::config::Config>, req: AgentRequest) -> Result
                     error.get_or_insert_with(|| format!("承認が必要です（{tool}: {summary}）"));
                 }
                 Some(Event::Dialog { reply, .. }) => { let _ = reply.send(json!({"cancelled": true})); }
-                Some(Event::Done) => break,
+                Some(Event::Done { .. }) => break,
                 _ => {}
             }
         }
@@ -938,9 +938,7 @@ impl Runtime {
 
     pub fn start(&self, name: &str, payload: Value, key: Option<String>, trigger: &str) -> Result<Run> {
         if let Some(key) = key.as_deref() {
-            if let Some(mut run) = find_key(&self.paths, key) {
-                // A duplicate start must not execute the step that was running when it was retried.
-                let _ = &mut run;
+            if let Some(run) = find_key(&self.paths, key) {
                 return Ok(run);
             }
         }
@@ -1378,74 +1376,76 @@ impl TriggerState {
         paths.runs.with_file_name("workflow-triggers.json")
     }
 
-    fn load(paths: &Paths) -> Self {
-        std::fs::read(Self::path(paths))
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
+    fn load(paths: &Paths) -> Result<Self> {
+        match std::fs::read(Self::path(paths)) {
+            Ok(data) => Ok(serde_json::from_slice(&data)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(e.into()),
+        }
     }
 
-    fn save(&self, paths: &Paths) {
+    fn save(&self, paths: &Paths) -> Result<()> {
         let path = Self::path(paths);
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
         let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, serde_json::to_vec_pretty(self).unwrap_or_default()).is_ok() {
-            let _ = std::fs::rename(tmp, path);
+        std::fs::write(&tmp, serde_json::to_vec(self)?)?;
+        std::fs::rename(tmp, path)?;
+        Ok(())
+    }
+
+    /// Load after locking so the desktop and `serve` cannot both fire the same schedule.
+    fn tick(rt: &Runtime, workflows: &[Definition]) -> Result<()> {
+        if !workflows.iter().any(|d| d.trigger.every.is_some() || d.trigger.daily.is_some()) {
+            return Ok(());
+        }
+        let lock_path = Self::path(&rt.paths).with_extension("lock");
+        std::fs::create_dir_all(lock_path.parent().context("schedule lock has no parent")?)?;
+        let lock = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(lock_path)?;
+        match lock.try_lock() {
+            Ok(()) => Self::load(&rt.paths)?.advance(rt, workflows),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(()),
+            Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
         }
     }
 
-    /// Fires due schedules. New definitions are armed (not fired) on first sight.
-    fn tick(&mut self, rt: &Runtime) {
-        let defs = rt.definitions();
+    /// New definitions are armed (not fired) on first sight.
+    fn advance(&mut self, rt: &Runtime, workflows: &[Definition]) -> Result<()> {
         let at = now();
         let mut changed = false;
-        for def in &defs.workflows {
+        let mut due = Vec::new();
+        for versions in workflows.chunk_by(|a, b| a.name == b.name) {
+            let def = &versions[versions.len() - 1];
             let key = format!("{}@{}", def.name, def.version);
             let last = self.seen.get(&key).copied();
-            if let Some(every) = &def.trigger.every {
+            let run = if let Some(every) = &def.trigger.every {
                 let Ok(secs) = parse_duration(every) else { continue };
-                match last {
-                    None => {
-                        self.seen.insert(key, at);
-                        changed = true;
-                    }
-                    Some(last) if at >= last.saturating_add(secs) => {
-                        if let Err(e) = rt.start(&def.name, json!({}), None, "schedule") {
-                            eprintln!("ワークフロー {} の定期実行を開始できません: {e:#}", def.name);
-                        }
-                        self.seen.insert(key, at);
-                        changed = true;
-                    }
-                    _ => {}
-                }
+                if last.is_some_and(|last| at < last.saturating_add(secs)) { continue; }
+                last.is_some()
             } else if let Some(daily) = &def.trigger.daily {
                 let Ok(hhmm) = parse_daily(daily) else { continue };
-                match last {
-                    None => {
-                        self.seen.insert(key, at);
-                        changed = true;
-                    }
-                    Some(last) => {
-                        let next = next_daily(last, hhmm);
-                        if at >= next {
-                            // A time missed by more than ten minutes while stopped is skipped.
-                            if at - next <= 600 {
-                                if let Err(e) = rt.start(&def.name, json!({}), None, "schedule") {
-                                    eprintln!("ワークフロー {} の定期実行を開始できません: {e:#}", def.name);
-                                }
-                            }
-                            self.seen.insert(key, at);
-                            changed = true;
-                        }
-                    }
+                if let Some(last) = last {
+                    let next = next_daily(last, hhmm);
+                    if at < next { continue; }
+                    at - next <= 600
+                } else {
+                    false
                 }
-            }
+            } else {
+                continue;
+            };
+            self.seen.insert(key, at);
+            changed = true;
+            if run { due.push(def); }
         }
         if changed {
-            self.save(&rt.paths);
+            // shortcut: a crash after saving can miss one run; use a transactional run store if catch-up is needed.
+            self.save(&rt.paths)?;
         }
+        for def in due {
+            if let Err(e) = rt.start(&def.name, json!({}), None, "schedule") {
+                eprintln!("ワークフロー {} の定期実行を開始できません: {e:#}", def.name);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1453,9 +1453,11 @@ impl TriggerState {
 /// webhooks when a port is given. Never returns.
 pub async fn orchestrate(cfg: Arc<crate::config::Config>, workdir: PathBuf, webhook_port: Option<u16>) -> ! {
     let rt = Runtime::new(cfg, workdir);
+    // Dropping the engine (for example, when Labs is switched off) stops accepting new webhooks.
+    let mut webhooks = tokio::task::JoinSet::new();
     if let Some(port) = webhook_port {
         let hooks = rt.clone();
-        tokio::spawn(async move {
+        webhooks.spawn(async move {
             loop {
                 if let Err(e) = serve_webhooks(hooks.clone(), port).await {
                     eprintln!("ワークフロー Webhook サーバーを開始できません（{port}）: {e:#}");
@@ -1464,15 +1466,17 @@ pub async fn orchestrate(cfg: Arc<crate::config::Config>, workdir: PathBuf, webh
             }
         });
     }
-    let mut state = TriggerState::load(&rt.paths);
     let mut announced = HashSet::new();
     loop {
-        for (path, error) in rt.definitions().errors {
+        let defs = rt.definitions();
+        for (path, error) in defs.errors {
             if announced.insert(format!("{}:{error}", path.display())) {
                 eprintln!("ワークフロー定義 {}: {error}", path.display());
             }
         }
-        state.tick(&rt);
+        if let Err(e) = TriggerState::tick(&rt, &defs.workflows) {
+            eprintln!("ワークフローの定期実行を確認できません: {e:#}");
+        }
         for id in rt.due_ids() {
             let rt = rt.clone();
             tokio::spawn(async move {
@@ -1561,6 +1565,39 @@ mod tests {
         assert_eq!(parse_daily("09:30"), Ok(9 * 3600 + 30 * 60));
         assert!(parse_daily("24:00").is_err());
         assert!(parse_daily("9:30").is_err());
+    }
+
+    #[test]
+    fn schedule_tick_observes_the_other_engines_lock_and_saved_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            workflows: dir.path().join("definitions"),
+            runs: dir.path().join("runs"),
+            cache: dir.path().join("cache.json"),
+        };
+        std::fs::create_dir(&paths.workflows).unwrap();
+        for version in [1, 2] {
+            std::fs::write(paths.workflows.join(format!("test-{version}.toml")), format!(concat!(
+                "name = \"test\"\nversion = {}\n[trigger]\nevery = \"1d\"\n",
+                "[[steps]]\ntype = \"ask\"\nid = \"review\"\nquestion = \"Ready?\"\noptions = [\"yes\"]\n",
+            ), version)).unwrap();
+        }
+        let rt = Runtime::with_paths(Arc::new(crate::config::Config::default()), dir.path().into(),
+            paths.clone(), Arc::new(|_| Box::pin(async { unreachable!() })));
+        let defs = rt.definitions();
+        assert!(defs.errors.is_empty(), "{:?}", defs.errors);
+        let state = TriggerState { seen: BTreeMap::from([("test@1".into(), 0), ("test@2".into(), 0)]) };
+        state.save(&paths).unwrap();
+        let locked = std::fs::File::create(TriggerState::path(&paths).with_extension("lock")).unwrap();
+        locked.lock().unwrap();
+        TriggerState::tick(&rt, &defs.workflows).unwrap();
+        assert!(rt.runs().is_empty());
+        drop(locked);
+        TriggerState::tick(&rt, &defs.workflows).unwrap();
+        TriggerState::tick(&rt, &defs.workflows).unwrap();
+        let runs = rt.runs();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].version, 2);
     }
 
     #[test]

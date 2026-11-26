@@ -403,7 +403,12 @@ pub async fn list_models(cfg: &Config, pname: &str) -> Result<Vec<String>> {
             .header(reqwest::header::USER_AGENT, anthropic_oauth::user_agent().await)
             .header("x-app", "cli")
             .header("anthropic-version", "2026-10-21"),
-        ("anthropic", None) => http.get(format!("{base}/v1/models?limit=1000")).header("x-api-key", key(pname, p)?).header("anthropic-version", "2026-10-21"),
+        ("anthropic", None) => {
+            let key = key(pname, p)?;
+            let req = http.get(format!("{base}/v1/models?limit=1000")).header("x-api-key", &key).header("anthropic-version", "2026-10-21");
+            // Compatible hosts (Z.AI, MiniMax) authenticate with a bearer, as the messages path sends.
+            if key.is_empty() || base.contains("api.anthropic.com") { req } else { req.bearer_auth(&key) }
+        }
         _ => {
             let req = http.get(format!("{base}/models")).bearer_auth(key(pname, p)?);
             if base == copilot::BASE { copilot::discovery_headers().into_iter().fold(req, |r, (k, v)| r.header(k, v)) } else { req }
@@ -624,6 +629,31 @@ mod tests {
         live.push("third".into());
         assert_eq!(live.take_sent(), Vec::<String>::new());
         assert_eq!(live.take(), ["third"]);
+    }
+
+    #[tokio::test]
+    async fn compat_anthropic_discovery_sends_the_bearer_the_messages_path_sends() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0; 4096];
+            let n = socket.read(&mut buf).await.unwrap();
+            let body = r#"{"data":[{"id":"glm-5"}]}"#;
+            socket.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            String::from_utf8_lossy(&buf[..n]).to_lowercase()
+        });
+        let mut cfg = Config::default();
+        cfg.providers.insert("zai-compat".into(), crate::config::ProviderCfg {
+            kind: "anthropic".into(),
+            base_url: base,
+            api_key: Some("zk".into()),
+            ..Default::default()
+        });
+        assert_eq!(list_models(&cfg, "zai-compat").await.unwrap(), ["zai-compat/glm-5"]);
+        let request = server.await.unwrap();
+        assert!(request.contains("authorization: bearer zk") && request.contains("x-api-key: zk"), "{request}");
     }
 
     #[test]

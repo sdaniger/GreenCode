@@ -885,8 +885,8 @@ fn main() -> anyhow::Result<()> {
                     ok = false;
                 }
                 // Async delegated tasks wake this thread for another turn; exiting now would kill them.
-                Event::Done if greencode_core::delegate::outstanding(&thread_id) => eprintln!("\n[waiting for delegated tasks]"),
-                Event::Done => { done = true; break; }
+                Event::Done { waiting_for_delegates: true } => eprintln!("\n[waiting for delegated tasks]"),
+                Event::Done { waiting_for_delegates: false } => { done = true; break; }
             }
         }
         if !json_output { println!(); }

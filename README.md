@@ -85,6 +85,7 @@ drafts never enter session storage or `Ctrl+R` search. Use
 exit to bring the edited text back without sending it. A failed editor leaves
 the original draft intact.
 `/mode`, `/plan`, `/thinking`, `/resume`, `/fork`, and `/compact` are available without leaving the TUI.
+Use `/goal pause`, `/goal resume`, or `/goal drop` to control a TUI goal.
 `/review [FOCUS]` opens a picker for tracked staged/unstaged changes, a base
 branch (merge base to `HEAD`), or a recent commit. It sends the selected diff to
 the current model in plan mode. Review the diff for sensitive content first;
@@ -130,9 +131,10 @@ greencode-cli thread send THREAD_ID --wait "List the setup commands"
 
 Replace `THREAD_ID` with the ID returned by `start`. `start` accepts `--backend`
 and `--model`; `send` uses the thread's saved backend and model. Both accept `-`
-instead of a prompt to read stdin. Without `--wait`, they return the ID and run
-in a background process. Do not send to a thread that is also open in the
-desktop app: the desktop app does not share the CLI's turn lock.
+instead of a prompt to read stdin. `--wait` also waits for turns triggered by
+delegated results. Without it, the command returns the ID and runs in a
+background process. Do not send to a thread that is also open in the desktop
+app: the desktop app does not share the CLI's turn lock.
 
 ## Use installed agents
 
@@ -303,7 +305,9 @@ service logs to `~/.greencode/service.log`. On Windows, run `serve` manually.
 In the remote UI, select a thread and click **Share** to create a read-only
 link to that thread, valid for 24 hours. A guest can read the transcript and
 submit a request, but only the owner can send that request to the agent or
-dismiss it. **Unshare** revokes all guest links for the selected thread.
+dismiss it. Guests do not receive the owner's approval or question dialogs.
+**Unshare** revokes all guest links for the selected thread and closes their live streams.
+Remote prompts use the thread's saved permission mode, or the server default for a new thread.
 
 ### Outside agents via MCP
 
@@ -345,6 +349,8 @@ greencode-cli workflow list
 
 Runs are saved under `~/.greencode/workflow-runs/`. Use `resume RUN_ID` for
 a paused run or `cancel RUN_ID` to stop it, both under `greencode-cli workflow`.
+Schedules follow the highest version of each definition. The desktop app and `serve`
+coordinate schedules when they share a GreenCode home.
 Run only workflow definitions you trust: shell steps execute local commands.
 
 ## Keys
@@ -425,7 +431,7 @@ when available; the public fallback may not reach some background apps.
 - The CLI accepts the same formats with `greencode-cli --import-session FILE`; GreenCode exports and OpenCode JSON exports are also detected automatically. Imported conversations keep text only; source tool calls, tool output, and reasoning are not replayed.
 
 
-Native configuration keeps the prompt lean while exposing the high-value OMP controls:
+Native agent settings include:
 `model_roles`, `tools`, `max_tool_calls`, `compact_at`, `compaction_enabled`, `compaction`, and `context_files` are read from `~/.greencode/config.toml`. An empty `tools` list preserves the full native catalog. `learning.auto` is on by default, but the default path is local-only: it stores an explicit `Lesson:` or `Durable lesson:` line from the final reply and adds no model request or tokens. Set `learning.model` (or `advisor_model`) only when a separate one-request-per-turn distillation pass is wanted.
 
 ```sh
@@ -475,9 +481,8 @@ Where native behavior already existed, defaults keep it rather than OMP's value 
 8 KB tool-output preview, 400-line read window, no auto-backgrounding, MCP servers kept for the
 session, isolated task changes left in their worktree, `unicode` symbols, no composer predictions,
 no automatic update install); the OMP value applies when the imported file sets it.
-Settings for OMP-only services (accounts, marketplace, memory backends, browser, hosted
-search providers) and subsystems native lacks (status line, inline images, mouse, branch sessions,
-prewalk, speculative task launch, filesystem clone backends) are not imported.
+Settings without a native mapping are skipped. This includes OMP marketplace
+settings and browser cookie import.
 Speech and realtime voice are native: `speech.*`/`tts.*` drive the `tts` tool and spoken output,
 `live.*` configures `greencode-cli live`, and `providers.tinyModel*` maps to `tiny_model.device|dtype`
 for `tiny/<repo>` and `local/<repo>` models.
@@ -574,7 +579,6 @@ max_chars = 600
 ACP adapters use their own login, not the native provider API keys. Reported ACP model/config selectors are used when available.
 For OpenCode, choose OpenCode in the `/login` picker (macOS Terminal), or run `greencode-cli --opencode-login`; follow its prompts, then select the OpenCode backend. This signs in to OpenCode, not the native provider.
 Arguments after `--opencode-login` are passed to `opencode auth login`, for example `--opencode-login openai --method oauth` (available methods depend on OpenCode).
-OpenCode manages its own credentials; this does not sign in the native provider.
 For example, after signing in with `codex login`, run
 `cargo run -p greencode-core --bin greencode-cli -- --backend codex -p "Hello"`.
 Reopening an ACP thread resumes its external session when the agent supports loading sessions; otherwise an explicit error prevents silent context loss.

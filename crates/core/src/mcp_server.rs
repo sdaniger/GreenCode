@@ -72,7 +72,7 @@ fn launch(cfg: Config, meta: Meta, text: String) -> Result<Arc<Running>> {
                     Event::Permission { reply, .. } => { let _ = reply.send(Decision::Deny); }
                     Event::Dialog { reply, .. } => { let _ = reply.send(json!({"cancelled":true})); }
                     Event::Error(e) => error = Some(e),
-                    Event::Done => {
+                    Event::Done { .. } => {
                         if let Some(e) = error { bail!(e); }
                         if let Some(final_text) = last_reply(&id).filter(|t| !t.is_empty()) { text = final_text; }
                         return Ok(json!({"id":id,"text":text}));

@@ -217,6 +217,26 @@ impl Session {
         path.exists().then_some(Session { path })
     }
 
+    /// A CLI can reserve a thread ID before starting its external backend.
+    /// Without a backend handle, only that metadata-only record can start fresh.
+    pub(crate) fn can_start_external(id: &str) -> Result<bool> {
+        validate_id(id)?;
+        let file = match std::fs::File::open(Self::path(id)) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+            Err(e) => return Err(e.into()),
+        };
+        let mut file = BufReader::new(file);
+        let mut header = String::new();
+        file.read_line(&mut header)?;
+        if !file.fill_buf()?.is_empty() {
+            return Ok(false);
+        }
+        let mut row: Value = serde_json::from_str(&header)?;
+        let meta: Meta = serde_json::from_value(row.get_mut("meta").map(Value::take).unwrap_or_default())?;
+        Ok(meta.id == id)
+    }
+
     pub fn create(meta: &Meta) -> Result<Session> {
         validate_id(&meta.id)?;
         std::fs::create_dir_all(dir())?;

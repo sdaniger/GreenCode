@@ -3122,7 +3122,7 @@ for line in sys.stdin:
         while let Some(event) = rx.recv().await {
             match event {
                 Event::Error(e) => panic!("{e}"),
-                Event::Done => break,
+                Event::Done { .. } => break,
                 _ => {}
             }
         }
@@ -3207,7 +3207,7 @@ for line in sys.stdin:
                 Event::Remote { command, data } if command == "get_commands" => {
                     names = Some(data["commands"][0]["name"].clone())
                 }
-                Event::Done => break,
+                Event::Done { .. } => break,
                 _ => {}
             }
         }
@@ -3266,7 +3266,7 @@ for line in sys.stdin:
                 Event::Remote { command, data } if command == "get_commands" => {
                     return Some(data["commands"][0]["name"].clone())
                 }
-                Event::Done => break,
+                Event::Done { .. } => break,
                 _ => {}
             }
         }
@@ -3326,7 +3326,7 @@ for line in sys.stdin:
         while let Some(event) = rx.recv().await {
             match event {
                 Event::Error(e) => panic!("{e}"),
-                Event::Done => done = true,
+                Event::Done { .. } => done = true,
                 Event::Remote { command, data }
                     if command == "get_commands" && data["commands"][0]["name"] == "late" =>
                 {

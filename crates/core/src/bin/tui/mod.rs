@@ -36,7 +36,7 @@ const COMMANDS: &[(&str, &str)] = &[
     ("thinking", "Set reasoning effort"),
     ("mode", "Set permission mode (ask / auto-edit / full / plan)"),
     ("plan", "Toggle read-only plan mode"),
-    ("goal", "Show, pause, resume or clear this session's goal: /goal [pause|resume|clear|TOKEN_BUDGET N]"),
+    ("goal", "Show, pause, resume or drop this session's goal: /goal [pause|resume|drop|TOKEN_BUDGET N]"),
     ("new", "Start a thread"),
     ("resume", "Resume a saved thread"),
     ("fork", "Branch off the current thread (summarize it first with branchSummary)"),
@@ -1007,7 +1007,7 @@ impl App<'_> {
                     (self.turn_usage, self.cancelling, self.failed) = (None, false, false);
                 }
             }
-            Event::Done => {
+            Event::Done { .. } => {
                 if let Some(mut voice) = self.voice.take() {
                     if voice.enhanced() {
                         let text = voice.take();
@@ -1915,7 +1915,7 @@ impl App<'_> {
                 // Back to planning on `from`, and hand off to `into` again at the next edit.
                 let model = greencode_core::assist::resolve_target(&self.cfg, from).context("prewalk.from names no known model")?;
                 self.send(Command::Remote(json!({"type": "prewalk", "restart": model, "target": into})))?;
-                self.log.add(Kind::Notice, format!("Prewalk restarted on {model}; hands off to {into}"));
+                self.log.add(Kind::Notice, format!("Prewalk restart requested: {model} plans, then hands off to {into}"));
                 return Ok(());
             }
             "off" => {
@@ -2182,6 +2182,7 @@ impl App<'_> {
                 let tree = greencode_core::worktree::create_session(repo, &self.cfg.worktree, &id, self.cfg.isolation_opts.isolation.backend)?;
                 std::env::set_current_dir(&tree.path)?;
                 let mut meta = Meta::new(tree.path.clone(), self.meta.model.clone(), "native".into());
+                meta.repo = Some(self.meta.repo.clone().unwrap_or_else(|| repo.clone()));
                 meta.subagent_model = self.cfg.subagent_model.clone();
                 self.switch(meta)?;
                 self.log.add(Kind::Notice, format!("Worktree {} (branch {}); /exit to leave it there", tree.path.display(), tree.branch));
