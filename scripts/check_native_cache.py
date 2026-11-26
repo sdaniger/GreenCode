@@ -46,14 +46,22 @@ def main():
             project = root / "project"
             project.mkdir()
             (project / "sample.txt").write_text("fixture content\n")
+            (project / ".env").touch()
+            (project / "target").mkdir()
             report = {"scope": __doc__, "model": "gpt-6-luna (local protocol fixture, no inference)"}
             arms = [("baseline", args.baseline_cli)] if args.baseline_cli else []
             for name, cli in [*arms, ("optimized", args.cli)]:
                 instructions = project / "AGENTS.md"
                 instructions.unlink(missing_ok=True)
+                added = project / "new_file.rs"
+                added.unlink(missing_ok=True)
                 home = root / name
                 home.mkdir()
-                (home / "config.toml").write_text(f'model="probe/gpt-6-luna"\n[providers.probe]\nkind="openai"\nbase_url="http://127.0.0.1:{server.server_port}/v1"\napi_key_env="GREENCODE_FIXTURE_KEY"\n')
+                (home / "config.toml").write_text(
+                    'model="probe/gpt-6-luna"\ninclude_workspace_tree=true\n'
+                    '[features]\nunexpected_stop_detection="none"\n'
+                    f'[providers.probe]\nkind="openai"\nbase_url="http://127.0.0.1:{server.server_port}/v1"\n'
+                    'api_key_env="GREENCODE_FIXTURE_KEY"\n')
                 env = dict(os.environ, GREENCODE_HOME=str(home), GREENCODE_FIXTURE_KEY="local-fixture")
                 command = [str(cli.resolve()), "--mode", "full", "--json"]
                 requests.clear()
@@ -63,6 +71,7 @@ def main():
                 memory = project / ".greencode/MEMORY.md"
                 memory.parent.mkdir(exist_ok=True)
                 memory.write_text("Changed after the first turn.\n")
+                added.touch()
                 resumed = subprocess.run([*command, "--resume", session, "-p", "Continue"], cwd=project, env=env, capture_output=True, text=True, timeout=30)
                 assert resumed.returncode == 0, resumed.stderr
                 assert len(requests) == 3, len(requests)
@@ -75,6 +84,11 @@ def main():
                     assert prefix_stable, "cached message prefix changed on resume"
                     assert first["tools"] == tool_round["tools"] == resumed_body["tools"]
                     assert "Changed after the first turn." in resumed_body["messages"][-2]["content"]
+                    workspace = first["messages"][1]["content"]
+                    assert "# Workspace tree\nsample.txt\n" in workspace
+                    assert ".env" not in workspace and "target/" not in workspace
+                    assert "new_file.rs" in resumed_body["messages"][-2]["content"]
+                    assert "new_file.rs" not in system
                 instructions.write_text("Updated project safety instructions.\n")
                 updated = subprocess.run([*command, "--resume", session, "-p", "Continue with updated project rules"],
                     cwd=project, env=env, capture_output=True, text=True, timeout=30)

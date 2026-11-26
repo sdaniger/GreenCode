@@ -71,6 +71,12 @@ pub fn convert(system: &str, messages: &[Message]) -> Vec<Value> {
     out
 }
 
+fn mark_cache_text(message: &mut Value, breakpoint: &Value) {
+    let mut block = json!({"type": "text", "cache_control": breakpoint});
+    block["text"] = message["content"].take();
+    message["content"] = Value::Array(vec![block]);
+}
+
 /// Which OpenAI wire this client speaks. The provider *kind* is not enough: a Kimi provider set
 /// to the Anthropic format goes through the Messages API, and Responses models need the Responses
 /// wire even when configured as a plain OpenAI provider.
@@ -184,6 +190,27 @@ impl OpenAi {
                             body["prompt_cache_options"] = json!({"mode": "implicit", "ttl": ttl});
                         }
                     }
+                }
+            }
+        }
+        if host.as_deref() == Some("openrouter.ai") && self.wire.cache_retention.caching() {
+            let model = req.model.trim_start_matches('~').split(':').next().unwrap_or("");
+            let claude = model.starts_with("anthropic/claude-");
+            // OpenRouter's Alibaba lane only accepts five-minute explicit breakpoints.
+            let alibaba = matches!(model, "deepseek/deepseek-v3.2" | "qwen/qwen3-max"
+                | "qwen/qwen-plus" | "qwen/qwen3.6-plus" | "qwen/qwen3-coder-plus" | "qwen/qwen3-coder-flash");
+            if claude || alibaba {
+                let breakpoint = if claude { super::anthropic_breakpoint(&self.wire) } else { json!({"type": "ephemeral"}) };
+                let messages = body["messages"].as_array_mut().unwrap();
+                if !req.system.is_empty() {
+                    mark_cache_text(&mut messages[0], &breakpoint);
+                }
+                if alibaba {
+                    if let Some(message) = messages.iter_mut().rev().find(|m| m["role"] == "user" && m["content"].is_string()) {
+                        mark_cache_text(message, &breakpoint);
+                    }
+                } else {
+                    body["cache_control"] = breakpoint;
                 }
             }
         }

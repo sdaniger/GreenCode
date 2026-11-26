@@ -47,9 +47,9 @@ pub const NAMES: [&str; 24] = {
 };
 
 /// `None` when every ext tool is turned off in settings.
-pub fn def(off: &[String]) -> Option<ToolDef> {
+pub fn def(cfg: &crate::config::Config, off: &[String]) -> Option<ToolDef> {
     let s = json!({"type": "string"});
-    let autoqa = super::config().discovery.dev.autoqa;
+    let autoqa = cfg.discovery.dev.autoqa;
     let on: Vec<String> = CATALOG
         .iter()
         .filter(|(name, _)| !off.iter().any(|o| o == name) && (*name != "report_issue" || autoqa))

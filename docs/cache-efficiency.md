@@ -6,8 +6,11 @@ fixtures do not call any model. Do not confuse prompt bytes, eligible cache boun
 ## Changes
 
 - Shortened the native base instructions and put worktree-dependent paths after reusable instructions.
-- Native threads keep the initial workspace context across restarts. Changes to rules, memory, or skills are appended as
-  superseding snapshots on the next prompt without rewriting the cached prefix; compaction refreshes the snapshot.
+- Native threads keep the initial workspace context across restarts. Changes to rules, memory, skills, or the
+  opt-in `include_workspace_tree` listing append a superseding snapshot rather than rewriting the cached prefix.
+  Compaction refreshes the snapshot. A changed tree can add input tokens because the old snapshot remains in history.
+- Native tool schemas use the requesting session's settings, not the most recently started session's settings.
+  Starting a different session no longer changes an existing agent's shell or extension tool descriptions.
 - First-party OpenAI Responses requests for GPT-5.6+ place reusable instructions in the first `developer`
   message with an explicit breakpoint, without disabling implicit caching for conversation history.
   GPT-6.2+ otherwise places top-level `instructions` after cacheable input and bills them as uncached on
@@ -17,6 +20,10 @@ fixtures do not call any model. Do not confuse prompt bytes, eligible cache boun
   compatible third-party servers.
 - Anthropic marks the static system prefix and the preceding user/tool-result endpoint, while automatic caching
   advances over the new history. This preserves an earlier lookup boundary through large tool batches.
+- [OpenRouter](https://openrouter.ai/docs/guides/best-practices/prompt-caching) sends both a system breakpoint and
+  automatic history caching for Claude. Documented Alibaba-backed Qwen and DeepSeek models use five-minute
+  explicit breakpoints instead. Explicit cache writes can cost more than uncached input; `cacheRetention = "none"`
+  omits these markers. Other OpenRouter models retain their provider's implicit behavior.
 - OpenAI output limits are now sent; cache-write tokens are separated from ordinary input. Compaction and
   subagent usage events are included instead of hidden. Between-turn automatic compaction runs before appending
   the incoming user prompt, keeping that new requirement verbatim.
@@ -25,11 +32,29 @@ fixtures do not call any model. Do not confuse prompt bytes, eligible cache boun
   prefixes automatically, so the static system prompt stays first and nothing volatile precedes it.
 - The native prompt is 4,359 bytes with 12 tools (system 418, schemas 3,941); `native_prompt_stays_lean` fails if it
   grows past 7,000 bytes, so a new tool cannot silently raise every request.
-- Tool definitions and conversation/tool-result content are unchanged. Pi/OMP still own their agent loop,
-  tool definitions and prompts; GreenCode never replays its display transcript into them.
+- Pi/OMP still own their agent loop, prompts, and caching; GreenCode never replays its display transcript into
+  them. A local before/after capture kept their tool schemas and cached message prefix unchanged through a
+  tool round trip and resume. This is not a direct-engine parity or live billing measurement.
 
 Default cache lifetimes are retained; longer premium writes and padding solely to raise hit percentage are not enabled.
 No aggressive history eviction or tighter tool-output truncation was introduced.
+
+### Native resume after a workspace tree change
+
+The deterministic native fixture below compares the old and new CLI: after adding a file, the old CLI rewrote
+the system message; the new CLI kept both the system message and the request history prefix unchanged.
+The new file, changed memory, and later project rules still appeared in context updates.
+
+An isolated Ollama A/B used 80 empty files, added one file between two turns, and unloaded the model between
+builds. Both models returned the expected answers in both arms. Values are CLI-reported tokens on the resumed
+request, one sample per build and model:
+
+| Model | Cache reads before → after | Uncached input before → after |
+| --- | ---: | ---: |
+| `qwen2.5-coder:1.5b` | 308 → 2,293 | 2,059 → 1,228 |
+| `paritok-4b-v1:latest` | 307 → 2,297 | 2,064 → 1,233 |
+
+These results apply to this tree-change workload, not to every request. No live OpenRouter usage was measured.
 
 ## Observed results — 2026-11-12
 

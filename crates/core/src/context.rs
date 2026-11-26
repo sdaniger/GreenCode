@@ -126,12 +126,12 @@ pub fn base_prompt() -> &'static str {
 }
 
 /// The system prompt for one active model: a custom or per-model template replaces the built-in
-/// instructions, then the configured personality, edit rule, model id, tree and append text apply.
-pub fn system_prompt(cfg: &crate::config::Config, model: &str, cwd: &Path) -> String {
-    system_prompt_at(cfg, model, cwd, &crate::home())
+/// instructions, then the configured personality, edit rule, model id and append text apply.
+pub fn system_prompt(cfg: &crate::config::Config, model: &str) -> String {
+    system_prompt_at(cfg, model, &crate::home())
 }
 
-fn system_prompt_at(cfg: &crate::config::Config, model: &str, cwd: &Path, home: &Path) -> String {
+fn system_prompt_at(cfg: &crate::config::Config, model: &str, home: &Path) -> String {
     let opts = &cfg.loop_opts;
     let template = opts.system_prompt_templates.iter()
         .filter(|(selector, _)| !selector.trim().is_empty() && model.to_lowercase().contains(&selector.to_lowercase()))
@@ -155,13 +155,6 @@ fn system_prompt_at(cfg: &crate::config::Config, model: &str, cwd: &Path, home: 
     };
     if opts.include_model_in_prompt && !custom {
         s.push_str(&format!("\n\nActive model: {model}."));
-    }
-    if opts.include_workspace_tree {
-        let tree = workspace_tree(cwd);
-        if !tree.is_empty() {
-            s.push_str("\n\n# Workspace tree\n");
-            s.push_str(&tree);
-        }
     }
     if let Some(text) = &cfg.append_system_prompt {
         if !s.is_empty() { s.push_str("\n\n"); }
@@ -284,6 +277,13 @@ pub fn session_context(cwd: &Path, cfg: &crate::config::Config) -> String {
                     let _ = writeln!(s, "\n# Project instructions ({name})\n{doc}");
                 }
             }
+        }
+    }
+    if cfg.loop_opts.include_workspace_tree {
+        let tree = workspace_tree(cwd);
+        if !tree.is_empty() {
+            s.push_str("\n# Workspace tree\n");
+            s.push_str(&tree);
         }
     }
     s.push_str(&format!("Working directory: {}\n", cwd.display()));
@@ -957,35 +957,27 @@ mod tests {
     }
 
     #[test]
-    fn assembles_personality_edit_rule_model_tree_and_template() {
+    fn assembles_personality_edit_rule_model_and_template() {
         use crate::config::{agent_loop::Personality, Config};
         let root = tempfile::tempdir().unwrap();
-        let cwd = root.path().join("repo");
-        std::fs::create_dir_all(cwd.join("src")).unwrap();
-        std::fs::create_dir_all(cwd.join("target")).unwrap();
-        std::fs::write(cwd.join("src/main.rs"), "fn main() {}").unwrap();
-        std::fs::write(cwd.join(".env"), "SECRET=1").unwrap();
         let home = root.path().join("home");
         std::fs::create_dir(&home).unwrap();
 
         let mut cfg = Config::default();
         cfg.loop_opts.personality = Personality::Friendly;
-        cfg.loop_opts.include_workspace_tree = true;
-        let prompt = system_prompt_at(&cfg, "openai/gpt-5", &cwd, &home);
+        let prompt = system_prompt_at(&cfg, "openai/gpt-5", &home);
         assert!(prompt.contains("Active model: openai/gpt-5."));
         assert!(prompt.contains("warm and encouraging"));
         assert!(prompt.contains("never rewrite a file with sed"));
-        assert!(prompt.contains("src/\n  main.rs"));
-        assert!(!prompt.contains("target/") && !prompt.contains(".env"));
 
         std::fs::write(home.join("PERSONALITY.md"), "Answer in Simplified Technical English.").unwrap();
-        let prompt = system_prompt_at(&cfg, "openai/gpt-5", &cwd, &home);
+        let prompt = system_prompt_at(&cfg, "openai/gpt-5", &home);
         assert!(prompt.contains("Simplified Technical English") && !prompt.contains("warm and encouraging"));
 
         cfg.loop_opts.personality = Personality::None;
         cfg.loop_opts.encourage_edits = false;
         cfg.loop_opts.include_model_in_prompt = false;
-        let prompt = system_prompt_at(&cfg, "openai/gpt-5", &cwd, &home);
+        let prompt = system_prompt_at(&cfg, "openai/gpt-5", &home);
         assert!(!prompt.contains("Simplified Technical English"));
         assert!(!prompt.contains("never rewrite a file with sed"));
         assert!(!prompt.contains("Active model:"));
@@ -994,14 +986,12 @@ mod tests {
         let long = root.path().join("long.md");
         std::fs::write(&short, "SHORT TEMPLATE").unwrap();
         std::fs::write(&long, "LONG TEMPLATE").unwrap();
-        cfg.loop_opts.include_workspace_tree = false;
         cfg.loop_opts.system_prompt_templates.insert("gpt".into(), short.display().to_string());
         cfg.loop_opts.system_prompt_templates.insert("openai/gpt-5".into(), long.display().to_string());
-        let prompt = system_prompt_at(&cfg, "openai/gpt-5", &cwd, &home);
+        let prompt = system_prompt_at(&cfg, "openai/gpt-5", &home);
         assert!(prompt.contains("LONG TEMPLATE") && !prompt.contains("SHORT TEMPLATE"));
         assert!(!prompt.contains("You are GreenCode"));
-        assert!(!prompt.contains("src/main.rs"));
         cfg.system_prompt = Some("EXPLICIT".into());
-        assert!(system_prompt_at(&cfg, "openai/gpt-5", &cwd, &home).starts_with("EXPLICIT"));
+        assert!(system_prompt_at(&cfg, "openai/gpt-5", &home).starts_with("EXPLICIT"));
     }
 }

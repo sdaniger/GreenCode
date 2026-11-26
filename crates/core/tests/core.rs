@@ -1090,6 +1090,64 @@ fn openai_cache_controls_do_not_leak_to_compatible_servers() {
     }
 }
 
+#[test]
+fn openrouter_cache_controls_follow_the_upstream_model() {
+    use greencode_core::config::provider::CacheRetention;
+    let mut api = openai::OpenAi {
+        http: Default::default(),
+        base: "https://openrouter.ai/api/v1".into(),
+        key: String::new(),
+        copilot: false,
+        effort: None,
+        wire: Default::default(),
+    };
+    let req = Request {
+        model: "anthropic/claude-sonnet-5",
+        system: "shared system prompt",
+        messages: &[Message::user("question")],
+        tools: &[],
+        max_tokens: 123,
+        live: None,
+    };
+    for model in [req.model, "~anthropic/claude-sonnet-latest"] {
+        let cached = api.body(&Request { model, ..req });
+        assert_eq!(cached["cache_control"], json!({"type": "ephemeral"}));
+        assert_eq!(cached["messages"][0]["content"][0], json!({
+            "type": "text", "text": req.system, "cache_control": {"type": "ephemeral"},
+        }));
+        assert_eq!(cached["messages"][1]["content"], "question");
+    }
+    let other = api.body(&Request { model: "google/gemini-3-pro", ..req });
+    assert!(other.get("cache_control").is_none(), "implicit caching needs no markers");
+    api.wire.cache_retention = CacheRetention::Long;
+    assert_eq!(api.body(&req)["cache_control"]["ttl"], "1h");
+    let history = [Message::user("earlier turn"), Message::user("current turn")];
+    for model in ["qwen/qwen3-coder-plus:nitro", "deepseek/deepseek-v3.2"] {
+        let body = api.body(&Request { model, messages: &history, ..req });
+        assert!(body.get("cache_control").is_none(), "Alibaba requires explicit boundaries");
+        assert_eq!(body["messages"][0]["content"][0]["cache_control"], json!({"type": "ephemeral"}));
+        assert_eq!(body["messages"][1]["content"], "earlier turn");
+        assert_eq!(body["messages"][2]["content"][0], json!({
+            "type": "text", "text": "current turn", "cache_control": {"type": "ephemeral"},
+        }));
+    }
+    let unsupported = api.body(&Request { model: "qwen/qwen3.5-plus-02-15", ..req });
+    assert_eq!(unsupported["messages"][0]["content"], req.system);
+    assert_eq!(unsupported["messages"][1]["content"], "question");
+    api.wire.cache_retention = CacheRetention::None;
+    let off = api.body(&req);
+    assert!(off.get("cache_control").is_none());
+    assert_eq!(off["messages"][0]["content"], req.system);
+    let off = api.body(&Request { model: "qwen/qwen3-coder-plus", ..req });
+    assert_eq!(off["messages"][0]["content"], req.system);
+    assert_eq!(off["messages"][1]["content"], "question");
+    api.wire.cache_retention = CacheRetention::Auto;
+    api.base = "https://openrouter.ai.example.com/v1".into();
+    let proxy = api.body(&req);
+    assert!(proxy.get("cache_control").is_none());
+    assert_eq!(proxy["messages"][0]["content"], req.system);
+}
+
 #[tokio::test]
 async fn file_tools() {
     let d = dir("file_tools");

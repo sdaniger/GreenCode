@@ -618,7 +618,7 @@ impl Agent {
             .unwrap_or(current);
         let context = saved["context"].as_u64().unwrap_or(0);
         let slots = Arc::new(Semaphore::new(cfg.task.slots()));
-        let system = context::system_prompt(&cfg, &meta.model, &meta.cwd);
+        let system = context::system_prompt(&cfg, &meta.model);
         let lua = Arc::new(Lua::new(&meta.cwd, &cfg.integration_opts));
         // `mcp.shared`: one process per server across this process's agents and eval kernels.
         let mcp = if cfg.integration_opts.mcp.shared {
@@ -727,7 +727,7 @@ impl Agent {
         if let Some(i) = t.iter().position(|tool| tool.name == "ext") {
             let mut off = self.cfg.ext_off.clone();
             off.extend(self.cfg.extra_tools_opts.off());
-            match tools::ext::def(&off) {
+            match tools::ext::def(&self.cfg, &off) {
                 Some(ext) => t[i] = ext,
                 None => {
                     t.remove(i);
@@ -767,7 +767,7 @@ impl Agent {
             }
         }
         let dynamic: Vec<(&str, String)> = dynamic.iter().map(|(name, help)| (name.as_str(), help.clone())).collect();
-        let ext = tools::ext::def(&self.cfg.ext_off);
+        let ext = tools::ext::def(&self.cfg, &self.cfg.ext_off);
         let ext: Vec<ToolDef> = ext.into_iter().collect();
         crate::discovery::catalog(&ext, &["ext"], &dynamic)
     }

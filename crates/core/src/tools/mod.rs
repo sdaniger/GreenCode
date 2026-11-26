@@ -192,9 +192,9 @@ fn def(name: &str, description: &str, props: Value, required: &[&str]) -> ToolDe
 }
 
 /// `bash`'s description: a `name` runs a named service whose `proc://` log and stdin stay addressable.
-fn bash_description() -> String {
+fn bash_description(cfg: &Config) -> String {
     let mut text = String::from("Run a shell command in the project. `timeout` seconds (default 120, max 600). `background: true` starts a long-running command and returns its pid and log at once.");
-    if config().extra_tools_opts.launch.enabled {
+    if cfg.extra_tools_opts.launch.enabled {
         text.push_str(" `name` starts a named service instead: `read proc://<name>` shows its log and status, `write proc://<name>` sends stdin, `write proc://<name>/kill` stops it.");
     }
     text
@@ -217,14 +217,14 @@ pub fn defs(leaf: bool, mcp_servers: &[String]) -> Vec<ToolDef> {
     defs_for(&config(), leaf, mcp_servers)
 }
 
-/// `defs` for an explicit config, so an agent's `edit.mode` does not depend on which session configured last.
+/// Builds the catalog from the requesting session's config, not the last session to start.
 pub fn defs_for(cfg: &Config, leaf: bool, mcp_servers: &[String]) -> Vec<ToolDef> {
     let s = json!({"type": "string"});
     let mut v = vec![
         def("read", "Read a text file. `offset` is the first line (1-based), `limit` the number of lines. Without either, long source files may come back as a structural summary whose `…` spans hold hidden lines.",
             json!({"path": s, "offset": {"type": "integer"}, "limit": {"type": "integer"}}), &["path"]),
         def("write", "Create or overwrite a file.", json!({"path": s, "content": s}), &["path", "content"]),
-        def("bash", &bash_description(), json!({"command": s, "name": s, "timeout": {"type": "integer"}, "background": {"type": "boolean"}}), &["command"]),
+        def("bash", &bash_description(cfg), json!({"command": s, "name": s, "timeout": {"type": "integer"}, "background": {"type": "boolean"}}), &["command"]),
         def("memory", "Edit persistent memory. `add` appends `text`; `replace` swaps the entry containing `old`; `remove` deletes it.",
             json!({"action": {"enum": ["add", "replace", "remove"]}, "scope": {"enum": ["global", "project"]}, "text": s, "old": s}), &["action", "scope"]),
         def("grep", "Search file contents by regex; returns `file:line:text`. `path` defaults to the project, `glob` filters files (e.g. `*.rs`).",
@@ -235,12 +235,12 @@ pub fn defs_for(cfg: &Config, leaf: bool, mcp_servers: &[String]) -> Vec<ToolDef
         def("todo", "Show your task list for multi-step work. Send the whole list each time; mark finished items `done`.",
             json!({"todos": {"type": "array", "items": {"type": "object", "properties": {"text": s, "done": {"type": "boolean"}}, "required": ["text"]}}}), &["todos"]),
         lsp::def(),
-        ext::def(&[]).expect("ext has tools"),
+        ext::def(cfg, &[]).expect("ext has tools"),
     ];
     if let Some(edit) = edit_def(cfg) {
         v.insert(2, edit);
     }
-    if config().extra_tools_opts.generate_image.enabled {
+    if cfg.extra_tools_opts.generate_image.enabled {
         v.push(def("generate_image", "Generate or edit an image with the configured images provider. `prompt` describes it; `image` is a path to edit; `size` defaults to generate_image.size. Returns the saved image path, which joins the conversation as an image.",
             json!({"prompt": s, "image": s, "size": s, "model": s, "format": s, "n": {"type": "integer"}}), &["prompt"]));
     }
@@ -257,12 +257,12 @@ pub fn defs_for(cfg: &Config, leaf: bool, mcp_servers: &[String]) -> Vec<ToolDef
         v.push(def("mcp", &format!("Use MCP servers ({}). `search` finds tools by keyword and returns their schemas; `call` runs one.", mcp_servers.join(", ")),
             json!({"action": {"enum": ["search", "call"]}, "query": s, "server": s, "tool": s, "args": {"type": "object"}}), &["action"]));
     }
-    if config().bash_opts.out.enabled {
+    if cfg.bash_opts.out.enabled {
         if let Some(write) = v.iter_mut().find(|tool| tool.name == "write") {
             write.description.push_str(" `path` may be `out://` to reply to the user mid-task (64 KiB cap); it does not end the turn.");
         }
     }
-    if config().bash_opts.intent_tracing {
+    if cfg.bash_opts.intent_tracing {
         for tool in &mut v {
             if let Some(properties) = tool.schema["properties"].as_object_mut() {
                 properties.insert(
@@ -273,7 +273,7 @@ pub fn defs_for(cfg: &Config, leaf: bool, mcp_servers: &[String]) -> Vec<ToolDef
         }
     }
     // `eval.tools.enabled`: tools a cell defined are advertised like built-ins, so subagents see them too.
-    if config().integration_opts.eval.tools.enabled {
+    if cfg.integration_opts.eval.tools.enabled {
         v.extend(eval::tool_defs());
     }
     v
@@ -1615,6 +1615,28 @@ mod tests {
         assert!(edit.schema["properties"].get("change").is_some());
         assert!(edit.schema["properties"].get("old_string").is_none());
         assert_eq!(edit.schema["required"], json!(["path", "change"]));
+    }
+
+    #[test]
+    fn cache_catalog_uses_each_sessions_settings() {
+        let catalog = |on| {
+            let mut cfg = Config::default();
+            cfg.extra_tools_opts.generate_image.enabled = on;
+            cfg.extra_tools_opts.launch.enabled = on;
+            cfg.bash_opts.out.enabled = on;
+            cfg.bash_opts.intent_tracing = on;
+            cfg.discovery.dev.autoqa = on;
+            defs_for(&cfg, true, &[])
+        };
+        for on in [true, false] {
+            let tools = catalog(on);
+            let tool = |name| tools.iter().find(|t| t.name == name).unwrap();
+            assert_eq!(tools.iter().any(|t| t.name == "generate_image"), on);
+            assert_eq!(tool("bash").description.contains("proc://"), on);
+            assert_eq!(tool("bash").schema["properties"].get("intent").is_some(), on);
+            assert_eq!(tool("write").description.contains("out://"), on);
+            assert_eq!(tool("ext").description.contains("report_issue"), on);
+        }
     }
 
     #[tokio::test]
