@@ -1408,20 +1408,21 @@ fn settings_row(label: SharedString, hint: &str, control: impl IntoElement, pal:
         .flex_wrap()
         .items_center()
         .justify_between()
-        .gap_x_6()
-        .gap_y_2()
-        .min_h(px(28.))
+        .gap_x_8()
+        .gap_y_3()
+        .min_h(px(44.))
         .child(
             div()
                 .flex_1()
                 .min_w(px(148.))
                 .flex()
                 .flex_col()
-                .gap_1()
+                .gap_1p5()
+                .text_base()
                 .font_weight(FontWeight::MEDIUM)
                 .child(label)
                 .when(!hint.is_empty(), |d| {
-                    d.child(div().text_xs().font_weight(FontWeight::NORMAL).text_color(pal.muted).child(hint.to_string()))
+                    d.child(div().text_sm().font_weight(FontWeight::NORMAL).text_color(pal.muted).child(hint.to_string()))
                 }),
         )
         .child(control)
@@ -1471,9 +1472,8 @@ fn settings_select(
     if select.read(cx).selected_value().copied() != selected {
         select.update(cx, |state, cx| state.set_selected_index(index, window, cx));
     }
-    div().flex_shrink_0().w(px(160.)).child(
+    div().flex_shrink_0().w(px(200.)).child(
         Select::new(&select)
-            .small()
             .accessibility_label(label.to_owned())
             .placeholder(current.to_owned())
             .bg(pal.panel)
@@ -1511,16 +1511,16 @@ impl SettingsPage {
 
     fn build(self) -> Div {
         let pal = self.pal;
-        div().flex().flex_col().gap_6().children(self.groups.into_iter().map(move |(title, rows)| {
+        div().flex().flex_col().gap_10().children(self.groups.into_iter().map(move |(title, rows)| {
             div()
                 .flex()
                 .flex_col()
-                .gap_2()
+                .gap_3()
                 .when(!title.is_empty(), |d| {
                     d.child(
                         div()
-                            .px_4()
-                            .text_base()
+                            .px_1()
+                            .text_lg()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(pal.fg)
                             .child(title),
@@ -1535,8 +1535,8 @@ impl SettingsPage {
                         .overflow_hidden()
                         .children(rows.into_iter().enumerate().map(move |(i, row)| {
                             div()
-                                .px_4()
-                                .py_3()
+                                .px_6()
+                                .py_5()
                                 .when(i > 0, |d| d.border_t_1().border_color(pal.line))
                                 .child(row)
                         })),
@@ -9535,7 +9535,7 @@ impl Workspace {
         let tab = self.settings_tab.min(SETTINGS_TABS.len() - 1);
         // Full-window page as in T3 Code: a sidebar of sections, then the section's cards.
         let nav = div()
-            .w(px(224.))
+            .w(px(264.))
             .h_full()
             .flex()
             .flex_col()
@@ -9555,7 +9555,7 @@ impl Workspace {
                     .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
                     .child("設定"),
             )
-            .child(div().id("settings-nav").min_h_0().overflow_y_scroll().flex().flex_col().gap_0p5().px_2().children(
+            .child(div().id("settings-nav").min_h_0().overflow_y_scroll().flex().flex_col().gap_1().px_3().pt_2().children(
                 SETTINGS_TABS.iter().enumerate().map(|(i, &(name, icon))| {
                     gpui_kit::base::Button::new(("settings-tab", i))
                         .accessibility_label(name)
@@ -9563,10 +9563,11 @@ impl Workspace {
                         .flex()
                         .items_center()
                         .justify_start()
-                        .gap_2()
+                        .gap_3()
                         .px_3()
-                        .py_1p5()
-                        .rounded_md()
+                        .py_2p5()
+                        .text_base()
+                        .rounded_lg()
                         .cursor_pointer()
                         .hover(|s| s.bg(pal.hover))
                         .text_color(if i == tab { pal.fg } else { pal.muted })
@@ -9582,13 +9583,14 @@ impl Workspace {
             .child(
                 gpui_kit::base::Button::new("settings-back")
                     .accessibility_label("設定を閉じる")
-                    .m_2()
+                    .m_3()
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
+                    .gap_3()
+                    .px_3()
+                    .py_2p5()
+                    .text_base()
+                    .rounded_lg()
                     .text_color(pal.muted)
                     .cursor_pointer()
                     .hover(|s| s.bg(pal.hover).text_color(pal.fg))
@@ -9601,8 +9603,8 @@ impl Workspace {
                     .child(div().text_xs().child("esc")),
             );
         let title = div()
-            .pb_4()
-            .text_xl()
+            .pb_8()
+            .text_2xl()
             .font_weight(FontWeight::SEMIBOLD)
             .child(SETTINGS_TABS[tab].0);
         let name = SETTINGS_TABS[tab].0;
@@ -10202,10 +10204,10 @@ impl Workspace {
                 .child(
                     div()
                         .w_full()
-                        .max_w(px(760.))
+                        .max_w(px(840.))
                         .mx_auto()
-                        .px_8()
-                        .pb_10()
+                        .px_10()
+                        .pb_16()
                         .child(title)
                         .children(banner.map(|b| b.pb_4()))
                         .when(name == "外観", |d| d.child(theme_settings(self, pal, window, cx)))
