@@ -16,6 +16,7 @@ pub(super) enum WelcomeAct {
     Toggle(usize),
     All(bool),
     Start,
+    Antigravity,
     Install(&'static str),
     Login(&'static str),
 }
@@ -40,6 +41,11 @@ impl Workspace {
                 }
             }
             WelcomeAct::Start => self.start_welcome(cx),
+            WelcomeAct::Antigravity => {
+                self.welcome = None;
+                self.run(Act::SettingsTab("接続"), window, cx);
+                self.select_connection(format!("backend:{}", greencode_core::antigravity::BACKEND), window, cx);
+            }
             // Installing and signing in only uncovers the terminal; setup is not done until 始める.
             WelcomeAct::Install(name) => {
                 self.welcome = None;
@@ -178,6 +184,7 @@ impl Workspace {
             .children(found.iter().enumerate().map(|(i, a)| agent_row(i, a, cx)))
             .when(!more.is_empty(), |d| d.child(section("インストールできる接続先")))
             .children(more.iter().enumerate().map(|(i, a)| agent_row(i + 100, a, cx)))
+            .child(div().mt_2().child(button("welcome-antigravity".into(), "Google Antigravity を設定".into(), WelcomeAct::Antigravity, cx)))
             .child(section("過去の会話を取り込む"));
         if w.projects.is_empty() {
             page = page.child(div().text_color(pal.muted).child("取り込める会話は見つかりませんでした。"));

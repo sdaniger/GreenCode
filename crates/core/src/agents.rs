@@ -14,7 +14,6 @@ pub const AGENTS: &[AgentInfo] = &[
     AgentInfo { name: "codex", binary: "codex", install: "npm install -g @openai/codex", docs: "https://developers.openai.com/codex/" },
     AgentInfo { name: "claude", binary: "claude", install: "curl -fsSL https://claude.ai/install.sh | bash", docs: "https://code.claude.com/docs/" },
     AgentInfo { name: "kiro", binary: "kiro-cli", install: "curl -fsSL https://cli.kiro.dev/install | bash", docs: "https://kiro.dev/docs/cli/" },
-    AgentInfo { name: "gemini", binary: "gemini", install: "npm install -g @google/gemini-cli", docs: "https://geminicli.com/docs/" },
     AgentInfo { name: "grok", binary: "grok", install: "", docs: "https://github.com/superagent-ai/grok-cli" },
 ];
 

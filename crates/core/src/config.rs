@@ -1123,7 +1123,6 @@ impl Config {
             ("kiro", "kiro-cli", &["acp", "--agent-engine=v3", "--auth-method=cli"][..]),
             ("grok", "grok", &["agent", "stdio"]),
             ("fx", "fx", &["acp"]),
-            ("gemini", "gemini", &["--experimental-acp"]),
         ] {
             if cfg.backends.iter().any(|b| b.name == name) { continue }
             if let Some(path) = executable(exe) {
@@ -1141,6 +1140,7 @@ impl Config {
             }
         }
         // Launch changes and extra models for a backend, whether configured, auto-detected or installed.
+        cfg.backend_overrides.remove(crate::registry::GEMINI_CLI_ID);
         for (name, over) in &cfg.backend_overrides {
             match cfg.backends.iter_mut().find(|b| &b.name == name) {
                 Some(b) => over.apply(b),
@@ -1151,6 +1151,8 @@ impl Config {
                 }
             }
         }
+        // Old registry installs and configuration must not bring back the retired backend.
+        cfg.backends.retain(|b| b.name != crate::registry::GEMINI_CLI_ID);
         Ok(cfg)
     }
 

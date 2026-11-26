@@ -148,7 +148,7 @@ impl Workspace {
             })
     }
 
-    fn select_connection(&mut self, key: String, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn select_connection(&mut self, key: String, window: &mut Window, cx: &mut Context<Self>) {
         let display = self.connection_display_name(&key);
         self.ui["connection_selected"] = json!(key);
         self.save_ui();

@@ -137,7 +137,10 @@ desktop app: the desktop app does not share the CLI's turn lock.
 
 Open ⌘K and select a backend in a new thread: `pi`, `omp`, `opencode`, `codex`, `claude-code`, or `antigravity`.
 Pi, OMP and OpenCode are discovered in common installation directories even when Finder's PATH is minimal.
-Kiro, Grok Build, fx and Gemini CLI appear as `kiro`, `grok`, `fx` and `gemini` when their executables are installed.
+Kiro, Grok Build and fx appear as `kiro`, `grok` and `fx` when their executables are installed.
+Google Antigravity replaces Gemini CLI as a backend; open **設定 → 接続 → antigravity** to set it up.
+Existing Gemini CLI threads remain readable, but continuing work requires a new thread on a supported backend.
+The Google Gemini API provider (`google`) remains available separately.
 Those directories are also appended to subprocess PATH so script-based agents can find Node/Bun.
 They use their own credentials, skills, extensions, MCP setup and native conversation state. Codex/Claude use pinned ACP adapters via npx. Google Antigravity runs the official agy CLI (`agy acp`, installed from Google's SHA-512-checked release manifest) with Google OAuth sign-in, so its full model list (including the Orchestrator models) and its slash commands (`/goal`, `/teamwork`, `/boost`, `/swarm`, `/schedule`, …) are available.
 

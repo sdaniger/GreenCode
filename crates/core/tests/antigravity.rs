@@ -105,7 +105,34 @@ async fn managed_zip_install_sets_permissions_and_exposes_single_backend() {
     let agy = home.join("agents/antigravity-acp/1.5.17/antigravity");
     assert_ne!(std::fs::metadata(&agy).unwrap().permissions().mode() & 0o111, 0);
 
+    // An old registry install and launch override must neither appear nor replace agy.
+    let records_path = home.join("registry-agents.json");
+    let mut records: Vec<serde_json::Value> =
+        serde_json::from_slice(&std::fs::read(&records_path).unwrap()).unwrap();
+    records.push(serde_json::json!({
+        "id": "gemini", "name": "Gemini CLI", "version": "0.71.1",
+        "command": ["gemini", "--experimental-acp"]
+    }));
+    std::fs::write(&records_path, serde_json::to_vec(&records).unwrap()).unwrap();
+    std::fs::write(home.join("config.toml"), "[backend_overrides.gemini]\nexecutable = 'gemini'\n").unwrap();
+    assert!(!Config::load().unwrap().backends.iter().any(|b| b.name == "gemini"));
+    assert!(registry::installed().iter().any(|entry| entry.id == "gemini"));
+    registry::uninstall("gemini").unwrap();
+
     let loaded = Config::load().unwrap();
+    assert!(!loaded.backends.iter().any(|b| b.name == "gemini"));
+    assert_eq!(loaded.providers["google"].api_key_env, "GEMINI_API_KEY");
+    let cache_path = home.join("backend-models.json");
+    let cache = r#"{"gemini":["gemini-2.5-pro"],"antigravity":["gemini-3-pro"]}"#;
+    std::fs::write(&cache_path, cache).unwrap();
+    for models in [
+        greencode_core::cached_backend_models(),
+        greencode_core::cached_project_backend_models(&root),
+    ] {
+        assert!(!models.contains_key("gemini"));
+        assert_eq!(models["antigravity"], ["gemini-3-pro"]);
+    }
+    assert_eq!(std::fs::read_to_string(&cache_path).unwrap(), cache);
     let ag_backends: Vec<_> = loaded
         .backends
         .iter()

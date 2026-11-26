@@ -2,6 +2,12 @@
   "version": "1.0.0",
   "agents": [
     {
+      "id": "gemini",
+      "name": "Gemini CLI",
+      "version": "0.71.1",
+      "distribution": {"npx": {"package": "@google/gemini-cli@0.71.1", "args": ["--experimental-acp"]}}
+    },
+    {
       "id": "agoragentic-acp",
       "name": "Agoragentic",
       "version": "1.3.0",

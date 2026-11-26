@@ -460,8 +460,9 @@ fn project_backend_models(path: &std::path::Path, project: &std::path::Path) -> 
 }
 
 fn read_backend_models(path: &std::path::Path) -> Option<Value> {
-    let value: Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
-    value.is_object().then_some(value)
+    let mut value: Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    value.as_object_mut()?.remove(registry::GEMINI_CLI_ID);
+    Some(value)
 }
 
 fn save_backend_models(path: &std::path::Path, backend: &str, project: &std::path::Path, models: &[String]) -> std::io::Result<()> {

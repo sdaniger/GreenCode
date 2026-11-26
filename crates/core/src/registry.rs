@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256, Sha512};
 use crate::config::{AcpCfg, Protocol};
 
 const URL: &str = "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json";
+pub(crate) const GEMINI_CLI_ID: &str = "gemini";
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Entry {
@@ -62,6 +63,7 @@ impl Installed {
 pub fn parse(json: &str) -> Result<Vec<Entry>> {
     #[derive(Deserialize)] struct Registry { agents: Vec<Entry> }
     let mut entries = serde_json::from_str::<Registry>(json)?.agents;
+    entries.retain(|entry| entry.id != GEMINI_CLI_ID);
     for entry in &mut entries {
         entry.kind = if entry.distribution.npx.is_some() { "npx" } else if entry.distribution.uvx.is_some() { "uvx" } else if entry.distribution.binary.is_some() { "binary" } else { "unknown" }.into();
     }
@@ -212,6 +214,7 @@ impl Drop for Staging {
 
 
 pub async fn install(entry: &Entry) -> Result<AcpCfg> {
+    anyhow::ensure!(entry.id != GEMINI_CLI_ID, "Gemini CLI is no longer supported; use Google Antigravity");
     component(&entry.id)?;
     component(&entry.version)?;
     // Read records before changing any installed files, including on a corrupt record file.
