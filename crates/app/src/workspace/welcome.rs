@@ -138,8 +138,8 @@ impl Workspace {
 
     pub(super) fn welcome_view(&self, pal: Pal, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let w = self.welcome.as_ref()?;
-        let button = |id: &'static str, label: String, act: WelcomeAct, cx: &mut Context<Self>| {
-            chip(id, label, pal)
+        let button = |id: ElementId, label: String, act: WelcomeAct, cx: &mut Context<Self>| {
+            control_button(id, label, pal)
                 .border_1()
                 .border_color(pal.line)
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.welcome_act(act.clone(), window, cx)))
@@ -156,10 +156,10 @@ impl Workspace {
             let mut r = div().flex().items_center().gap_2().min_h(px(30.)).child(div().flex_1().child(a.name)).child(div().text_xs().text_color(pal.muted).child(status));
             if ready(a.name) {
                 if matches!(a.name, "claude" | "codex") {
-                    r = r.child(button("wl", "ログイン".into(), WelcomeAct::Login(a.name), cx).id(("welcome-login", ix)));
+                    r = r.child(button(("welcome-login", ix).into(), "ログイン".into(), WelcomeAct::Login(a.name), cx));
                 }
             } else {
-                r = r.child(button("wi", "インストール".into(), WelcomeAct::Install(a.name), cx).id(("welcome-install", ix)));
+                r = r.child(button(("welcome-install", ix).into(), "インストール".into(), WelcomeAct::Install(a.name), cx));
             }
             r
         };
@@ -172,22 +172,22 @@ impl Workspace {
             .mx_auto()
             .px_8()
             .py_10()
-            .child(div().text_2xl().font_weight(FontWeight::SEMIBOLD).child("GreenCode へようこそ"))
-            .child(div().text_color(pal.muted).child("このコンピューターで見つかったエージェントとプロジェクトです。始めるにはエージェントが1つあれば十分です。"))
-            .child(section(if any_ready { "エージェント" } else { "エージェントを設定" }))
+            .child(div().text_2xl().font_weight(FontWeight::SEMIBOLD).child("GreenCode のセットアップ"))
+            .child(div().text_color(pal.muted).child("接続先を選ぶか、このまま始めてあとから設定できます。"))
+            .when(any_ready, |d| d.child(section("インストール済み")))
             .children(found.iter().enumerate().map(|(i, a)| agent_row(i, a, cx)))
-            .child(section("さらにエージェントを追加"))
+            .when(!more.is_empty(), |d| d.child(section("インストールできる接続先")))
             .children(more.iter().enumerate().map(|(i, a)| agent_row(i + 100, a, cx)))
-            .child(section("プロジェクト"));
+            .child(section("過去の会話を取り込む"));
         if w.projects.is_empty() {
-            page = page.child(div().text_color(pal.muted).child("過去30日に Claude Code / Codex / Pi で使われたプロジェクトは見つかりませんでした"));
+            page = page.child(div().text_color(pal.muted).child("取り込める会話は見つかりませんでした。"));
         } else {
             page = page.child(
                 div()
                     .flex()
                     .gap_2()
-                    .child(button("wa", "すべて選択".into(), WelcomeAct::All(true), cx))
-                    .child(button("wn", "選択解除".into(), WelcomeAct::All(false), cx)),
+                    .child(button("wa".into(), "すべて選択".into(), WelcomeAct::All(true), cx))
+                    .child(button("wn".into(), "選択解除".into(), WelcomeAct::All(false), cx)),
             );
         }
         for (i, p) in w.projects.iter().enumerate() {
@@ -206,11 +206,11 @@ impl Workspace {
             );
         }
         let start = match (w.importing, any_ready) {
-            (Some((done, total)), _) => format!("インポート中… {done}/{total}"),
+            (Some((done, total)), _) => format!("取り込み中… {done}/{total}"),
             (None, true) => "始める".into(),
-            (None, false) => "エージェントなしで始める".into(),
+            (None, false) => "あとで設定する".into(),
         };
-        page = page.child(div().mt_6().flex().child(button("ws", start, WelcomeAct::Start, cx).bg(pal.accent).text_color(pal.accent_fg)));
+        page = page.child(div().mt_6().flex().child(button("ws".into(), start, WelcomeAct::Start, cx).bg(pal.accent).text_color(pal.accent_fg)));
         Some(div().absolute().inset_0().bg(pal.panel).occlude().child(div().id("welcome").size_full().overflow_y_scroll().child(page)))
     }
 }

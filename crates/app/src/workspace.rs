@@ -845,7 +845,7 @@ enum Act {
     DefaultModel,
     Settings,
     /// Shows one section of the settings screen.
-    SettingsTab(usize),
+    SettingsTab(&'static str),
     Bind,
     Unbind(String),
     ClearProjectDefault,
@@ -1055,18 +1055,23 @@ fn extension_text(text: &str) -> String {
 }
 
 /// Sections of the settings screen, in sidebar order; icons must be among gpui-kit's bundled defaults.
-const SETTINGS_TABS: [(&str, Ic); 11] = [
+const VOICE_SETTINGS: &str = "音声入力";
+const WORKFLOW_SETTINGS: &str = "自動化";
+const OMP_SETTINGS: &str = "OMP 設定";
+const SETTINGS_TABS: [(&str, Ic); 13] = [
     ("一般", Ic::Settings2),
     ("外観", Ic::Palette),
-    ("モデルと権限", Ic::Bot),
+    ("入力と会話", Ic::FileText),
+    (VOICE_SETTINGS, Ic::Mic),
+    ("モデルと権限", Ic::Settings),
     ("接続", Ic::Network),
-    ("ツール", Ic::SquareTerminal),
     ("プロジェクト", Ic::Folder),
-    ("シークレット", Ic::EyeOff),
-    ("キーとファイル", Ic::FileText),
-    ("ラボ", Ic::Asterisk),
-    ("詳細設定", Ic::Settings),
-    ("エージェント", Ic::LayoutDashboard),
+    (WORKFLOW_SETTINGS, Ic::Calendar),
+    ("ツール", Ic::SquareTerminal),
+    ("認証情報", Ic::EyeOff),
+    ("ショートカットとファイル", Ic::File),
+    ("詳細設定", Ic::Settings2),
+    (OMP_SETTINGS, Ic::LayoutDashboard),
 ];
 
 /// Slash commands handled by the GUI in native threads, for completion.
@@ -1163,7 +1168,7 @@ const HELP: &str = "/model [provider/model], /models  モデルを選ぶ（引�
 /update [check] [stable|main]  GitHub の安定版または main のコミットビルドを確認・適用
 /webhook プロンプト  Webhook を作成（/webhook で一覧）   /webhook-secret ID SECRET 署名を設定   /webhook-rotate ID URL を更新
 /rename 名前  スレッド名変更   /snooze [時間]  スレッドを一時的に隠す   /scratch  プロジェクトなしで開始
-/titleprompt 指示  タイトル生成の追加指示（設定 → 一般のテキスト生成モデル使用時）
+/titleprompt 指示  スレッド名を付けるときの指示（設定 → 入力と会話）
 /clone [owner/name|URL]  リポジトリをクローン（引数なしで入力欄）   /project [名前]  新規プロジェクト   /publish  GitHub に非公開で公開   /sync  既定ブランチを今すぐ同期
 ↑↓ 送信済みプロンプトの呼び出し · ⌥↑ キュー末尾を編集 · ⇧⌘A 権限切り替え · ⌘⏎ 送信して次の下書きへ
 ⌘K パレット（? で始めると会話の全文検索）· （↑↓ で選択） · ⌘N 新規 · ⌘O プロジェクト · ⌘D 差分 · / コマンド · $ スキル · @ ファイル・スレッド · # PR · esc 停止";
@@ -1248,7 +1253,7 @@ fn tool_visibility_label(v: ToolVisibility) -> &'static str {
         ToolVisibility::Show => "すべて表示",
         ToolVisibility::Successful => "成功したものは隠す",
         ToolVisibility::All => "すべて隠す",
-        ToolVisibility::Zen => "Zen（途中の返答も隠す）",
+        ToolVisibility::Zen => "最後の回答だけ表示",
     }
 }
 
@@ -1257,7 +1262,7 @@ fn mode_label(m: Mode) -> &'static str {
         Mode::Ask => "毎回確認",
         Mode::AutoEdit => "編集を自動許可",
         Mode::Full => "すべて許可",
-        Mode::Plan => "プラン（読み取りのみ）",
+        Mode::Plan => "読み取りのみ",
     }
 }
 
@@ -1365,6 +1370,21 @@ fn chip(id: impl Into<ElementId>, label: impl Into<SharedString>, pal: Pal) -> S
         .cursor_pointer()
         .hover(|s| s.bg(pal.hover).text_color(pal.fg))
         .child(label.into())
+}
+
+fn control_button(id: impl Into<ElementId>, label: impl Into<SharedString>, pal: Pal) -> gpui_kit::base::Button {
+    let label = label.into();
+    gpui_kit::base::Button::new(id)
+        .accessibility_label(label.clone())
+        .flex_shrink_0()
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .text_xs()
+        .text_color(pal.fg)
+        .cursor_pointer()
+        .hover(|s| s.bg(pal.hover).text_color(pal.fg))
+        .child(label)
 }
 
 /// An on/off switch in the palette's colors; the caller supplies `on_change`.
@@ -1717,7 +1737,7 @@ impl Workspace {
             TextareaState::new(window, cx)
                 .auto_grow(1, 8)
                 .submit_on_enter(true)
-                .placeholder("メッセージを入力   / コマンド   @ ファイル")
+                .placeholder("メッセージを入力")
         });
         let subs =
             vec![cx.subscribe_in(
@@ -4866,7 +4886,7 @@ impl Workspace {
             ),
             ("コミットメッセージを生成してコミット".into(), Act::GenerateCommit),
             ("タイトルを再生成".into(), Act::RegenerateTitle),
-            ("テキスト生成モデルを切り替え（オフ → 各モデル）".into(), Act::CycleTextModel),
+            ("次の自動作成用モデルに切り替え".into(), Act::CycleTextModel),
             ("最後のターンを取り消す（ファイルも戻す）".into(), Act::Undo),
             ("このターンの bash 変更の差分".into(), Act::BashDiff),
             ("エージェントセッションを再起動".into(), Act::RestartAgent),
@@ -5151,11 +5171,12 @@ impl Workspace {
         for m in &self.thread().models {
             v.push((format!("モデル: {m}"), Act::Model(m.clone())));
         }
-        // Last, so a typed `provider/model` still picks `モデル:` first. The settings row only cycles.
-        v.push(("テキスト生成モデル: オフ".into(), Act::TextModel(None)));
+        // Keep the conversation's model ahead of the writing model in unfiltered search.
+        let writing_model = self.text_model();
+        v.push(("自動作成に使うモデル: オフ".into(), Act::TextModel(None)));
         for m in self.models() {
-            let chosen = if self.text_model().as_deref() == Some(m.as_str()) { "（選択中）" } else { "" };
-            v.push((format!("テキスト生成モデル: {m}{chosen}"), Act::TextModel(Some(m))));
+            let chosen = if writing_model.as_deref() == Some(m.as_str()) { "（選択中）" } else { "" };
+            v.push((format!("自動作成に使うモデル: {m}{chosen}"), Act::TextModel(Some(m))));
         }
         if rpc_backend(&self.cfg, &self.thread().meta.backend) {
             for level in &self.thread().thinking_levels {
@@ -5191,7 +5212,8 @@ impl Workspace {
             }
         }
         for b in self.backends() {
-            v.push((format!("バックエンド: {b}"), Act::Backend(b)));
+            let name = if b == "native" { "標準" } else { &b };
+            v.push((format!("接続先: {name}"), Act::Backend(b)));
         }
         for t in &self.threads {
             if !t.meta.title.is_empty() {
@@ -5938,10 +5960,16 @@ impl Workspace {
             Act::SecretRemove(i) => self.secret_remove(i),
             Act::SecretTest => self.secret_test(cx),
             Act::Cite => self.open_cite(window, cx),
-            Act::SettingsTab(tab) => {
+            Act::SettingsTab(name) => {
+                let Some(tab) = SETTINGS_TABS.iter().position(|(label, _)| *label == name) else {
+                    return;
+                };
+                if self.settings.is_none() {
+                    self.run(Act::Settings, window, cx);
+                }
                 self.settings_tab = tab;
                 self.settings_scroll = ScrollHandle::default();
-                if SETTINGS_TABS.get(tab).is_some_and(|(name, _)| matches!(*name, "詳細設定" | "エージェント")) {
+                if matches!(name, "詳細設定" | OMP_SETTINGS) {
                     self.advanced_load();
                 }
             }
@@ -6273,7 +6301,7 @@ impl Workspace {
                 if key == "labs_workflows" {
                     if self.ui[key] == true {
                         self.start_workflow_engine(cx);
-                        self.notice("ワークフローをオンにしました（設定 → ラボ）");
+                        self.notice("ワークフローを有効にしました（設定 → 自動化）");
                     } else {
                         self.stop_workflow_engine();
                         self.notice("ワークフローをオフにしました。実行は保持され、オンに戻すと続きから進みます");
@@ -7814,15 +7842,17 @@ impl Workspace {
                             .child("検索"),
                     )
                     .child(
-                        icon_button("open", Ic::FolderOpen, pal).on_click(cx.listener(
+                        control_button("open", "フォルダを開く", pal).on_click(cx.listener(
                             |this, _: &ClickEvent, window, cx| {
                                 this.run(Act::OpenProject, window, cx)
                             },
                         )),
                     )
-                    .child(icon_button("new", Ic::Plus, pal).on_click(cx.listener(
-                        |this, _: &ClickEvent, window, cx| this.run(Act::NewThread, window, cx),
-                    ))),
+                    .child(control_button("new", "＋ 新規", pal)
+                        .accessibility_label("新しいスレッド")
+                        .on_click(cx.listener(
+                            |this, _: &ClickEvent, window, cx| this.run(Act::NewThread, window, cx),
+                        ))),
             )
             .child(body)
             .child(
@@ -7834,7 +7864,7 @@ impl Workspace {
                     .border_t_1()
                     .border_color(pal.line)
                     .child(
-                        icon_button("settings", Ic::Settings, pal).on_click(cx.listener(
+                        control_button("settings", "設定", pal).on_click(cx.listener(
                             |this, _: &ClickEvent, window, cx| this.run(Act::Settings, window, cx),
                         )),
                     )
@@ -8180,11 +8210,30 @@ impl Workspace {
         });
         let (model, backend) = (self.model_label(), t.meta.backend.clone());
         let mode_chips = self.mode_chips(pal, cx);
-        let backends = self.backends();
+        let backend_name = if backend == "native" {
+            "標準".into()
+        } else {
+            self.connection_display_name(&backend)
+        };
         let mode = self.thread().perms.mode();
-        let modes = greencode_core::config::backend_modes(&self.thread().meta.backend);
-        let can_send = status == Status::Idle || !self.input.read(cx).value().trim().is_empty();
-        let _ = window;
+        let can_send = status == Status::Idle
+            || !self.input.read(cx).value().trim().is_empty()
+            || t.dialog.is_some()
+            || self.queue_edit.is_some();
+        let send_label = if self.queue_edit.is_some() {
+            "変更を保存"
+        } else if t.dialog.is_some() {
+            "回答を送信"
+        } else if status == Status::Idle {
+            "送信"
+        } else if status == Status::Running
+            && self.ui["follow_up_steer"] == true
+            && can_steer(&self.cfg, &backend)
+        {
+            "実行中に送信"
+        } else {
+            "送信を予約"
+        };
 
         let branch = self.branch.clone();
         let mut col = div().flex().flex_col().gap_2().px_6().pb_4().pt_1();
@@ -8589,22 +8638,23 @@ impl Workspace {
                 .child(
                     div()
                         .flex()
+                        .flex_wrap()
                         .items_center()
                         .gap_1()
                         .px_2()
                         .pb_2()
-                        .child(icon_button("attach", Ic::File, pal).on_click(cx.listener(
+                        .child(control_button("attach", "添付", pal).on_click(cx.listener(
                             |this, _: &ClickEvent, window, cx| {
                                 this.command("/attach", false, window, cx);
                             },
                         )))
                         .child(
-                            chip(
+                            control_button(
                                 "voice",
                                 if self.voice_recording.is_some() {
-                                    "● 録音中… 停止"
+                                    "録音を停止"
                                 } else {
-                                    "音声  ⇧⌘D"
+                                    "音声入力"
                                 },
                                 pal,
                             )
@@ -8626,49 +8676,32 @@ impl Workspace {
                                     .child(SharedString::from(u)),
                             )
                         })
-                        .when(status == Status::Running, |d| {
-                            d.child(div().text_xs().text_color(pal.muted).child("実行中"))
+                        .when(status != Status::Idle, |d| {
+                            d.child(
+                                div().text_xs().text_color(pal.muted).child(
+                                    if status == Status::Waiting { "確認待ち" } else { "実行中" },
+                                ),
+                            )
                         })
-                        .child(chip("model", model, pal).on_click(cx.listener(
-                            |this, _: &ClickEvent, window, cx| this.open_model_picker(window, cx),
-                        )))
+                        .child(control_button("model", format!("{model} ▾"), pal)
+                            .accessibility_label(format!("モデルを選択: {model}"))
+                            .max_w(px(220.))
+                            .truncate()
+                            .on_click(cx.listener(
+                                |this, _: &ClickEvent, window, cx| this.open_model_picker(window, cx),
+                            )))
                         .children(mode_chips)
+                        .when(status != Status::Idle, |d| {
+                            d.child(control_button("stop", "停止", pal).on_click(cx.listener(
+                                |this, _: &ClickEvent, _, _| this.stop(),
+                            )))
+                        })
                         .child(
-                            div()
-                                .id("send")
-                                .ml_1()
-                                .size(px(28.))
-                                .flex()
-                                .flex_shrink_0()
-                                .items_center()
-                                .justify_center()
-                                .rounded_full()
-                                .text_sm()
-                                .cursor_pointer()
-                                .when(can_send && status == Status::Idle, |b| {
-                                    b.bg(pal.fg).text_color(pal.panel)
-                                })
-                                .when(can_send && status != Status::Idle, |b| {
-                                    b.bg(pal.accent).text_color(pal.accent_fg)
-                                })
-                                .when(!can_send, |b| b.bg(pal.selected))
-                                .child(if !can_send {
-                                    "■"
-                                } else if status == Status::Idle {
-                                    "↑"
-                                } else if self.ui["follow_up_steer"] == true
-                                    && rpc_backend(&self.cfg, &self.thread().meta.backend)
-                                {
-                                    "↱"
-                                } else {
-                                    "≡"
-                                })
-                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                    if can_send {
-                                        this.send(window, cx)
-                                    } else {
-                                        this.stop()
-                                    }
+                            control_button("send", send_label, pal)
+                                .disabled(!can_send)
+                                .when(can_send, |b| b.bg(pal.accent).text_color(pal.accent_fg))
+                                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                                    this.send(window, cx);
                                 })),
                         ),
                 ),
@@ -8677,34 +8710,28 @@ impl Workspace {
             div()
                 .flex()
                 .items_center()
-                .gap_3()
+                .gap_2()
                 .px_2()
                 .text_xs()
                 .text_color(pal.muted)
-                .child(chip("backend", backend.clone(), pal).on_click(cx.listener(
-                    move |this, _: &ClickEvent, window, cx| {
-                        // A started thread keeps its agent; the picker lists every backend and opens a new thread for another one.
-                        let fresh = !this.thread().live() && this.thread().items.is_empty();
-                        if fresh {
-                            this.run(Act::Backend(Self::cycle(&backends, &backend)), window, cx)
+                .child(control_button("backend", format!("接続先: {backend_name} ▾"), pal)
+                    .max_w(px(200.))
+                    .truncate()
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        if !this.thread().live() && this.thread().items.is_empty() {
+                            this.open_palette("接続先: ", window, cx);
                         } else {
-                            this.open_model_picker(window, cx)
+                            this.open_model_picker(window, cx);
                         }
-                    },
-                )))
+                    })))
                 .child(div().flex_1())
                 .when(!branch.is_empty(), |d| {
-                    d.child(SharedString::from(format!("⎇ {branch}")))
+                    d.child(div().truncate().child(format!("⎇ {branch}")))
                 })
-                .child(chip("mode", mode_label(mode), pal).on_click(cx.listener(
-                    move |this, _: &ClickEvent, window, cx| {
-                        this.run(
-                            Act::Mode(Self::cycle(modes, &mode)),
-                            window,
-                            cx,
-                        )
-                    },
-                ))),
+                .child(control_button("mode", format!("権限: {} ▾", mode_label(mode)), pal)
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.open_palette("権限: ", window, cx);
+                    }))),
         )
     }
 
@@ -8963,14 +8990,9 @@ impl Workspace {
                 .flex_col()
                 .items_center()
                 .justify_center()
-                .gap_4()
-                .child(div().text_size(px(26.)).child("何を作りますか？"))
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(pal.muted)
-                        .child(SharedString::from(project.clone())),
-                )
+                .gap_3()
+                .child(div().text_xl().font_weight(FontWeight::SEMIBOLD).child("新しいスレッド"))
+                .child(div().text_sm().text_color(pal.muted).child("ファイルは @、コマンドは / で探せます"))
                 .child(div().w_full().max_w(px(640.)).child(composer))
                 .into_any_element();
             (hero, None)
@@ -9371,6 +9393,7 @@ impl Workspace {
         let row = |label: SharedString, hint: &str, control: AnyElement| {
             div()
                 .flex()
+                .flex_wrap()
                 .items_center()
                 .justify_between()
                 .gap_4()
@@ -9378,11 +9401,11 @@ impl Workspace {
                 .child(
                     div()
                         .flex_1()
-                        .min_w_0()
+                        .min_w(px(148.))
                         .flex()
                         .flex_col()
                         .gap_0p5()
-                        .child(div().truncate().child(label))
+                        .child(label)
                         .when(!hint.is_empty(), |d| {
                             d.child(div().text_xs().text_color(pal.muted).child(hint.to_string()))
                         }),
@@ -9394,9 +9417,8 @@ impl Workspace {
             n.set(n.get() + 1);
             n.get()
         };
-        // A chip showing the current value; clicking runs `act`.
         let button = |value: String, act: Act, cx: &mut Context<Self>| {
-            chip(("setting", next_id()), value, pal)
+            control_button(("setting", next_id()), value, pal)
                 .max_w(px(320.))
                 .truncate()
                 .border_1()
@@ -9504,9 +9526,10 @@ impl Workspace {
                     .child("設定"),
             )
             .child(div().flex().flex_col().gap_0p5().px_2().children(
-                SETTINGS_TABS.iter().enumerate().map(|(i, (name, icon))| {
-                    div()
-                        .id(("settings-tab", i))
+                SETTINGS_TABS.iter().enumerate().map(|(i, &(name, icon))| {
+                    gpui_kit::base::Button::new(("settings-tab", i))
+                        .accessibility_label(name)
+                        .aria_toggled(if i == tab { accesskit::Toggled::True } else { accesskit::Toggled::False })
                         .flex()
                         .items_center()
                         .gap_2()
@@ -9515,24 +9538,19 @@ impl Workspace {
                         .rounded_md()
                         .cursor_pointer()
                         .hover(|s| s.bg(pal.hover))
-                        .map(|d| {
-                            if i == tab {
-                                d.bg(pal.selected).text_color(pal.fg)
-                            } else {
-                                d.text_color(pal.muted)
-                            }
-                        })
-                        .child(*icon)
-                        .child(*name)
+                        .text_color(if i == tab { pal.fg } else { pal.muted })
+                        .when(i == tab, |d| d.bg(pal.selected))
+                        .child(icon)
+                        .child(name)
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            this.run(Act::SettingsTab(i), window, cx)
+                            this.run(Act::SettingsTab(name), window, cx)
                         }))
                 }),
             ))
             .child(div().flex_1())
             .child(
-                div()
-                    .id("settings-back")
+                gpui_kit::base::Button::new("settings-back")
+                    .accessibility_label("設定を閉じる")
                     .m_2()
                     .flex()
                     .items_center()
@@ -9547,7 +9565,7 @@ impl Workspace {
                         this.run(Act::Settings, window, cx)
                     }))
                     .child(Ic::ArrowLeft)
-                    .child("戻る")
+                    .child("設定を閉じる")
                     .child(div().flex_1())
                     .child(div().text_xs().child("esc")),
             );
@@ -9559,6 +9577,9 @@ impl Workspace {
         let name = SETTINGS_TABS[tab].0;
         let mut col = SettingsPage { pal, groups: Vec::new() };
         let macos = cfg!(target_os = "macos");
+        let text = |key: &str, empty: &str| {
+            self.ui[key].as_str().filter(|s| !s.is_empty()).unwrap_or(empty).to_string()
+        };
         match name {
             "一般" => {
                 let quit = match self.ui["quit_mode"].as_str() {
@@ -9566,147 +9587,15 @@ impl Workspace {
                     Some("hold") => 2,
                     _ => 0,
                 };
-                let tools = match self.tool_visibility() {
-                    ToolVisibility::Show => 0,
-                    ToolVisibility::Successful => 1,
-                    ToolVisibility::All => 2,
-                    ToolVisibility::Zen => 3,
-                };
-                let steer = self.ui["follow_up_steer"] == true;
-                let cmd_enter = self.ui["send_shortcut"] == "cmd+enter";
-                let text = |key: &str, empty: &str| {
-                    self.ui[key].as_str().filter(|s| !s.is_empty()).unwrap_or(empty).to_string()
-                };
-                let suggest_locked = settings.and_then(|s| s.suggest_next.as_ref()).is_some_and(|s| s.locked);
-                let voice_locked = settings.and_then(|s| s.voice_provider.as_ref()).is_some_and(|s| s.locked);
                 col = col
-                    .section("表示と通知")
-                    .child(toggle("通知", "", self.ui["notify_off"] != true, Act::Toggle("notify_off"), cx))
+                    .section("通知と終了")
+                    .child(toggle("デスクトップ通知", "バックグラウンドで作業が完了したときや確認が必要なとき", self.ui["notify_off"] != true, Act::Toggle("notify_off"), cx))
                     .child(row(
-                        "⌘Q".into(),
-                        "",
-                        choice(cycle(&["2回押しで終了", "すぐ終了", "長押しで終了"], quit, Act::CycleQuitMode), Some(quit), cx),
+                        "アプリの終了".into(),
+                        "⌘Q を押したとき",
+                        choice(cycle(&["2回押す", "すぐに終了", "長押し"], quit, Act::CycleQuitMode), Some(quit), cx),
                     ))
-                    .child(row(
-                        "ツールの呼び出し".into(),
-                        "",
-                        choice(cycle(&["すべて表示", "成功を隠す", "すべて隠す", "Zen"], tools, Act::ToolVisibility), Some(tools), cx),
-                    ))
-                    .section("入力")
-                    .child(row(
-                        "送信キー".into(),
-                        "",
-                        choice(cycle(&["Enter", "⌘Enter"], cmd_enter as usize, Act::SendShortcut), Some(cmd_enter as usize), cx),
-                    ))
-                    .child(row(
-                        "実行中に送ったメッセージ".into(),
-                        "",
-                        choice(
-                            cycle(&["次のターンで送る", "すぐ割り込む"], steer as usize, Act::Toggle("follow_up_steer")),
-                            Some(steer as usize),
-                            cx,
-                        ),
-                    ))
-                    .child(toggle(
-                        "/ メニューにスキルを表示",
-                        "",
-                        self.ui["slash_skills_off"] != true,
-                        Act::Toggle("slash_skills_off"),
-                        cx,
-                    ))
-                    .child(toggle(
-                        "次のプロンプトを提案",
-                        policy_hint(suggest_locked, ""),
-                        self.ui["suggest_next"] == true,
-                        Act::Toggle("suggest_next"),
-                        cx,
-                    ))
-                    .section("自動生成")
-                    .child(row(
-                        "モデル".into(),
-                        "スレッド名・コミット・PR・ブランチ名",
-                        button(self.text_model().unwrap_or_else(|| "オフ".into()), Act::CycleTextModel, cx),
-                    ))
-                    .child(row(
-                        "タイトルの追加指示".into(),
-                        "",
-                        button(text("title_instructions", "なし"), Act::EditText(git::TextPrompt::TitleInstructions), cx),
-                    ))
-                    .section("音声入力")
-                    .child(row(
-                        "文字起こし".into(),
-                        policy_hint(voice_locked, ""),
-                        button(
-                            voice::provider_label(self.ui["voice_provider"].as_str()).into(),
-                            Act::CycleVoiceProvider,
-                            cx,
-                        ),
-                    ))
-                    .child(row(
-                        "言語".into(),
-                        "",
-                        button(voice::language_label(&self.ui), Act::VoiceAction("language"), cx),
-                    ))
-                    .child(toggle(
-                        "英語に翻訳",
-                        "",
-                        self.ui["voice_translate"] == true,
-                        Act::Toggle("voice_translate"),
-                        cx,
-                    ))
-                    .child(toggle(
-                        "「えー」「um」を除く",
-                        "",
-                        self.ui["voice_fillers"] == true,
-                        Act::Toggle("voice_fillers"),
-                        cx,
-                    ))
-                    .child(row(
-                        "マイク".into(),
-                        if macos { "" } else { "macOS のみ" },
-                        div()
-                            .flex()
-                            .gap_1()
-                            .child(button(voice::mic_label(&self.ui), Act::VoiceAction("mic"), cx))
-                            .child(button("テスト".into(), Act::VoiceAction("test"), cx))
-                            .into_any_element(),
-                    ))
-                    .child(row(
-                        "辞書".into(),
-                        "/voice dict で編集",
-                        div().text_sm().child(voice::dict_label(&self.ui)).into_any_element(),
-                    ))
-                    .child(toggle(
-                        "モデルで整える",
-                        "",
-                        self.ui["voice_cleanup"] == true,
-                        Act::Toggle("voice_cleanup"),
-                        cx,
-                    ))
-                    .child(row(
-                        "整形モデル".into(),
-                        "",
-                        button(
-                            text("voice_cleanup_model", "スレッドのモデル"),
-                            Act::EditText(git::TextPrompt::VoiceCleanupModel),
-                            cx,
-                        ),
-                    ))
-                    .child(row(
-                        "整形の追加指示".into(),
-                        "",
-                        button(
-                            text("voice_cleanup_instructions", "なし"),
-                            Act::EditText(git::TextPrompt::VoiceInstructions),
-                            cx,
-                        ),
-                    ))
-                    .child(row(
-                        "訂正の合図".into(),
-                        "",
-                        button(text("voice_correction", "なし"), Act::EditText(git::TextPrompt::VoiceCorrection), cx),
-                    ))
-                    .section("スナップショット")
+                    .section("画面の撮影")
                     .child(toggle(
                         "ウィンドウを撮影して添付",
                         if macos { "" } else { "macOS のみ" },
@@ -9726,7 +9615,7 @@ impl Workspace {
                         "",
                         button(snapshot::shortcut_label(&self.ui).into(), Act::SnapshotShortcut, cx),
                     ))
-                    .section("自動で保管するスレッド")
+                    .section("スレッドの自動保管")
                     .child(toggle(
                         "7 日間使っていない",
                         "",
@@ -9775,6 +9664,154 @@ impl Workspace {
                         button("開く".into(), Act::Welcome(welcome::WelcomeAct::Open), cx),
                     ))
             }
+            "入力と会話" => {
+                let tools = match self.tool_visibility() {
+                    ToolVisibility::Show => 0,
+                    ToolVisibility::Successful => 1,
+                    ToolVisibility::All => 2,
+                    ToolVisibility::Zen => 3,
+                };
+                let steer = self.ui["follow_up_steer"] == true;
+                let cmd_enter = self.ui["send_shortcut"] == "cmd+enter";
+                let suggest_locked = settings.and_then(|s| s.suggest_next.as_ref()).is_some_and(|s| s.locked);
+                col = col
+                    .section("作業の表示")
+                    .child(row(
+                        "作業の履歴".into(),
+                        "ファイルの読み書きやコマンドの実行結果",
+                        choice(cycle(&["すべて", "失敗のみ", "非表示", "回答だけ"], tools, Act::ToolVisibility), Some(tools), cx),
+                    ))
+                    .section("入力")
+                    .child(row(
+                        "送信キー".into(),
+                        "",
+                        choice(cycle(&["Enter", "⌘Enter"], cmd_enter as usize, Act::SendShortcut), Some(cmd_enter as usize), cx),
+                    ))
+                    .child(row(
+                        "作業中に送信したとき".into(),
+                        "実行中に送信できない接続先では、次の送信として予約します。",
+                        choice(
+                            cycle(&["送信を予約", "実行中に送信"], steer as usize, Act::Toggle("follow_up_steer")),
+                            Some(steer as usize),
+                            cx,
+                        ),
+                    ))
+                    .child(toggle(
+                        "/ の候補にスキルを表示",
+                        "",
+                        self.ui["slash_skills_off"] != true,
+                        Act::Toggle("slash_skills_off"),
+                        cx,
+                    ))
+                    .child(toggle(
+                        "返信のあとに次の入力を提案",
+                        policy_hint(suggest_locked, "Tab キーで候補を下書きに入れる"),
+                        self.ui["suggest_next"] == true,
+                        Act::Toggle("suggest_next"),
+                        cx,
+                    ))
+                    .section("名前と文章の自動作成")
+                    .child(row(
+                        "使用するモデル".into(),
+                        "スレッド名、コミット文、PR の説明、ブランチ名に使用",
+                        control_button(
+                            "text-model-setting",
+                            format!("{} ▾", self.text_model().as_deref().unwrap_or("オフ")),
+                            pal,
+                        )
+                        .max_w(px(320.))
+                        .truncate()
+                        .border_1()
+                        .border_color(pal.line)
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.open_palette("自動作成に使うモデル: ", window, cx);
+                        }))
+                        .into_any_element(),
+                    ))
+                    .child(row(
+                        "スレッド名を付けるときの指示".into(),
+                        "",
+                        button(text("title_instructions", "なし"), Act::EditText(git::TextPrompt::TitleInstructions), cx),
+                    ))
+            }
+            VOICE_SETTINGS => {
+                let voice_locked = settings.and_then(|s| s.voice_provider.as_ref()).is_some_and(|s| s.locked);
+                col = col.section("文字起こし")
+                    .child(row(
+                        "文字起こし先".into(),
+                        policy_hint(voice_locked, "音声を処理するサービスを選びます。"),
+                        button(
+                            voice::provider_label(self.ui["voice_provider"].as_str()).into(),
+                            Act::CycleVoiceProvider,
+                            cx,
+                        ),
+                    ))
+                    .child(row(
+                        "言語".into(),
+                        "",
+                        button(voice::language_label(&self.ui), Act::VoiceAction("language"), cx),
+                    ))
+                    .child(toggle(
+                        "英語に翻訳",
+                        "",
+                        self.ui["voice_translate"] == true,
+                        Act::Toggle("voice_translate"),
+                        cx,
+                    ))
+                    .child(toggle(
+                        "「えー」「um」を除く",
+                        "",
+                        self.ui["voice_fillers"] == true,
+                        Act::Toggle("voice_fillers"),
+                        cx,
+                    ))
+                    .child(row(
+                        "マイク".into(),
+                        if macos { "" } else { "macOS のみ" },
+                        div()
+                            .flex()
+                            .gap_1()
+                            .child(button(voice::mic_label(&self.ui), Act::VoiceAction("mic"), cx))
+                            .child(button("テスト".into(), Act::VoiceAction("test"), cx))
+                            .into_any_element(),
+                    ))
+                    .child(row(
+                        "辞書".into(),
+                        "/voice dict で編集",
+                        div().text_sm().child(voice::dict_label(&self.ui)).into_any_element(),
+                    ))
+                    .section("文字起こしの仕上げ")
+                    .child(toggle(
+                        "読みやすく整える",
+                        "文字起こしの結果を選んだモデルに送ります。",
+                        self.ui["voice_cleanup"] == true,
+                        Act::Toggle("voice_cleanup"),
+                        cx,
+                    ))
+                    .child(row(
+                        "整形モデル".into(),
+                        "",
+                        button(
+                            text("voice_cleanup_model", "スレッドのモデル"),
+                            Act::EditText(git::TextPrompt::VoiceCleanupModel),
+                            cx,
+                        ),
+                    ))
+                    .child(row(
+                        "整形の追加指示".into(),
+                        "",
+                        button(
+                            text("voice_cleanup_instructions", "なし"),
+                            Act::EditText(git::TextPrompt::VoiceInstructions),
+                            cx,
+                        ),
+                    ))
+                    .child(row(
+                        "訂正の合図".into(),
+                        "",
+                        button(text("voice_correction", "なし"), Act::EditText(git::TextPrompt::VoiceCorrection), cx),
+                    ))
+            }
             "モデルと権限" => {
                 let efforts = [None, Some("low"), Some("medium"), Some("high")];
                 let effort = efforts.iter().position(|e| self.cfg.effort.as_deref() == *e);
@@ -9782,7 +9819,7 @@ impl Workspace {
                 let mode_choices = |act: fn(Mode) -> Act| {
                     modes
                         .iter()
-                        .map(|m| (if *m == Mode::Plan { "プラン" } else { mode_label(*m) }, vec![act(*m)]))
+                        .map(|m| (mode_label(*m), vec![act(*m)]))
                         .collect::<Vec<_>>()
                 };
                 let mode_locked = settings.and_then(|s| s.default_mode.as_ref()).is_some_and(|s| s.locked);
@@ -9790,13 +9827,13 @@ impl Workspace {
                 col = col
                     .section("モデル")
                     .child(row(
-                        "新規スレッド".into(),
+                        "新しいスレッドの既定モデル".into(),
                         &self.cfg.model,
-                        button(format!("{} にする", t.meta.model), Act::DefaultModel, cx),
+                        button("現在のモデルを使う".into(), Act::DefaultModel, cx),
                     ))
                     .child(row(
-                        "思考の強さ".into(),
-                        "",
+                        "回答前の検討量".into(),
+                        "対応するモデルで使用",
                         choice(
                             efforts
                                 .iter()
@@ -9809,18 +9846,18 @@ impl Workspace {
                     ))
                     .section("権限")
                     .child(row(
-                        "新規スレッド".into(),
+                        "新しいスレッド".into(),
                         policy_hint(mode_locked, ""),
                         choice(mode_choices(Act::DefaultMode), modes.iter().position(|m| *m == self.cfg.mode), cx),
                     ))
                     .child(row(
-                        "このスレッド".into(),
+                        "現在のスレッド".into(),
                         "",
                         choice(mode_choices(Act::Mode), modes.iter().position(|m| *m == t.perms.mode()), cx),
                     ))
                     .child(toggle(
-                        "サンドボックス",
-                        policy_hint(sandbox_locked, "bash の書き込みを制限"),
+                        "シェルの書き込み先を制限",
+                        policy_hint(sandbox_locked, "プロジェクトと一時フォルダなどに限定（macOS）"),
                         greencode_core::tools::SANDBOX.load(std::sync::atomic::Ordering::Relaxed),
                         Act::Sandbox,
                         cx,
@@ -9845,15 +9882,15 @@ impl Workspace {
                     0
                 };
                 col = col
-                    .section("コンテキスト")
+                    .section("長い会話の処理")
                     .child(row(
-                        "自動圧縮".into(),
-                        "",
-                        choice(cycle(&["要約", "スナップ", "オフ"], compaction, Act::CycleCompaction), Some(compaction), cx),
+                        "会話履歴の整理".into(),
+                        "履歴が長くなったとき、続きを進めるために内容を短くまとめます。",
+                        choice(cycle(&["要約", "引き継ぎメモ", "オフ"], compaction, Act::CycleCompaction), Some(compaction), cx),
                     ))
                     .child(toggle(
-                        "自動学習",
-                        "",
+                        "作業で得た知識を保存",
+                        "今後のスレッドで再利用します。",
                         self.cfg.learning.auto,
                         Act::SetLearning(!self.cfg.learning.auto),
                         cx,
@@ -10055,16 +10092,16 @@ impl Workspace {
                     ));
                 }
             }
-            "シークレット" => col = self.secrets_section(col, pal, cx),
+            "認証情報" => col = self.secrets_section(col, pal, cx),
             "詳細設定" => col = self.advanced_section(col, pal, cx),
-            "エージェント" => col = self.omp_section(col, pal, cx),
-            "ラボ" => {
+            OMP_SETTINGS => col = self.omp_section(col, pal, cx),
+            WORKFLOW_SETTINGS => {
                 let workflows = greencode_core::workflow::paths().workflows;
                 col = col
                     .section("ワークフロー")
                     .child(toggle(
-                        "ワークフロー",
-                        "",
+                        "ワークフローを有効にする",
+                        "定期実行、Webhook、失敗時の再試行",
                         self.ui["labs_workflows"] == true,
                         Act::Toggle("labs_workflows"),
                         cx,
@@ -10076,8 +10113,8 @@ impl Workspace {
                         button("開く".into(), Act::OpenFile(workflows), cx),
                     ))
             }
-            "キーとファイル" => {
-                col = col.section("キーバインド");
+            "ショートカットとファイル" => {
+                col = col.section("カスタムショートカット");
                 for (key, command) in self.ui["keys"].as_object().into_iter().flatten() {
                     col = col.child(row(
                         key.clone().into(),
@@ -10470,8 +10507,9 @@ mod tests {
         cx.simulate_keystrokes("cmd-shift-d");
         ws.read_with(cx, |ws, _| {
             assert!(ws.settings.is_some());
+            assert_eq!(super::SETTINGS_TABS[ws.settings_tab].0, super::VOICE_SETTINGS);
             assert!(ws.voice_recording.is_none());
-            assert!(matches!(ws.thread().items.last(), Some(Item::Notice(text)) if text.as_ref() == "設定で文字起こし先を選んでください"));
+            assert!(matches!(ws.thread().items.last(), Some(Item::Notice(text)) if text.as_ref() == "音声入力を使うには、文字起こし先を選んでください"));
         });
     }
 
@@ -13683,11 +13721,10 @@ mod tests {
     async fn advanced_settings_edit_any_config_key_and_reload(cx: &mut TestAppContext) {
         let (ws, cx) = open(cx);
         cx.simulate_keystrokes("cmd-,");
-        let tab = super::SETTINGS_TABS.iter().position(|(n, _)| *n == "詳細設定").unwrap();
         let config = greencode_core::home().join("config.toml");
         cx.update(|window, cx| {
             ws.update(cx, |ws, cx| {
-                ws.run(super::Act::SettingsTab(tab), window, cx);
+                ws.run(super::Act::SettingsTab("詳細設定"), window, cx);
                 // Credentials are listed but never editable here.
                 assert!(ws.advanced.rows.iter().any(|r| r.key == "tui.symbol_preset" && r.writable));
                 assert!(!ws.advanced.rows.iter().any(|r| r.writable && r.key.ends_with("api_key")));
@@ -13713,10 +13750,9 @@ mod tests {
     async fn omp_settings_tab_edits_native_settings_and_tools(cx: &mut TestAppContext) {
         let (ws, cx) = open(cx);
         cx.simulate_keystrokes("cmd-,");
-        let tab = super::SETTINGS_TABS.iter().position(|(n, _)| *n == "エージェント").unwrap();
         cx.update(|window, cx| {
             ws.update(cx, |ws, cx| {
-                ws.run(super::Act::SettingsTab(tab), window, cx);
+                ws.run(super::Act::SettingsTab(super::OMP_SETTINGS), window, cx);
                 // OMP's choices become chips only where the native key accepts them.
                 assert_eq!(ws.advanced.choices["tui.symbol_preset"], ["unicode", "nerd", "ascii"]);
                 ws.run(super::Act::SettingWrite("tui.symbol_preset".into(), Some("ascii".into())), window, cx);

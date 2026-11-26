@@ -106,10 +106,8 @@ impl Workspace {
             .unwrap_or("off")
             .to_string();
         if !matches!(provider.as_str(), "openai" | "groq" | "xai" | "openrouter" | "local") {
-            if self.settings.is_none() {
-                self.run(Act::Settings, window, cx);
-            }
-            self.notice("設定で文字起こし先を選んでください");
+            self.run(Act::SettingsTab(VOICE_SETTINGS), window, cx);
+            self.notice("音声入力を使うには、文字起こし先を選んでください");
             cx.notify();
             return;
         }

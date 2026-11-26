@@ -1,4 +1,4 @@
-//! Model-written thread titles, commit messages, PR text and worktree branch names (Settings → 一般 → テキスト生成モデル).
+//! Automatic thread names, commit messages, PR descriptions and worktree branch names.
 //! All of it is off until a text generation model is chosen; failures fall back to the old behavior.
 
 use super::*;
@@ -81,8 +81,8 @@ impl Workspace {
         self.ui["text_model"] = json!(model.clone().unwrap_or_default());
         self.save_ui();
         self.notice(match model {
-            Some(m) => format!("テキスト生成モデル: {m}（タイトル・コミット・PR・ブランチ名）"),
-            None => "テキスト生成モデルをオフにしました".to_string(),
+            Some(m) => format!("自動作成に使うモデル: {m}"),
+            None => "名前と文章の自動作成をオフにしました".to_string(),
         });
     }
 
@@ -111,7 +111,7 @@ impl Workspace {
         }
         let Some(model) = self.text_model() else {
             if force {
-                self.notice("テキスト生成モデルが未設定です（設定 → 一般）");
+                self.notice("設定 → 入力と会話で、自動作成に使うモデルを選んでください");
             }
             return;
         };
@@ -168,7 +168,7 @@ impl Workspace {
             return;
         }
         let Some(model) = self.text_model() else {
-            self.notice("テキスト生成モデルが未設定です（設定 → 一般）");
+            self.notice("設定 → 入力と会話で、自動作成に使うモデルを選んでください");
             return;
         };
         let (cfg, cwd, id) = (self.cfg.clone(), self.thread().meta.cwd.clone(), self.thread().meta.id.clone());

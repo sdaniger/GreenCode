@@ -6,7 +6,7 @@ T3 Code / OMP feature parity is in progress, not complete. The [feature ledger](
 
 Start with [Downloads](#downloads), the [native terminal UI](#native-terminal-ui), or
 [installed agents](#use-installed-agents). For automation, see [thread scripting](#thread-scripting),
-[remote access](#remote-access), and [workflows](#workflows-labs). The
+[remote access](#remote-access), and [workflows](#workflows). The
 [cache-efficiency report](docs/cache-efficiency.md) contains benchmarks and reproduction steps.
 Check `greencode-cli --help` for which automation commands your build includes.
 
@@ -247,21 +247,21 @@ The listener is local only; a public URL requires your own tunnel, such as `clou
   Open files refresh when they change; HTML/SVG/PDF use Quick Look thumbnails (no JavaScript) and can be attached as snapshots.
 - **Sandbox** (`sandbox = true`, macOS): `bash` can write only inside the project, temp directories and `~/.greencode`.
 - **Cost**: add `[prices]` with `"provider/model" = [input, output, cache_read, cache_write]` in USD per million tokens to see dollars.
-- **Composer** (as in T3 Code): ↑/↓ recall sent prompts, ⌘S stashes or restores a draft, ⌥↑ edits the last queued message,
-  ⌘⏎ on a new thread sends it and opens the next draft, and "最後の回答を引用" quotes the last reply. The follow-up behavior
-  (queue or steer) and "hide tool calls" are palette settings; `/goal CONDITION` keeps a native agent working until it reports the goal met.
-- **Threads**: `/rename`, snooze (hidden until the time passes or the thread needs approval), threads without a project
-  (⌥⌘N, in `~/.greencode/scratch`), and per-project default model, backend and permission mode. ⇧⌘A cycles the permission mode.
+- **Composer**: **添付** adds a file; **音声入力** opens dictation or its settings. The send button names the
+  action it will take, and **停止** remains separate while work is running. ↑/↓ recall messages, ⌘S
+  stashes/restores the draft, ⌥↑ edits the last queued message, and ⌘⏎ on a new thread opens the next draft
+  after sending. **設定 → 入力と会話** controls the send key, follow-up delivery and work history.
+- **Threads**: `/rename`, snooze, and threads without a project (⌥⌘N, in `~/.greencode/scratch`).
+  Choose the current permissions using **権限** under the composer; ⇧⌘A cycles them. Project-specific defaults are available in settings.
 - **Git**: the header shows the branch; the palette switches branches, commits through the agent, pushes and opens a pull request
   with `gh`. `/branch NAME`, `/push`, `/pr` do the same.
 - **Terminal** (⌘J): project-scoped PTY tabs with 5,000 lines of history; the terminal resizes with the panel. Close or add tabs in the drawer; selected output can be inserted into the composer. The last 500 lines are saved locally when a tab closes or the app exits.
-- **Settings**: open settings with `⌘,`, `/settings`, or the palette. 一般 shows preview cards for
-  System, Light and Dark, followed by swatches for Emerald, Emerald Light, Paper, Sand and Graphite.
-  Select a card or use `/theme` to switch immediately. The sidebar also offers モデルと権限
-  (default model, effort, permission modes, sandbox, allow rules),
-  接続 (providers and agents), ツール (automatic compaction, learning, individual `ext` tools), プロジェクト (project defaults, worktrees)
-  and キーとファイル (custom keybindings, config files); it always opens on 一般. Values persist in
-  `~/.greencode/ui.json`; custom bindings can also be represented as `{"keys": {"cmd-shift-p": "/plan"}}`.
+- **Settings**: open **設定** in the sidebar, press `⌘,`, or run `/settings`. **一般** contains notifications,
+  quitting, screenshots and automatic archiving. **外観** has theme previews; **入力と会話** has send,
+  work history and automatic writing options. **音声入力**, **モデルと権限**, **接続**, and **自動化** have
+  separate pages. **ショートカットとファイル** contains custom keybindings and configuration files. Changes
+  save as you make them; UI preferences and custom bindings such as `{"keys": {"cmd-shift-p": "/plan"}}`
+  are stored in `~/.greencode/ui.json`.
 - A notification appears when a turn finishes or needs approval while GreenCode is in the background. ⌘K with `?text` searches conversations.
 
 ## Remote access
@@ -312,9 +312,9 @@ same bearer token as remote access, returning JSON rather than SSE. Notification
 HTTP 202. This endpoint does not provide OAuth: protect the token and use TLS or a
 trusted local network. Anyone with the token can read threads and run agents.
 
-## Workflows (Labs)
+## Workflows
 
-Enable **設定 → ラボ → ワークフロー** or set `"labs_workflows": true` in
+Enable **設定 → 自動化 → ワークフローを有効にする** or set `"labs_workflows": true` in
 `~/.greencode/ui.json`. Save a definition as `~/.greencode/workflows/check-in.toml`
 (override the definitions directory with `GREENCODE_WORKFLOWS`):
 

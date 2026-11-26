@@ -34,7 +34,7 @@ The target is the upstream feature set, not just similar-looking controls. Unche
 - [x] opencode/omp-style sign-in: `/login` picker with per-provider status, Claude Pro/Max OAuth (browser + pasted code), GitHub Copilot device flow, one-field API keys in `auth.json` (600), `/logout`, `greencode-cli auth login|list|logout`. Headless UI tests and a local-server wire test cover them; a live Claude token request and a completed Copilot approval have not been exercised.
 - [x] ChatGPT (Codex) subscription for the native loop: device-flow sign-in, token refresh, Responses API streaming with tool calls; local-server tests, live device-code endpoint shape checked, no live completion.
 - [x] Multiple accounts per provider: `greencode-cli auth accounts|save|switch|remove` and palette rows (アカウント切替 / アカウントとして保存) for API keys, Copilot, Claude and ChatGPT subscriptions. Core and headless UI tests.
-- [x] Agent install/update: Settings → エージェント lists versions and runs install/update commands in the terminal drawer. Version parsing tested; no install run.
+- [x] Agent install/update: the setup screen and Settings → 接続 show runtime details and installation options. Version parsing tested; no install run.
 - [x] Subscription-limit panel (`/usage`, sidebar) for Claude Pro/Max and GitHub Copilot; parsing is unit-tested, live endpoints not exercised.
 - [x] Outside-agent MCP server: `greencode-cli mcp` (stdio) and `POST /mcp` on `serve`; tools list/read/start/send threads and list models. Verified live over stdio: `start_thread` on OpenCode returned `PONG`.
 - [x] Portable handoffs: `greencode-cli --export-session ID [FILE]` writes a transcript that `--import-session` restores as a new thread on another machine, keeping tool blocks; switching a started thread to another backend still prepares a reviewable draft instead of converting the conversation. Verified by export→import into a second home.
@@ -81,10 +81,10 @@ The target is the upstream feature set, not just similar-looking controls. Unche
 - [x] Rewind for external backends: the transcript is truncated to the chosen prompt, the provider session handle is dropped so the next message starts a fresh session, and the prompt returns to the composer. Checkpoints now cover any backend. Headless test.
 - [x] Image attachments (paste, picker, path), prompt stash, prompt recall, quoting the last reply, `/goal` for native threads.
 - [x] Paste-to-file: ⌘V of ≥ 32 KiB text saves it under `~/.greencode/pastes` and mentions it (⇧⌘V keeps it inline); headless test.
-- [x] Suggested next prompt (Settings → 一般, off by default): one extra request after a native turn; Tab fills, Esc dismisses. Headless test; no live model call verified.
+- [x] Suggested next input (Settings → 入力と会話, off by default): one extra request after a native turn; Tab fills, Esc dismisses. Headless test; no live model call verified.
 - [x] Selection-based citations: ⇧⌘C or the composer's 引用 chip quotes the selected reply text with an optional comment. Formatting unit-tested; not tried with a live selection.
 - [x] Any-file attachments via `/attach` and drag and drop: project files are mentioned, outside files copied to `~/.greencode/attachments` (50 MiB cap, 100 per message), videos by path. Headless tests; picker and real drops not tried.
-- [x] T3-style layout: solid dark theme, sidebar with project avatars, ages and a separate archived (settled) section, breadcrumb header with icon buttons, centred empty-thread composer, round send button. Visually checked in the running app. Assistant fenced code blocks expose `コピー` and `折返し`/`横スクロール` actions through the rich-text renderer; copy transfers only the block body, without Markdown fences.
+- [x] Desktop workspace with project avatars, thread ages, an archived section, a breadcrumb header and a centered new-thread composer. Send, queue and stop have separate labels. Assistant code blocks expose `コピー` and `折返し`/`横スクロール`; copy transfers only the code.
 - [x] Finished turns collapse their tool rows into one "作業内容 · ツール N 件" row (expands to the individual calls) and end with a changed-files card (+/− per file, 差分を開く). Visually verified with a saved conversation.
 - [x] Terminal drawer that runs commands to completion with 5,000 lines of history; agent `bash` background jobs.
 - [x] The drawer runs project-scoped PTY tabs with SGR colors, saved output and line selection for composer context. Visually confirmed: drawer, tabs and a live zsh prompt; colors and selection are covered by tests only. Multi-byte output split across reads is decoded incrementally. Fixed a crash where the PTY was spawned outside a Tokio runtime context.
@@ -97,7 +97,7 @@ The target is the upstream feature set, not just similar-looking controls. Unche
 - [ ] Drawn annotations on previews and importing an open browser tab are not implemented.
 - [x] エージェントセッションを再起動 (palette): drops the provider session handle so the next message starts a fresh session with the current skills/MCP setup, keeping the transcript. Headless test.
 - [x] T3-style two-pane connections page in Settings: provider and external-agent enable toggles, status and account, setup/sign-in, runtime details and last-check time. A disabled entry leaves the model picker, backend cycle and model list without touching its configuration.
-- [x] Tool-call visibility levels (すべて表示 / 成功したものは隠す / すべて隠す / Zen) in Settings and the palette; the old boolean still maps to すべて隠す. Headless test.
+- [x] Work history visibility in Settings → 入力と会話: show all, show failures, hide tool calls, or show only the final reply. The old boolean still hides tool calls. Headless test.
 - [x] 問題を調査（トリアージ）: opens a scratch thread with a playbook that reads `~/.greencode` state and the source, asks for the symptom and requires confirmation before fixing or posting. Command test only.
 - [x] 再試行: a failed turn shows a retry chip that resends the last prompt. Headless test.
 - [x] `$skill` equivalent: `/skill NAME` (or the palette's スキル: rows) loads a skill's body into the draft for the agent to follow. Headless test.
@@ -117,7 +117,7 @@ The target is the upstream feature set, not just similar-looking controls. Unche
 - [x] Voice output: 最後の返答を読み上げ speaks the last reply through macOS `say`, with code blocks and markdown stripped. Text extraction is unit-tested.
 - [x] Existing Claude Code / Codex CLI sign-ins are borrowed (`greencode-cli auth import`, or the `/login` row 既存の Claude Code / ChatGPT ログインを取り込む). Only the access token and its own expiry are copied; the rotating refresh token stays with the source CLI so it is not signed out. When the borrowed token expires GreenCode says so instead of refreshing; re-importing replaces a borrowed token but never a browser login (unit-tested). Verified on this machine in a scratch home (files mode 600, sources untouched); unit-tested.
 - [x] Hermes-style self-improvement: manual `ext`/`learn` and `/learn` write through the existing memory permission boundary; automatic learning is enabled by default, locally extracts explicit `Lesson:` lines with no extra model request, and only uses one bounded distillation request when `learning.model` or `advisor_model` is explicitly configured.
-- [x] Microphone selection with a 3-second level test (Settings → 一般 → 音声入力); mobile offline queueing is N/A (no mobile client).
+- [x] Microphone selection with a 3-second level test (Settings → 音声入力); mobile offline queueing is N/A (no mobile client).
 - [ ] Full keyboard/accessibility and cross-platform acceptance checks.
 
 ### T3 docs at 21b5287
@@ -132,7 +132,7 @@ Implemented from that audit; covered by unit/headless GPUI tests only unless sta
 - [x] Terminal: `GREENCODE_TERMINAL_SHELL` with fallback, 5,000-line/8 MiB scrollback, keyboard scrollback and 最新へ, select all/copy, fish `no-query-term`.
 - [x] CLI/remote: `greencode-cli thread list|show|start|send`, `service install|status|restart|uninstall` (launchd/systemd user; Windows unsupported), `triage`; remote cancel/answer routes; 24-hour read-only guest links with guest requests; MCP `search_threads`, `wait_thread`, `stop_thread`. Real service installation was not run.
 - [x] Providers: ACP image blocks, `usage_update`, stdio MCP servers forwarded to ACP sessions, per-backend binary/args/env/extra models, custom provider models, rate-limit parsing with reset notice and resume-at-reset, `.agents`/`.gemini` skill roots, per-backend permission-mode lists. fx Full-access version gate not enforced.
-- [x] Secrets: `op://` references via `op read` for provider keys, backend env, voice and usage settings; Settings → シークレット; agent `secret` tool with a masked dialog storing `~/.greencode/secrets/NAME` (mode 600).
+- [x] Secrets: `op://` references via `op read` for provider keys, backend env, voice and usage settings; Settings → 認証情報; agent `secret` tool with a masked dialog storing `~/.greencode/secrets/NAME` (mode 600).
 - [x] Usage history: Claude Code, Codex, Pi and native logs aggregated per day/model with cost, token and limit tabs (7/30/92 days), `ui.json` price overrides, `/usage-history`, `/usage-limits`. Days are bucketed in UTC.
 - [x] Welcome page on first run: agent install/login and import of recent Claude/Codex/Pi projects. Re-importing a project duplicates its thread.
 - [x] SnapShot (macOS): global shortcut (Shift+Shift or preset chords) captures the frontmost window plus optional AX text into the draft. Live capture and TCC prompts not verified.

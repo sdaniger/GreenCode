@@ -230,13 +230,13 @@ impl Workspace {
                     .border_color(pal.warn)
                     .p_2()
                     .text_xs()
-                    .child("ワークフローはラボ機能です。設定 → ラボ → ワークフローをオンにすると、定期実行・Webhook・再試行が動きます。"),
+                    .child("定期実行、Webhook、再試行を使うには、設定でワークフローを有効にしてください。"),
             );
             col = col.child(
-                chip("workflow-open-labs", "設定 → ラボを開く", pal)
+                control_button("workflow-open-settings", "自動化の設定を開く", pal)
                     .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.workflows = None;
-                        this.run(Act::SettingsTab(8), window, cx)
+                        this.run(Act::SettingsTab(WORKFLOW_SETTINGS), window, cx)
                     })),
             );
         }
