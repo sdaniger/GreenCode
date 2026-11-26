@@ -146,6 +146,10 @@ struct Thread {
     reset_at: u64,
     queue_held: bool,
     draft: String,
+    /// Images pasted or dropped into the composer; shown as previews and sent as paths with the next prompt.
+    images: Vec<PathBuf>,
+    /// When the running turn was sent, for the live row's timer.
+    started: Option<std::time::Instant>,
     perms: Arc<Perms>,
     pinned: bool,
     archived: bool,
@@ -527,6 +531,8 @@ impl Thread {
             last_prompt: None,
             reset_at: 0,
             queue_held: true,
+            images: Vec::new(),
+            started: None,
             draft: view.draft,
             perms: Arc::new(Perms::new(view.mode)),
             pinned: view.pinned,
@@ -685,6 +691,8 @@ enum Act {
     RegistryInstall(Box<greencode_core::registry::Entry>),
     RegistryRemove(String),
     LoginProvider(String),
+    /// Browser or device sign-in of a provider in `greencode_core::login::PROVIDERS`.
+    SignIn(String),
     OpenCodeLogin,
     CopyMcp,
     Cite,
@@ -1000,7 +1008,9 @@ pub struct Workspace {
     /// Bumped for every background git read; an older read does not overwrite a newer one.
     git_generation: u64,
     /// `work_groups` of the active thread, reused for every visible row.
-    groups_cache: std::cell::RefCell<(String, usize, bool, std::rc::Rc<Vec<Option<usize>>>)>,
+    groups_cache: std::cell::RefCell<(String, usize, (bool, bool), std::rc::Rc<Vec<Option<usize>>>)>,
+    /// Antigravity runtime install shown on its button instead of in the chat: running, then done.
+    antigravity_install: Option<&'static str>,
     provider_form: Option<ProviderForm>,
     queue_edit: Option<queue::QueueEdit>,
     oauth_form: Option<OAuthForm>,
@@ -1861,6 +1871,10 @@ impl Workspace {
                     _ => {}
                 },
             )];
+        let ui: Value = std::fs::read(greencode_core::home().join("ui.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_else(|| json!({}));
         let mut cwd = std::env::current_dir().unwrap_or_default();
         if cwd.parent().is_none() {
             cwd = greencode_core::user_home(); // launched from Finder
@@ -1938,10 +1952,8 @@ impl Workspace {
             import_checked: None,
             git_generation: 0,
             groups_cache: Default::default(),
-            ui: std::fs::read(greencode_core::home().join("ui.json"))
-                .ok()
-                .and_then(|b| serde_json::from_slice(&b).ok())
-                .unwrap_or_else(|| json!({})),
+            antigravity_install: None,
+            ui,
             custom_themes: greencode_core::theme::load_all(),
             theme_edit: None,
             voice_recording: None,
@@ -3721,7 +3733,7 @@ impl Workspace {
             self.answer_dialog(value, cx);
             return;
         }
-        if text.is_empty() {
+        if text.is_empty() && self.thread().images.is_empty() {
             return;
         }
         // A message held for command discovery is still in flight: keep this one in the composer.
@@ -3779,6 +3791,15 @@ impl Workspace {
         } else {
             self.expand_mentions(text)
         };
+        // Attached images ride along as paths, which the agent turns into image blocks. Taken here, after the
+        // GUI command and `!shell` branches, so those leave the images in the composer for the next prompt.
+        let mut text = text;
+        for path in std::mem::take(&mut self.threads[self.active].images) {
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            text.push_str(&path.display().to_string());
+        }
         // Follow-up behavior "steer": a message sent during a run goes into that run when the agent supports it.
         if self.ui["follow_up_steer"] == true
             && self.thread().status == Status::Running
@@ -3976,10 +3997,18 @@ impl Workspace {
         t.subs.clear();
         t.bg_wait = None;
         if t.meta.title.is_empty() {
-            t.meta.title = text.chars().take(60).collect();
+            t.meta.title = thread_view::without_image_paths(&text).chars().take(60).collect();
         }
+        let start = t.items.len();
         t.items.push(Item::User(text.clone().into()));
+        // Show the images the prompt attaches, as the agent will send them.
+        let images = greencode_core::context::attachments(&text, &t.project());
+        t.items.extend(images.iter().filter_map(|b| match b {
+            greencode_core::Block::Other(block) => thread_view::image_item(block),
+            _ => None,
+        }));
         t.status = Status::Running;
+        t.started = Some(std::time::Instant::now());
         let n = t.items.len();
         let saved = t.save();
         if let Err(e) = saved {
@@ -3991,7 +4020,8 @@ impl Workspace {
         let command = t.prompt_command(text);
         let _ = t.cmd.as_ref().unwrap().send(command);
         if ix == self.active {
-            self.list.splice(n - 1..n - 1, 1);
+            // Every row pushed above is new: the user message plus one preview per attached image.
+            self.list.splice(start..start, n - start);
             self.list.scroll_to_end();
         }
         cx.notify();
@@ -7011,6 +7041,18 @@ impl Workspace {
             Act::LoginProvider(name) if name == "chatgpt" => {
                 self.run(Act::ChatGptLogin, window, cx)
             }
+            Act::SignIn(name) => {
+                if let Some(kind) = DeviceKind::login(&name) {
+                    self.start_device_login(kind, window, cx);
+                }
+            }
+            // Sign-in only (no API key to paste): go straight to the browser.
+            Act::LoginProvider(name)
+                if DeviceKind::login(&name).is_some()
+                    && greencode_core::config::preset(&name).is_some_and(|p| p.env.is_empty()) =>
+            {
+                self.run(Act::SignIn(name), window, cx)
+            }
             Act::LoginProvider(name) if self.cfg.providers.contains_key(&name) => {
                 if greencode_core::auth::status(&name, &self.cfg.providers[&name])
                     == greencode_core::auth::Method::Keyless
@@ -7023,9 +7065,8 @@ impl Workspace {
             Act::LoginProvider(name) => {
                 self.run(Act::AddProvider, window, cx);
                 if let Some(form) = &mut self.provider_form {
-                    form.anthropic = greencode_core::config::PRESETS
-                        .iter()
-                        .any(|(preset, kind, _, _)| *preset == name && *kind == "anthropic");
+                    form.anthropic = greencode_core::config::preset(&name)
+                        .is_some_and(|p| p.kind == "anthropic");
                     form.fields[0].update(cx, |s, cx| s.set_value(name, window, cx));
                 }
             }
@@ -7274,30 +7315,44 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Saves a clipboard image as a file and puts its path in the composer. False: the clipboard holds no image.
+    /// Saves a clipboard image as a file and puts its path in the composer; files copied in Finder are
+    /// attached like a drop. False: the clipboard holds neither.
     fn paste_image(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let Some(image) = cx.read_from_clipboard().and_then(|item| {
-            item.into_entries().find_map(|e| {
-                if let ClipboardEntry::Image(i) = e {
-                    Some(i)
-                } else {
-                    None
-                }
-            })
+        let Some(entry) = cx.read_from_clipboard().and_then(|item| {
+            item.into_entries()
+                .find(|e| matches!(e, ClipboardEntry::Image(_) | ClipboardEntry::ExternalPaths(_)))
         }) else {
             return false;
         };
-        let ext = match image.format {
-            ImageFormat::Png => "png",
-            ImageFormat::Jpeg => "jpg",
-            ImageFormat::Gif => "gif",
-            ImageFormat::Webp => "webp",
+        let image = match entry {
+            ClipboardEntry::ExternalPaths(paths) => {
+                self.attach_paths(paths.paths().to_vec(), window, cx);
+                return true;
+            }
+            ClipboardEntry::Image(image) => image,
+            _ => return false,
+        };
+        let (ext, bytes) = match image.format {
+            ImageFormat::Png => ("png", image.bytes),
+            ImageFormat::Jpeg => ("jpg", image.bytes),
+            ImageFormat::Gif => ("gif", image.bytes),
+            ImageFormat::Webp => ("webp", image.bytes),
+            // Safari and Preview often copy only TIFF; models take PNG.
+            ImageFormat::Tiff | ImageFormat::Bmp => {
+                match greencode_core::image::to_png("image/tiff", &image.bytes) {
+                    Some(png) => ("png", png),
+                    None => {
+                        self.fail("クリップボードの画像を読み込めません".to_string());
+                        return true;
+                    }
+                }
+            }
             _ => return false,
         };
         let dir = greencode_core::home().join("attachments");
         let path = dir.join(format!("{:x}.{ext}", image.id));
-        match std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, &image.bytes)) {
-            Ok(()) => self.insert_path(&path, window, cx),
+        match std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, &bytes)) {
+            Ok(()) => self.attach_image(path, cx),
             Err(e) => self.fail(format!("画像を保存できません: {e}")),
         }
         true
@@ -8023,13 +8078,15 @@ impl Workspace {
         // Finished work (tools, thinking) collapses into one row; a click expands it.
         // The grouping only depends on item kinds, so one computation serves every visible row.
         let running = t.status == Status::Running;
+        // `classic_activity`: the earlier running view, where the current tools stay listed one by one.
+        let live = self.ui["classic_activity"] != true;
         let groups: std::rc::Rc<Vec<Option<usize>>> = if visibility == ToolVisibility::Show {
             let mut cache = self.groups_cache.borrow_mut();
-            if cache.0 == t.meta.id && cache.1 == t.items.len() && cache.2 == running {
+            if cache.0 == t.meta.id && cache.1 == t.items.len() && cache.2 == (running, live) {
                 cache.3.clone()
             } else {
-                let groups = std::rc::Rc::new(thread_view::work_groups(&t.items, running));
-                *cache = (t.meta.id.clone(), t.items.len(), running, groups.clone());
+                let groups = std::rc::Rc::new(thread_view::work_groups(&t.items, running, live));
+                *cache = (t.meta.id.clone(), t.items.len(), (running, live), groups.clone());
                 groups
             }
         } else {
@@ -8055,21 +8112,33 @@ impl Workspace {
                 } else {
                     format!("作業内容 · ツール {n} 件 · エラー {errors}")
                 };
+                let chevron = if expanded { "‹" } else { "›" };
+                // The running turn's work is one live row naming the current step, as in T3 Code.
+                let row = if live && thread_view::live_start(&t.items, running) == Some(start) {
+                    let mut trailing = format!("ツール {n} 件");
+                    if let Some(started) = t.started {
+                        trailing += &format!(" · {}", thread_view::elapsed(started.elapsed().as_secs()));
+                    }
+                    thread_view::live_row(
+                        ("work", ix),
+                        thread_view::live_label(&t.items),
+                        format!("{trailing} {chevron}"),
+                        pal,
+                    )
+                } else {
+                    div()
+                        .id(("work", ix))
+                        .px_2()
+                        .py_0p5()
+                        .rounded_md()
+                        .text_sm()
+                        .text_color(pal.muted)
+                        .child(SharedString::from(format!("{label} {chevron}")))
+                };
                 header = Some(centred(
                     column().py_0p5().child(
-                        div()
-                            .id(("work", ix))
-                            .px_2()
-                            .py_0p5()
-                            .rounded_md()
-                            .text_sm()
-                            .text_color(pal.muted)
-                            .cursor_pointer()
+                        row.cursor_pointer()
                             .hover(|s| s.bg(pal.hover))
-                            .child(SharedString::from(format!(
-                                "{label} {}",
-                                if expanded { "‹" } else { "›" }
-                            )))
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                 if !this.expanded_groups.remove(&key) {
                                     this.expanded_groups.insert(key.clone());
@@ -8235,9 +8304,27 @@ impl Workspace {
                 )),
             )
         });
+        // Before the first tool or reply arrives, the turn still shows it is working.
+        let thinking = (running
+            && live
+            && ix + 1 == t.items.len()
+            && !matches!(item, Item::Tool { .. } | Item::Thinking(_) | Item::Assistant(_)))
+        .then(|| {
+            let trailing = t
+                .started
+                .map(|s| thread_view::elapsed(s.elapsed().as_secs()))
+                .unwrap_or_default();
+            centred(column().py_0p5().child(thread_view::live_row(
+                ("thinking", ix),
+                "考え中".into(),
+                trailing,
+                pal,
+            )))
+        });
         div()
             .children(header)
             .child(thread_view::render_item(ix, item, pal, mono, toggle, open_link))
+            .children(thinking)
             .children(copy)
             .children(edit)
             .children(card)
@@ -8708,6 +8795,44 @@ impl Workspace {
                 ),
             );
         }
+        let images = self.thread().images.clone();
+        let has_images = !images.is_empty();
+        let thumbs = images.into_iter().enumerate().map(|(i, path)| {
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            div()
+                .relative()
+                .size(px(64.))
+                .rounded_md()
+                .overflow_hidden()
+                .border_1()
+                .border_color(pal.line)
+                .child(img(path).size_full().object_fit(ObjectFit::Cover))
+                .child(
+                    gpui_kit::base::Button::new(("draft-image-remove", i))
+                        .accessibility_label(SharedString::from(format!("{name} を外す")))
+                        .absolute()
+                        .top_0p5()
+                        .right_0p5()
+                        .size(px(18.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .bg(pal.card)
+                        .text_xs()
+                        .text_color(pal.fg)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(pal.hover))
+                        .child("×")
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            let images = &mut this.threads[this.active].images;
+                            if i < images.len() {
+                                images.remove(i);
+                            }
+                            cx.notify();
+                        })),
+                )
+        });
         col.child(
             div()
                 .flex()
@@ -8716,6 +8841,9 @@ impl Workspace {
                 .border_1()
                 .border_color(pal.line)
                 .bg(pal.card)
+                .when(has_images, |d| {
+                    d.child(div().flex().flex_wrap().gap_2().px_3().pt_2().children(thumbs))
+                })
                 .child(div().px_3().pt_2().child(
                     Textarea::new(&self.input).appearance(false).on_paste({
                         let me = cx.entity();
@@ -9714,6 +9842,17 @@ impl Workspace {
                     ToolVisibility::Zen => 3,
                 };
                 let steer = self.ui["follow_up_steer"] == true;
+                let classic = self.ui["classic_activity"] == true;
+                col = col.section("進行中の作業").child(row(
+                    "表示方法".into(),
+                    "",
+                    choice(
+                        "進行中の作業の表示方法",
+                        cycle(&["1 行にまとめる", "ツールを並べる"], classic as usize, Act::Toggle("classic_activity")),
+                        Some(classic as usize),
+                        cx,
+                    ),
+                ));
                 let cmd_enter = self.ui["send_shortcut"] == "cmd+enter";
                 let suggest_locked = settings.and_then(|s| s.suggest_next.as_ref()).is_some_and(|s| s.locked);
                 col = col
@@ -10615,18 +10754,31 @@ mod tests {
             Item::Assistant("done".into()),
         ];
         assert_eq!(
-            crate::thread_view::work_groups(&items, false),
+            crate::thread_view::work_groups(&items, false, true),
             [None, Some(1), Some(1), None]
         );
-        // The group of a running thread stays open.
-        assert_eq!(crate::thread_view::work_groups(&items, true), [None; 4]);
+        // A running turn collapses finished work too, and its trailing tools form the live group.
+        assert_eq!(
+            crate::thread_view::work_groups(&items, true, true),
+            [None, Some(1), Some(1), None]
+        );
+        assert_eq!(
+            crate::thread_view::work_groups(&items[..3], true, true),
+            [None, Some(1), Some(1)]
+        );
+        // The classic view keeps the running turn's newest group open.
+        assert_eq!(crate::thread_view::work_groups(&items, true, false), [None; 4]);
+        assert_eq!(crate::thread_view::work_groups(&items[..3], true, false), [None; 3]);
+        assert_eq!(crate::thread_view::live_start(&items[..3], true), Some(1));
+        assert_eq!(crate::thread_view::live_start(&items, true), None);
+        assert_eq!(crate::thread_view::elapsed(83), "1m 23s");
         // A single tool is not worth collapsing.
         let single = [
             user(),
             tool("read", json!({})),
             Item::Assistant("done".into()),
         ];
-        assert_eq!(crate::thread_view::work_groups(&single, false), [None; 3]);
+        assert_eq!(crate::thread_view::work_groups(&single, false, true), [None; 3]);
         // Interim assistant text between tools joins the group; the final answer does not.
         let interim = [
             user(),
@@ -10636,7 +10788,7 @@ mod tests {
             Item::Assistant("done".into()),
         ];
         assert_eq!(
-            crate::thread_view::work_groups(&interim, false),
+            crate::thread_view::work_groups(&interim, false, true),
             [None, Some(1), Some(1), Some(1), None]
         );
     }
@@ -12149,7 +12301,9 @@ mod tests {
     /// `Config::default()` has no providers; `Config::load` adds the presets.
     fn with_presets(ws: &mut Workspace) {
         let providers = &mut std::sync::Arc::make_mut(&mut ws.cfg).providers;
-        for &(name, kind, url, env) in greencode_core::config::PRESETS {
+        for &greencode_core::config::Preset { name, kind, url, env, .. } in
+            greencode_core::config::PRESETS
+        {
             providers
                 .entry(name.into())
                 .or_insert(greencode_core::config::ProviderCfg {
@@ -12191,7 +12345,8 @@ mod tests {
             let rows = ws.filtered_acts(cx);
             assert!(rows.iter().any(|(_, act)| matches!(act, super::Act::OpenCodeLogin)));
             assert!(rows.iter().any(|(label, _)| label.contains("カスタム")));
-            assert!(rows.iter().any(|(label, _)| label.starts_with("openai")));
+            assert!(rows.iter().any(|(label, act)| label.starts_with("OpenAI")
+                && matches!(act, super::Act::LoginProvider(n) if n == "openai")));
             assert!(rows.iter().all(|(label, _)| label != "github-copilot" && label != "chatgpt"));
             assert_eq!(rows.iter().filter(|(_, act)| matches!(act, super::Act::CopilotLogin)).count(), 1);
             assert_eq!(rows.iter().filter(|(_, act)| matches!(act, super::Act::ChatGptLogin)).count(), 1);
@@ -12275,6 +12430,30 @@ mod tests {
             assert_eq!(ws.key_form.as_ref().unwrap().provider, "google");
             assert!(ws.key_form_view(super::Pal::new(true), cx).is_some());
             ws.close_key_form(window, cx);
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn login_routes_sign_in_providers_to_the_browser_flow(cx: &mut TestAppContext) {
+        let (ws, cx) = open(cx);
+        ws.update_in(cx, |ws, window, cx| {
+            with_presets(ws);
+            // Sign-in only (no key env): straight to the browser sign-in.
+            assert!(ws.command("/login devin-windsurf", false, window, cx));
+            assert!(ws
+                .device_form
+                .as_ref()
+                .is_some_and(|f| f.kind == super::DeviceKind::Login("devin-windsurf")));
+            ws.close_device_form(window, cx);
+            // A key also works: the key form offers the browser sign-in next to the field.
+            assert!(ws.command("/login cursor", false, window, cx));
+            assert_eq!(ws.key_form.as_ref().unwrap().provider, "cursor");
+            ws.close_key_form(window, cx);
+            ws.run(super::Act::SignIn("cursor".into()), window, cx);
+            assert!(ws
+                .device_form
+                .as_ref()
+                .is_some_and(|f| f.kind == super::DeviceKind::Login("cursor")));
         });
     }
 
@@ -14375,6 +14554,28 @@ mod tests {
             .unwrap_or_else(|| panic!("{}", &text[..text.len().min(80)]));
         assert!(path.contains("pastes/paste-"), "{text}");
         assert_eq!(std::fs::metadata(path).unwrap().len(), 40_000);
+    }
+
+    #[gpui_kit::test]
+    async fn tiff_clipboard_image_is_pasted_as_png(cx: &mut TestAppContext) {
+        let (ws, cx) = open(cx);
+        let mut tiff = std::io::Cursor::new(Vec::new());
+        image::RgbImage::new(2, 2)
+            .write_to(&mut tiff, image::ImageFormat::Tiff)
+            .unwrap();
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::from(gpui_kit::Image::from_bytes(
+            gpui_kit::ImageFormat::Tiff,
+            tiff.into_inner(),
+        )));
+        cx.simulate_keystrokes("cmd-v");
+        let (text, images) =
+            ws.read_with(cx, |ws, cx| (ws.input.read(cx).value().to_string(), ws.thread().images.clone()));
+        assert_eq!(text, "", "the path stays out of the composer");
+        assert_eq!(images.len(), 1);
+        assert!(images[0].extension().is_some_and(|e| e == "png"));
+        assert!(std::fs::read(&images[0]).unwrap().starts_with(b"\x89PNG"));
+        let shown = super::thread_view::without_image_paths(&format!("見て {}", images[0].display()));
+        assert_eq!(shown, "見て");
     }
 
     #[test]

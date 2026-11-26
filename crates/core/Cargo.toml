@@ -15,7 +15,7 @@ fancy-regex = "0.16"
 font8x8 = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 getrandom = "0.3"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "tiff", "bmp"] }
 mlua = { version = "0.12", features = ["lua54", "vendored", "serialize"] }
 png = "0.18"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_29"] }

@@ -5,7 +5,7 @@ use greencode_core::auth::{self, Method};
 
 pub(super) fn method_label(m: &Method) -> String {
     match m {
-        Method::Subscription => "Claude サブスクリプション".to_string(),
+        Method::Subscription => "ブラウザでログイン済み".to_string(),
         Method::StoredKey => "キー保存済み".to_string(),
         Method::ConfigKey => "config.toml のキー".to_string(),
         Method::Env(v) => format!("{v} 設定済み"),
@@ -36,15 +36,16 @@ pub(super) enum DeviceKind {
     ChatGpt,
     Mistral,
     Antigravity,
+    /// A provider in `greencode_core::login::PROVIDERS`.
+    Login(&'static str),
 }
 
 impl DeviceKind {
-    fn title(self) -> &'static str {
+    fn title(self) -> String {
         match self {
-            DeviceKind::Copilot => "GitHub Copilot でログイン",
-            DeviceKind::ChatGpt => "ChatGPT (Codex) でログイン",
-            DeviceKind::Mistral => "Mistral Vibe でログイン",
-            DeviceKind::Antigravity => "Google Antigravity でログイン",
+            DeviceKind::ChatGpt => "ChatGPT (Codex) でログイン".into(),
+            DeviceKind::Mistral => "Mistral Vibe でログイン".into(),
+            _ => format!("{} でログイン", self.name()),
         }
     }
 
@@ -54,6 +55,7 @@ impl DeviceKind {
             DeviceKind::ChatGpt => "chatgpt",
             DeviceKind::Mistral => "mistral",
             DeviceKind::Antigravity => "antigravity",
+            DeviceKind::Login(name) => name,
         }
     }
 
@@ -63,7 +65,13 @@ impl DeviceKind {
             DeviceKind::ChatGpt => "ChatGPT",
             DeviceKind::Mistral => "Mistral",
             DeviceKind::Antigravity => "Google Antigravity",
+            DeviceKind::Login(name) => greencode_core::config::preset(name).map_or(name, |p| p.label),
         }
+    }
+
+    /// The sign-in kind of `name` when it has a browser or device login of its own.
+    pub(super) fn login(name: &str) -> Option<DeviceKind> {
+        greencode_core::login::PROVIDERS.iter().find(|p| **p == name).map(|p| DeviceKind::Login(p))
     }
 }
 
@@ -73,6 +81,7 @@ enum Issued {
     ChatGpt(greencode_core::provider::codex::Device),
     Mistral(greencode_core::provider::mistral::SignIn),
     Antigravity(greencode_core::antigravity::LoginStart),
+    Login(greencode_core::login::Start),
 }
 
 /// What a finished device flow produced.
@@ -82,9 +91,10 @@ enum Granted {
     /// A regular Mistral API key billed against the Vibe plan.
     Mistral(String),
     Antigravity(greencode_core::antigravity::LoginDone),
+    Login(greencode_core::login::Cred),
 }
 
-/// Device sign-in (GitHub Copilot, ChatGPT, Mistral Vibe, Google Antigravity): the code or URL is shown while the browser approves it.
+/// Device or browser sign-in: the code or URL is shown while the browser approves it.
 pub(super) struct DeviceForm {
     pub(super) kind: DeviceKind,
     /// `None` until the service has issued the code.
@@ -94,6 +104,8 @@ pub(super) struct DeviceForm {
     /// Tells a late result from an older form apart from the current one.
     pub(super) id: u64,
     pub(super) callback: Option<(Entity<InputState>, Subscription)>,
+    /// Where a pasted redirect goes for `DeviceKind::Login` sign-ins.
+    pub(super) paste: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     pub(super) error: Option<SharedString>,
 }
 
@@ -116,6 +128,7 @@ impl Workspace {
             pending: None,
             id,
             callback: None,
+            paste: None,
             error: None,
         });
         cx.notify();
@@ -141,6 +154,7 @@ impl Workspace {
                         .await
                         .map(Issued::Antigravity)
                 }
+                DeviceKind::Login(name) => greencode_core::login::start(name).await.map(Issued::Login),
             }
         });
         self.device_form.as_mut().unwrap().pending = Some(task.abort_handle());
@@ -170,7 +184,7 @@ impl Workspace {
     fn await_device_approval(
         &mut self,
         kind: DeviceKind,
-        device: Issued,
+        mut device: Issued,
         id: u64,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -190,10 +204,15 @@ impl Workspace {
             return;
         }
         let cwd = self.thread().project();
-        let cb = if matches!(
-            &device,
-            Issued::Antigravity(greencode_core::antigravity::LoginStart::Browser(_))
-        ) {
+        let paste = match &mut device {
+            Issued::Login(start) => start.paste.take(),
+            _ => None,
+        };
+        let cb = if paste.is_some()
+            || matches!(
+                &device,
+                Issued::Antigravity(greencode_core::antigravity::LoginStart::Browser(_))
+            ) {
             let field = cx.new(|cx| {
                 InputState::new(window, cx)
                     .placeholder("リモート等で 127.0.0.1 に戻れない場合のみリダイレクト先 URL を貼り付けて ⏎")
@@ -218,6 +237,7 @@ impl Workspace {
                 (None, p.url.clone())
             }
             Issued::Antigravity(greencode_core::antigravity::LoginStart::Ready(_)) => unreachable!(),
+            Issued::Login(s) => (s.code.clone(), s.url.clone()),
         };
         if let Some(code) = &code {
             cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
@@ -226,6 +246,7 @@ impl Workspace {
         form.code = code.map(Into::into);
         form.url = Some(url.into());
         form.callback = cb;
+        form.paste = paste;
         form.error = None;
         let task = self.rt.spawn(async move {
             match device {
@@ -246,6 +267,7 @@ impl Workspace {
                 Issued::Antigravity(greencode_core::antigravity::LoginStart::Ready(_)) => {
                     unreachable!()
                 }
+                Issued::Login(start) => start.done.await.map(Granted::Login),
             }
         });
         form.pending = Some(task.abort_handle());
@@ -285,6 +307,7 @@ impl Workspace {
                             Granted::Mistral(key) => {
                                 auth::set_key(Arc::make_mut(&mut this.cfg), "mistral", &key)
                             }
+                            Granted::Login(cred) => auth::save(Arc::make_mut(&mut this.cfg), kind.provider(), cred),
                             Granted::Antigravity(_) => unreachable!(),
                         }
                         .map_err(|e| format!("{e:#}"));
@@ -307,6 +330,7 @@ impl Workspace {
         .detach();
     }
 
+    /// Hands a pasted redirect URL to the sign-in in progress.
     pub(super) fn submit_antigravity_callback(
         &mut self,
         window: &mut Window,
@@ -320,6 +344,11 @@ impl Workspace {
         };
         let value = field.read(cx).value().trim().to_string();
         if value.is_empty() {
+            return;
+        }
+        if let Some(paste) = &form.paste {
+            // The sign-in task reports a bad paste as its result; a closed channel means it already ended.
+            let _ = paste.send(value);
             return;
         }
         let auth_url = form.url.as_ref().map(|u| u.to_string());
@@ -353,8 +382,16 @@ impl Workspace {
         .detach();
     }
 
+    /// Busy label of the Antigravity install button.
+    pub(super) const INSTALLING: &'static str = "インストール中…";
+
     pub(super) fn install_antigravity(&mut self, cx: &mut Context<Self>) {
-        self.notice("Google Antigravity ランタイムをインストール中…");
+        // Progress lives on the settings button, so repeated clicks cannot fill the chat.
+        if self.antigravity_install == Some(Self::INSTALLING) {
+            return;
+        }
+        self.antigravity_install = Some(Self::INSTALLING);
+        cx.notify();
         let task = self.rt.spawn(async { greencode_core::antigravity::install_or_update().await });
         cx.spawn(async move |this, cx| {
             let result: Result<_, String> = match task.await {
@@ -364,11 +401,14 @@ impl Workspace {
             this.update(cx, |this, cx| {
                 match result {
                     Ok(_) => {
+                        this.antigravity_install = Some("インストール済み ✓");
                         this.reload_registry_backends();
                         this.refresh_backend_models(true, cx);
-                        this.notice("Google Antigravity ランタイムをインストールしました。");
                     }
-                    Err(e) => this.fail(e),
+                    Err(e) => {
+                        this.antigravity_install = None;
+                        this.fail(format!("Google Antigravity ランタイムをインストールできません: {e}"));
+                    }
                 }
                 cx.notify();
             })
@@ -419,7 +459,7 @@ impl Workspace {
                     cx.write_to_clipboard(ClipboardItem::new_string(code.to_string()))
                 },
             ));
-        } else if form.kind == DeviceKind::Antigravity {
+        } else if matches!(form.kind, DeviceKind::Antigravity | DeviceKind::Login(_)) {
             if let Some(url) = form.url.clone() {
                 actions = actions.child(chip("device-copy-url", "URLをコピー", pal).on_click(
                     move |_: &ClickEvent, _, cx| {
@@ -431,6 +471,7 @@ impl Workspace {
         let hint = match form.kind {
             DeviceKind::Mistral => "ブラウザで Mistral アカウントにサインインし、Mistral Vibe へのアクセスを承認してください",
             DeviceKind::Antigravity => "ブラウザで Google アカウントにサインインして承認してください",
+            DeviceKind::Login(_) if form.code.is_none() => "ブラウザでサインインして承認してください",
             _ => "ブラウザで次のコードを入力してください（クリップボードにコピー済み）",
         };
         actions = actions.child(div().flex_1()).child(
@@ -830,16 +871,19 @@ impl Workspace {
                 ));
             }
         }
-        for (name, _, _, _) in greencode_core::config::PRESETS.iter() {
+        for p in greencode_core::config::PRESETS {
+            let name = p.name;
             if dedicated(name) {
                 continue;
             }
-            let listed = self.cfg.providers.get(*name).is_some_and(|p| {
+            let listed = self.cfg.providers.get(name).is_some_and(|p| {
                 let m = status(name, p);
                 m.signed_in() && m != Method::Keyless
             });
             if !listed {
-                rows.push((name.to_string(), Act::LoginProvider(name.to_string())));
+                // The id stays in the row so typing it in the palette still finds it.
+                let row = if p.label.eq_ignore_ascii_case(name) { p.label.to_string() } else { format!("{}  ({name})", p.label) };
+                rows.push((row, Act::LoginProvider(name.to_string())));
             }
         }
         rows.push((
@@ -866,6 +910,7 @@ impl Workspace {
             "anthropic" => Some(("Claude Pro/Max でログイン（ブラウザ）", Act::AnthropicLogin)),
             "mistral" => Some(("Mistral Vibe でログイン（ブラウザ）", Act::MistralLogin)),
             "google" => Some(("Google Antigravity でログイン（ブラウザ）", Act::AntigravityLogin)),
+            name if DeviceKind::login(name).is_some() => Some(("ブラウザでログイン", Act::SignIn(name.to_string()))),
             _ => None,
         };
         if let Some((label, act)) = browser {
@@ -875,6 +920,11 @@ impl Workspace {
                     this.run(act.clone(), window, cx);
                 },
             )));
+        }
+        if let Some(url) = greencode_core::config::preset(&form.provider).map(|p| p.key_url).filter(|u| !u.is_empty()) {
+            actions = actions.child(chip("key-get", "キーを取得", pal).on_click(move |_, _, _| {
+                let _ = open::that_detached(url);
+            }));
         }
         actions = actions
             .child(div().flex_1())
@@ -896,7 +946,10 @@ impl Workspace {
             .border_color(pal.line)
             .bg(pal.card)
             .shadow_lg()
-            .child(format!("{} の API キー", form.provider))
+            .child(format!(
+                "{} の API キー",
+                greencode_core::config::preset(&form.provider).map_or(form.provider.as_str(), |p| p.label)
+            ))
             .child(div().text_xs().text_color(pal.muted).child("キーは ~/.greencode/auth.json（600）に保存されます。既存のキーは置き換えられます。"))
             .child(Input::new(&form.field).mask_toggle())
             .child(actions);

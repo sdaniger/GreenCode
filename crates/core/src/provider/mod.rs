@@ -8,7 +8,22 @@ pub mod copilot;
 pub mod mistral;
 pub mod openai;
 pub mod responses;
+pub mod devin;
+pub mod aws_credentials;
+pub mod aws_eventstream;
+pub mod aws_sigv4;
+pub mod bedrock;
+pub mod kiro;
+pub mod factory;
+pub mod gitlab_duo;
+pub mod gitlab_duo_workflow;
+pub mod muse;
 pub mod thinking;
+pub mod vertex;
+pub mod azure;
+pub mod cloudflare;
+pub mod snowflake;
+pub mod cursor;
 pub mod warm;
 pub mod ws;
 
@@ -220,6 +235,55 @@ pub fn effort_levels(cfg: &Config, spec: &str) -> Vec<&'static str> {
         if id.starts_with("gpt-6") || id.starts_with("gpt-5.5") || id.starts_with("gpt-5.6") { levels.push("xhigh"); }
         return levels;
     }
+    // Muse Code and Factory publish their own effort ladders (Meta's `minimal` rung included).
+    if provider.kind == "muse" {
+        return vec!["minimal", "low", "medium", "high", "xhigh", "max"];
+    }
+    if provider.kind == "factory" {
+        return vec!["low", "medium", "high", "xhigh", "max"];
+    }
+    // GitLab Duo aliases carry OMP's compat rules: Claude in budget mode, GPT efforts, `minimal` on `*5`/`*6`.
+    if provider.kind == "gitlab-duo" {
+        if id.contains("duo-chat-opus-") || id.contains("duo-chat-sonnet-") || id.contains("duo-chat-haiku-")
+            || id.starts_with("claude-opus-") || id.starts_with("claude-sonnet-") || id.starts_with("claude-haiku-")
+        {
+            return vec!["minimal", "low", "medium", "high", "xhigh"];
+        }
+        if id.contains("duo-chat-gpt") || id.starts_with("gpt-") {
+            return vec!["minimal", "low", "medium", "high"];
+        }
+        return Vec::new();
+    }
+    // Bedrock Converse publishes a ladder per model class; Mantle is the same Responses ladder as
+    // OpenAI's frontier models (`catalog/src/compat/rules/providers/*.kdl`).
+    if provider.kind == "bedrock-mantle" {
+        return if id.contains("gpt-5.6") { vec!["low", "medium", "high", "xhigh", "max"] } else { vec!["low", "medium", "high", "xhigh"] };
+    }
+    if provider.kind == "bedrock" {
+        if id.contains("claude") {
+            let (major, minor) = bedrock::claude_version(&id).unwrap_or((0, 0));
+            return match (major, minor) {
+                // `>=5.1` accepts the full set; `>=4.7 <5.1` the shorter one without xhigh.
+                v if v >= (5, 1) => vec!["low", "medium", "high", "xhigh", "max"],
+                v if v >= (4, 7) => vec!["low", "medium", "high", "max"],
+                _ => vec!["low", "medium", "high"],
+            };
+        }
+        if id.contains("grok") {
+            return vec!["low", "medium", "high", "xhigh"];
+        }
+        // `openai.*` and Kimi K3 reason via an OpenAI-style effort; DeepSeek/unknown take `minimal`.
+        if id.contains("gpt-") {
+            return if id.contains("gpt-5.6") { vec!["low", "medium", "high", "xhigh", "max"] } else { vec!["low", "medium", "high", "xhigh"] };
+        }
+        if id.contains("kimi-k3") {
+            return vec!["low", "high", "max"];
+        }
+        if id.contains("deepseek") {
+            return vec!["minimal", "low", "medium", "high"];
+        }
+        return Vec::new();
+    }
     let anthropic = provider.kind == "anthropic";
     let openai = provider.kind == "openai"
         && reqwest::Url::parse(&provider.base_url).is_ok_and(|url| url.host_str() == Some("api.openai.com"));
@@ -261,6 +325,60 @@ pub fn make(cfg: &Config, spec: &str) -> Result<(Arc<dyn Provider>, String)> {
 
 /// `make`, with `effort` replacing the configured level when this model supports it (task per-spawn effort).
 pub fn make_with_effort(cfg: &Config, spec: &str, effort: Option<&str>) -> Result<(Arc<dyn Provider>, String)> {
+    let (provider, model) = build(cfg, spec, effort)?;
+    let pname = spec.split_once('/').map_or("", |(p, _)| p);
+    if !cfg.providers.get(pname).is_some_and(|p| p.stored && p.oauth && crate::login::refreshes(pname)) {
+        return Ok((provider, model));
+    }
+    let access = cfg.providers[pname].api_key.clone().unwrap_or_default();
+    let refreshing = Refreshing {
+        pname: pname.into(),
+        cfg: cfg.clone(),
+        spec: spec.into(),
+        effort: effort.map(str::to_string),
+        inner: std::sync::Mutex::new((access, provider)),
+    };
+    Ok((Arc::new(refreshing), model))
+}
+
+/// An OAuth provider whose token expires: refreshes it before a request and rebuilds the client on a new token.
+struct Refreshing {
+    pname: String,
+    cfg: Config,
+    spec: String,
+    effort: Option<String>,
+    /// The access token the client was built with, and that client.
+    inner: std::sync::Mutex<(String, Arc<dyn Provider>)>,
+}
+
+impl Refreshing {
+    async fn current(&self) -> Result<Arc<dyn Provider>> {
+        let cred = crate::login::fresh(&self.pname).await?;
+        let mut inner = self.inner.lock().unwrap();
+        if inner.0 != cred.access {
+            let mut cfg = self.cfg.clone();
+            if let Some(p) = cfg.providers.get_mut(&self.pname) { p.api_key = Some(cred.access.clone()); }
+            *inner = (cred.access, build(&cfg, &self.spec, self.effort.as_deref())?.0);
+        }
+        Ok(inner.1.clone())
+    }
+}
+
+impl Provider for Refreshing {
+    fn complete<'a>(&'a self, req: Request<'a>, on_text: &'a (dyn Fn(&str) + Send + Sync)) -> BoxFut<'a, Result<Reply>> {
+        Box::pin(async move { self.current().await?.complete(req, on_text).await })
+    }
+
+    fn append_only(&self) -> bool {
+        self.inner.lock().unwrap().1.append_only()
+    }
+
+    fn live_steering(&self, model: &str) -> bool {
+        self.inner.lock().unwrap().1.live_steering(model)
+    }
+}
+
+fn build(cfg: &Config, spec: &str, effort: Option<&str>) -> Result<(Arc<dyn Provider>, String)> {
     let (pname, model) = spec.split_once('/').ok_or_else(|| anyhow!("model must be `provider/model`, got `{spec}`"))?;
     if let Some(policy) = &cfg.policy {
         anyhow::ensure!(policy.provider_allowed(pname), "管理ポリシーで制限されています（{}）", policy.organization);
@@ -302,8 +420,41 @@ pub fn make_with_effort(cfg: &Config, spec: &str, effort: Option<&str>) -> Resul
         p.kind.as_str()
     };
     let provider: Arc<dyn Provider> = match kind {
+        // Seat keys arrive through auth.json (Devin sign-in, adopted CLI credentials) as the stored key.
+        "devin" => Arc::new(devin::Devin::new(base, key, wire)),
         "anthropic" => Arc::new(anthropic::Anthropic { http, base, key, oauth, effort, wire }),
         "openai" => Arc::new(openai::OpenAi { http, copilot: base == copilot::BASE, base, key, effort, wire }),
+        // The Factory proxy multiplexes wires per model; `base`/`kind` only select the account.
+        "factory" => {
+            let extra = crate::auth::oauth(pname).map(|o| o.extra).unwrap_or_default();
+            Arc::new(factory::Factory::new(http, key, &extra, effort, wire))
+        }
+        "muse" => Arc::new(muse::Muse { http, base, key, effort, wire }),
+        "bedrock" => Arc::new(bedrock::Bedrock::new(http, base, key, effort).with_wire(wire)),
+        "bedrock-mantle" => Arc::new(bedrock::Mantle::new(http, base, key, effort).with_wire(wire)),
+        "kiro" => {
+            let extra = crate::auth::oauth(pname).map(|o| o.extra).unwrap_or_default();
+            let profile = extra.get("kiroProfileArn").and_then(serde_json::Value::as_str).map(str::to_string);
+            let region = extra.get("region").and_then(serde_json::Value::as_str).filter(|region| kiro::is_region(region))
+                .map(str::to_string)
+                .unwrap_or_else(|| if kiro::is_api_key(&key) { kiro::api_region() } else { kiro::DEFAULT_REGION.into() });
+            // A customised base URL is a gateway and is used as-is; the preset's host follows the region.
+            let base = match base == "https://runtime.us-east-1.kiro.dev" { true => kiro::runtime_base(&region), false => base };
+            Arc::new(kiro::Kiro::new(http, base, key, profile, wire))
+        }
+        // The Duo chat proxy mints its own token per credential; `key` is the GitLab bearer.
+        "gitlab-duo" => Arc::new(gitlab_duo::GitlabDuo::new(http, base, key, effort, wire)),
+        "gitlab-duo-agent" => Arc::new(gitlab_duo_workflow::Workflow::new(http, base, key, wire)),
+        // Vertex's express mode uses the API key; ADC/access-token mode sends a bearer instead.
+        "vertex" => Arc::new(vertex::Vertex::new(http, base, key, effort, wire)),
+        "azure" => Arc::new(azure::Azure { http, base, key, effort, wire }),
+        "cloudflare-ai-gateway" => Arc::new(cloudflare::Gateway { http, base, key, effort, wire }),
+        "snowflake" => {
+            let extra = crate::auth::oauth(pname).map(|o| o.extra).unwrap_or_default();
+            let account = extra.get("account").and_then(serde_json::Value::as_str).map(str::to_string);
+            Arc::new(snowflake::Snowflake { http, base, account, key, effort, wire })
+        }
+        "cursor" => Arc::new(cursor::Cursor::new(base, key, wire)),
         k => bail!("provider `{pname}`: unknown kind `{k}`"),
     };
     Ok((limited(pname, opts, provider), model))
@@ -364,6 +515,7 @@ impl Provider for Limited {
 pub(crate) fn key(pname: &str, p: &crate::config::ProviderCfg) -> Result<String> {
     match &p.api_key {
         Some(key) => crate::secrets::resolve(key, pname),
+        None if p.api_key_env.is_empty() && crate::login::supports(pname) => bail!("{pname} にサインインしていません。/login {pname} を実行してください"),
         None if p.api_key_env.is_empty() => Ok(String::new()),
         None => std::env::var(&p.api_key_env).map_err(|_| anyhow!("{} が未設定です。/login でサインインするか、APIキーを環境変数に設定してください", p.api_key_env)),
     }
@@ -385,6 +537,33 @@ pub async fn list_models(cfg: &Config, pname: &str) -> Result<Vec<String>> {
     if cfg.provider_opts.models_offline {
         return Ok(p.models.iter().map(|model| format!("{pname}/{model}")).filter_map(allowed).collect());
     }
+    if p.kind == "devin" {
+        // Credential-scoped catalog; the seeded default keeps a fresh seat usable.
+        let base = p.base_url.trim_end_matches('/');
+        let mut models = devin::models(base, &key(pname, p)?).await.unwrap_or_default();
+        if models.is_empty() {
+            models.push("swe-1-6".into());
+        }
+        return Ok(models.into_iter().map(|uid| format!("{pname}/{uid}")).filter_map(allowed).collect());
+    }
+    if p.kind == "gitlab-duo" {
+        // Fixed alias roster; the proxy has no model-listing endpoint.
+        return Ok(gitlab_duo::MODELS.iter().map(|(alias, _)| format!("{pname}/{alias}")).filter_map(allowed).collect());
+    }
+    if p.kind == "cursor" {
+        // Credential-scoped roster: Cursor lists what this account may run.
+        let models = cursor::models(p.base_url.trim_end_matches('/'), &key(pname, p)?).await.unwrap_or_default();
+        return Ok(models.into_iter().map(|uid| format!("{pname}/{uid}")).filter_map(allowed).collect());
+    }
+    if p.kind == "gitlab-duo-agent" {
+        // GraphQL catalog scoped to the group the credential resolves to.
+        let models = gitlab_duo_workflow::models(p.base_url.trim_end_matches('/'), &key(pname, p)?).await.unwrap_or_default();
+        return Ok(models.into_iter().map(|model| format!("{pname}/{model}")).filter_map(allowed).collect());
+    }
+    // Factory ships its roster: the proxy has no model-listing endpoint.
+    if p.kind == "factory" {
+        return Ok(factory::MODELS.iter().map(|model| format!("{pname}/{model}")).filter_map(allowed).collect());
+    }
     if p.kind == "codex" {
         if !codex::path().exists() { return Ok(vec![]); }
         let cached = codex::models();
@@ -396,6 +575,13 @@ pub async fn list_models(cfg: &Config, pname: &str) -> Result<Vec<String>> {
         return Ok(models.into_iter().filter_map(allowed).collect());
     }
     let (base, http) = (p.base_url.trim_end_matches('/'), reqwest::Client::new());
+    let fresh;
+    let p = if p.stored && p.oauth && crate::login::refreshes(pname) {
+        fresh = crate::config::ProviderCfg { api_key: Some(crate::login::fresh(pname).await?.access), ..p.clone() };
+        &fresh
+    } else {
+        p
+    };
     let req = match (p.kind.as_str(), oauth(pname, p)) {
         ("anthropic", Some(path)) => http.get(format!("{base}/v1/models?limit=1000"))
             .bearer_auth(anthropic_oauth::access_token(&path).await?)

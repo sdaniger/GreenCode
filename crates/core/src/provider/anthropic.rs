@@ -128,14 +128,23 @@ impl Provider for Anthropic {
                     Some((token, ua)) => r.bearer_auth(token).header(reqwest::header::USER_AGENT, *ua).header("x-app", "cli")
                         .header("anthropic-beta", [Some(BETAS), fallback, extended].into_iter().flatten().collect::<Vec<_>>().join(",")),
                     None => {
-                        let r = r.header("x-api-key", &self.key);
+                        let mut r = r.header("x-api-key", &self.key);
+                        // Compatible hosts (Z.AI, MiniMax, Kimi Code) authenticate with a bearer, as OMP sends.
+                        if !self.base.contains("api.anthropic.com") && !self.key.is_empty() {
+                            r = r.bearer_auth(&self.key);
+                        }
                         match [fallback, extended].into_iter().flatten().collect::<Vec<_>>().join(",") {
                             betas if betas.is_empty() => r,
                             betas => r.header("anthropic-beta", betas),
                         }
                     }
                 };
-                r
+                // Kimi Code's fingerprint headers ride on every request, the sign-in included.
+                if crate::login::kimi::endpoint(&self.base) {
+                    crate::login::kimi::headers().iter().fold(r, |r, (k, v)| r.header(*k, v.as_str()))
+                } else {
+                    r
+                }
             })
             .await?;
             let mut acc = Acc::default();

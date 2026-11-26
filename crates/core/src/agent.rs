@@ -2220,9 +2220,14 @@ Continue the work from this summary and the messages that follow it.\n\n<compact
                 self.apply_reset(reset)?;
                 continue;
             }
-            let wrote = uses.iter().any(|(_, name, input)| {
-                matches!(name.as_str(), "edit" | "write")
-                    && input["path"].as_str().is_some_and(|p| !p.starts_with("out://") && !p.starts_with("agent://"))
+            let changed_file = |id: &str| {
+                uses.iter().any(|(uid, name, input)| {
+                    let (name, input) = tools::ext::effective(name, input);
+                    uid.as_str() == id && matches!(name.as_str(), "edit" | "write") && !input["path"].as_str().unwrap_or("").contains("://")
+                })
+            };
+            let wrote = results.iter().any(|block| {
+                matches!(block, Block::ToolResult { tool_use_id, is_error: false, .. } if changed_file(tool_use_id))
             });
             self.push(Message {
                 role: Role::User,

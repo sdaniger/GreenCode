@@ -83,6 +83,8 @@ pub fn status(name: &str, p: &ProviderCfg) -> Method {
         if p.stored && p.oauth { Method::Subscription } else if p.stored { Method::StoredKey } else { Method::ConfigKey }
     } else if crate::provider::oauth(name, p).is_some() {
         Method::Subscription
+    } else if p.api_key_env.is_empty() && crate::login::supports(name) {
+        Method::None(String::new())
     } else if p.api_key_env.is_empty() {
         Method::Keyless
     } else if std::env::var_os(&p.api_key_env).is_some() {
@@ -109,13 +111,57 @@ pub fn set_token(cfg: &mut Config, name: &str, token: &str) -> Result<()> {
     store(cfg, name, token, true)
 }
 
+/// Stores what a browser or device sign-in produced and switches `cfg` over to it.
+pub fn save(cfg: &mut Config, name: &str, cred: crate::login::Cred) -> Result<()> {
+    match cred {
+        crate::login::Cred::Key(key) => set_key(cfg, name, &key),
+        crate::login::Cred::OAuth(o) => store_entry(cfg, name, oauth_entry(&o), &o.access, true),
+    }
+}
+
+fn oauth_entry(o: &crate::login::OAuth) -> Value {
+    let mut entry = json!({"type": "oauth", "access": o.access});
+    if let Some(r) = &o.refresh { entry["refresh"] = json!(r); }
+    if let Some(at) = o.expires { entry["expires"] = json!(at); }
+    if !o.extra.is_empty() { entry["extra"] = Value::Object(o.extra.clone()); }
+    entry
+}
+
+/// The active OAuth credential of `name`, as stored by `save`.
+pub fn oauth(name: &str) -> Option<crate::login::OAuth> {
+    let map = read().ok()?;
+    let e = map.get(name).filter(|e| e["type"] == "oauth")?;
+    Some(crate::login::OAuth {
+        access: e["access"].as_str()?.to_string(),
+        refresh: e["refresh"].as_str().map(str::to_string),
+        expires: e["expires"].as_u64(),
+        extra: e["extra"].as_object().cloned().unwrap_or_default(),
+    })
+}
+
+/// Replaces the active OAuth credential of `name` after a refresh, keeping its account label and saved accounts.
+pub fn update_oauth(name: &str, o: &crate::login::OAuth) -> Result<()> {
+    let mut map = read()?;
+    let entry = entry_mut(&mut map, name)?;
+    for k in CREDENTIAL_FIELDS { entry.remove(*k); }
+    if let Value::Object(fresh) = oauth_entry(o) { entry.extend(fresh); }
+    write(&map)
+}
+
+/// Fields of an auth.json entry that make up the active credential.
+const CREDENTIAL_FIELDS: &[&str] = &["type", "key", "access", "refresh", "expires", "extra"];
+
 fn store(cfg: &mut Config, name: &str, secret: &str, oauth: bool) -> Result<()> {
-    let Some(p) = cfg.providers.get_mut(name) else { bail!("unknown provider {name}") };
     let secret = secret.trim();
     if secret.is_empty() { bail!(if oauth { "token is empty" } else { "API key is empty" }) }
+    let entry = if oauth { json!({"type": "oauth", "access": secret}) } else { json!({"type": "api", "key": secret}) };
+    store_entry(cfg, name, entry, secret, oauth)
+}
+
+fn store_entry(cfg: &mut Config, name: &str, mut entry: Value, secret: &str, oauth: bool) -> Result<()> {
+    let Some(p) = cfg.providers.get_mut(name) else { bail!("unknown provider {name}") };
     if p.api_key.is_some() && !p.stored { bail!("{name} has api_key in config.toml; edit that file instead") }
     let mut map = read()?;
-    let mut entry = if oauth { json!({"type": "oauth", "access": secret}) } else { json!({"type": "api", "key": secret}) };
     // The new credential replaces the active one but keeps its account label and the saved accounts.
     if let Some(old) = map.get(name).and_then(Value::as_object) {
         for k in ["account", "accounts"] {
@@ -137,7 +183,7 @@ fn drop_entry(name: &str, keep_label: bool) -> Result<bool> {
     let mut map = read()?;
     let Some(entry) = map.get_mut(name).and_then(Value::as_object_mut) else { return Ok(false) };
     let had = entry.contains_key("type");
-    for k in ["type", "key", "access"] { entry.remove(k); }
+    for k in CREDENTIAL_FIELDS { entry.remove(*k); }
     if !keep_label { entry.remove("account"); }
     if entry.get("accounts").and_then(Value::as_object).is_some_and(Map::is_empty) { entry.remove("accounts"); }
     if entry.is_empty() { map.remove(name); }
@@ -464,5 +510,46 @@ mod pause_tests {
         assert!(account_risk("HTTP 403: {\"error\":\"account_deactivated\"}").is_some());
         assert!(account_risk("invalid_grant").is_some());
         assert!(account_risk("rate limit reached").is_none());
+    }
+}
+
+#[cfg(test)]
+mod oauth_tests {
+    use super::*;
+    use crate::login::{Cred, OAuth};
+
+    #[test]
+    fn oauth_credentials_survive_refresh_and_account_switches() {
+        let home = tempfile::tempdir().unwrap();
+        crate::set_test_home(Some(home.path()));
+        let mut cfg = Config::default();
+        cfg.providers.insert("p".into(), ProviderCfg { kind: "openai".into(), ..Default::default() });
+        let cred = |access: &str| OAuth {
+            access: access.into(),
+            refresh: Some(format!("r-{access}")),
+            expires: Some(1),
+            extra: serde_json::from_value(json!({"account_id": access})).unwrap(),
+        };
+        save(&mut cfg, "p", Cred::Key("k".into())).unwrap();
+        save_as(&mut cfg, "p", "keyed").unwrap();
+        save(&mut cfg, "p", Cred::OAuth(cred("a1"))).unwrap();
+        assert_eq!(cfg.providers["p"].api_key.as_deref(), Some("a1"));
+        assert_eq!(status("p", &cfg.providers["p"]), Method::Subscription);
+        assert!(oauth("p").unwrap().due());
+        save_as(&mut cfg, "p", "work").unwrap();
+        update_oauth("p", &cred("a2")).unwrap();
+        assert_eq!(oauth("p").unwrap(), cred("a2"));
+        // A refresh keeps the account label.
+        assert_eq!(accounts("p").unwrap().0.as_deref(), Some("work"));
+
+        switch(&mut cfg, "p", "keyed").unwrap();
+        assert!(oauth("p").is_none(), "an API key account carries no OAuth fields");
+        assert!(read().unwrap()["p"].get("refresh").is_none());
+        switch(&mut cfg, "p", "work").unwrap();
+        assert_eq!(cfg.providers["p"].api_key.as_deref(), Some("a2"));
+        assert_eq!(oauth("p").unwrap(), cred("a2"));
+        logout(&mut cfg, "p").unwrap();
+        assert!(oauth("p").is_none());
+        crate::set_test_home(None);
     }
 }

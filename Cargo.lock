@@ -3420,6 +3420,7 @@ version = "0.1.0"
 dependencies = [
  "gpui-kit",
  "greencode-core",
+ "image",
  "libc",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",

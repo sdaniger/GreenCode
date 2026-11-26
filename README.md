@@ -408,10 +408,10 @@ name = "codex"
 command = ["npx", "-y", "@agentclientprotocol/codex-acp"]
 ```
 
-Predefined providers (set the key variable, then use `name/model`): anthropic, openai, openrouter, google (`GEMINI_API_KEY`),
-xai, groq, deepseek, mistral, together, fireworks, cerebras, deepinfra, perplexity, nvidia, huggingface (`HF_TOKEN`),
-github (`GITHUB_TOKEN`), moonshot, zai, and keyless ollama and lmstudio. A `[providers.NAME]` entry of the same name overrides one.
-Bedrock, Vertex AI and Azure deployment URLs use their own authentication and are not built in.
+Native provider IDs include `anthropic`, `openai`, `openrouter`, `google`,
+`amazon-bedrock`, `google-vertex`, `azure`, and the keyless `ollama` and `lmstudio`.
+See **設定 → 接続** for the full list and the credentials each provider needs.
+A `[providers.NAME]` entry overrides the built-in configuration for that provider.
 
 On macOS native threads have a `computer` tool with Codex Computer Use's actions: `list_apps`, `get_app_state`, `click`,
 `drag`, `paste`, `perform_secondary_action`, `press_key`, `scroll`, `select_text`, `set_value` and `type_text`.

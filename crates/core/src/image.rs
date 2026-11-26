@@ -463,7 +463,8 @@ pub fn inline_escape(protocol: Protocol, media: &str, bytes: &[u8], cols: u16) -
     Some((escape, rows))
 }
 
-fn to_png(media: &str, bytes: &[u8]) -> Option<Vec<u8>> {
+/// Re-encodes any decodable image (TIFF and BMP included) as PNG.
+pub fn to_png(media: &str, bytes: &[u8]) -> Option<Vec<u8>> {
     if media == "image/png" {
         return Some(bytes.to_vec());
     }

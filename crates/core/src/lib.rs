@@ -26,6 +26,7 @@ pub mod launchd;
 pub mod links;
 pub mod live;
 pub mod localserver;
+pub mod login;
 pub mod lua;
 pub mod magic_keywords;
 pub mod mcp_server;

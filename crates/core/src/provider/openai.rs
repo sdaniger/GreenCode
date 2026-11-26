@@ -16,6 +16,17 @@ pub struct OpenAi {
     pub wire: super::Wire,
 }
 
+/// Extra request headers: Copilot's identity, or Kimi Code's fingerprint (OMP sends it on every Kimi request).
+fn identity(base: &str, copilot: bool, messages: &[Message]) -> Vec<(&'static str, String)> {
+    if copilot {
+        super::copilot::headers(messages)
+    } else if crate::login::kimi::endpoint(base) {
+        crate::login::kimi::headers().to_vec()
+    } else {
+        Vec::new()
+    }
+}
+
 /// api.openai.com's reasoning models reject explicit sampling parameters; compatible endpoints usually accept them.
 fn accepts_sampling(first_party: bool, model: &str) -> bool {
     if !first_party {
@@ -267,7 +278,7 @@ impl Provider for OpenAi {
                 return responses_sse(&self.http, &self.base, &self.key, &body, &self.wire, on_text).await;
             }
             let body = self.body(&req);
-            let identity = if self.copilot { super::copilot::headers(req.messages) } else { Vec::new() };
+            let identity = identity(&self.base, self.copilot, req.messages);
             let resp = send(&self.wire.retry, || {
                 let r = self.http.post(format!("{}/chat/completions", self.base)).bearer_auth(&self.key).json(&body);
                 identity.iter().fold(r, |r, (k, v)| r.header(*k, v))
@@ -425,6 +436,15 @@ mod tests {
 
     fn body(client: &OpenAi, model: &str) -> Value {
         client.body(&Request { model, system: "", messages: &[], tools: &[], max_tokens: 100, live: None })
+    }
+
+    #[test]
+    fn kimi_endpoints_get_the_fingerprint_headers_and_others_do_not() {
+        let h = identity("https://api.kimi.com/coding/v1", false, &[]);
+        assert!(h.iter().any(|(k, v)| *k == "X-Msh-Platform" && v == "kimi_cli"), "{h:?}");
+        assert!(identity("https://api.moonshot.ai/v1", false, &[]).is_empty());
+        // Copilot's identity wins on its own host.
+        assert!(!identity(crate::provider::copilot::BASE, true, &[]).is_empty());
     }
 
     #[test]

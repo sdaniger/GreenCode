@@ -24,8 +24,9 @@ pub enum Item {
 
 /// For every item, `Some(start)` when it belongs to a collapsible work group starting at `start`.
 /// A group is a run of tools/thinking (plus interim assistant text between them) that a later
-/// assistant reply of the same turn follows; the newest group stays open while the thread runs.
-pub fn work_groups(items: &[Item], running: bool) -> Vec<Option<usize>> {
+/// assistant reply of the same turn follows. While the thread runs, `live` adds the trailing work as
+/// one live group; otherwise (the classic view) the newest group stays open.
+pub fn work_groups(items: &[Item], running: bool, live: bool) -> Vec<Option<usize>> {
     let mut out = vec![None; items.len()];
     let mut groups: Vec<(usize, usize)> = vec![];
     let mut turn = 0;
@@ -46,11 +47,73 @@ pub fn work_groups(items: &[Item], running: bool) -> Vec<Option<usize>> {
         }
         turn = end;
     }
-    if running { groups.pop(); }
+    if !live {
+        if running { groups.pop(); }
+    } else {
+        groups.extend(live_start(items, running).map(|start| (start, items.len() - 1)));
+    }
     for (start, stop) in groups {
         for slot in &mut out[start..=stop] { *slot = Some(start); }
     }
     out
+}
+
+/// Start of the tools/thinking a running turn is still working through, shown as T3's one live activity row.
+pub fn live_start(items: &[Item], running: bool) -> Option<usize> {
+    if !running {
+        return None;
+    }
+    let start = items
+        .iter()
+        .rposition(|i| !matches!(i, Item::Tool { .. } | Item::Thinking(_)))
+        .map_or(0, |p| p + 1);
+    (start < items.len()).then_some(start)
+}
+
+/// What the live row says: the newest tool call, or thinking.
+pub fn live_label(items: &[Item]) -> String {
+    match items.last() {
+        Some(Item::Tool { name, input, .. }) => clip(&format!("{name} {}", permission::summary(name, input)), 90),
+        _ => "考え中".into(),
+    }
+}
+
+/// `12s`, `3m 4s`, `1h 2m`: how long a turn has been working.
+pub fn elapsed(secs: u64) -> String {
+    match secs {
+        0..60 => format!("{secs}s"),
+        60..3600 => format!("{}m {}s", secs / 60, secs % 60),
+        _ => format!("{}h {}m", secs / 3600, secs % 3600 / 60),
+    }
+}
+
+/// T3's live activity row: the current step, pulsing while the agent works, with muted details after it.
+pub fn live_row(id: impl Into<ElementId>, label: String, trailing: String, pal: Pal) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap_2()
+        .min_w_0()
+        .px_2()
+        .py_0p5()
+        .rounded_md()
+        .text_sm()
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_color(pal.fg)
+                .child(SharedString::from(label))
+                .with_animation(
+                    "live-pulse",
+                    Animation::new(std::time::Duration::from_millis(1600))
+                        .repeat()
+                        .with_easing(pulsating_between(0.4, 1.0)),
+                    |el, delta| el.opacity(delta),
+                ),
+        )
+        .child(div().flex_none().text_color(pal.muted).child(SharedString::from(trailing)))
 }
 
 fn text<'a>(input: &'a Value, keys: &[&str]) -> &'a str {
@@ -92,6 +155,18 @@ pub fn turn_changes(items: &[Item], end: usize) -> Vec<(String, usize, usize)> {
         }
     }
     changes
+}
+
+/// A user message as shown: absolute image paths are dropped, since their images show below it.
+pub fn without_image_paths(text: &str) -> String {
+    let image = |word: &str| {
+        let path = std::path::Path::new(word);
+        path.is_absolute()
+            && path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+                ["png", "jpg", "jpeg", "gif", "webp"].contains(&e.to_ascii_lowercase().as_str())
+            })
+    };
+    text.split(' ').filter(|w| !image(w)).collect::<Vec<_>>().join(" ").trim().to_string()
 }
 
 /// A displayable image from an image block; formats the UI cannot decode are skipped.
@@ -513,10 +588,13 @@ pub fn render_item(
     let row = || div().w_full().max_w(px(760.)).px_6().py_1p5();
     let wrap = |d: Div| div().w_full().flex().justify_center().child(d).into_any_element();
     match item {
-        Item::User(text) => wrap(row()
-            .flex()
-            .justify_end()
-            .child(div().max_w(relative(0.8)).px_4().py_2().rounded_2xl().bg(pal.card).child(text.clone()))),
+        Item::User(text) => {
+            let shown = without_image_paths(text);
+            wrap(row()
+                .flex()
+                .justify_end()
+                .when(!shown.is_empty(), |r| r.child(div().max_w(relative(0.8)).px_4().py_2().rounded_2xl().bg(pal.card).child(shown))))
+        }
         Item::Assistant(text) => {
             let mut code_style = StyleRefinement::default();
             if !WRAP_CODE.load(Ordering::Relaxed) {

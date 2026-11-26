@@ -548,8 +548,9 @@ impl Workspace {
                     } else {
                         "Google でサインイン"
                     };
-                    let install_label =
-                        if greencode_core::antigravity::installed_version().is_some() {
+                    let install_label = if let Some(label) = self.antigravity_install {
+                            label
+                        } else if greencode_core::antigravity::installed_version().is_some() {
                             "ランタイムを更新"
                         } else {
                             "ランタイムをインストール"

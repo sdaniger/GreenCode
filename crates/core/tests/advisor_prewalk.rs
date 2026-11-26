@@ -128,3 +128,30 @@ async fn prewalk_switches_model_at_the_first_edit() {
     assert!(seen.iter().any(|s| s.starts_with("big||") && s.contains("go")));
     assert!(seen.iter().any(|s| s.starts_with("small||") && s.contains("prewalk: switched")));
 }
+
+#[tokio::test]
+async fn prewalk_does_not_switch_after_a_failed_write() {
+    let mock = Arc::new(Mock { seen: Default::default() });
+    let mut cfg = base();
+    cfg.assist_opts.prewalk.enabled = true;
+    cfg.assist_opts.advisor.enabled = false;
+    let mut agent = agent("prewalk-failed-write", cfg, &mock, "big");
+    std::fs::create_dir(dir("prewalk-failed-write").join("a.txt")).unwrap();
+    run(&mut agent).await;
+    let seen = mock.seen.lock().unwrap();
+    assert!(seen.last().unwrap().starts_with("big||"));
+    assert!(seen.last().unwrap().contains(r#""is_error":true"#));
+}
+
+#[tokio::test]
+async fn prewalk_rejects_an_unconfigured_provider_instead_of_reusing_credentials() {
+    let mock = Arc::new(Mock { seen: Default::default() });
+    let mut agent = agent("prewalk-unconfigured-provider", base(), &mock, "big");
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let error = agent.control(json!({"type":"prewalk","restart":"not-configured/small"}), &tx)
+        .await.unwrap_err();
+    assert!(error.to_string().contains("unknown provider"), "{error:#}");
+    assert!(rx.try_recv().is_err(), "an unsuccessful switch must not update the picker");
+    run(&mut agent).await;
+    assert!(mock.seen.lock().unwrap()[0].starts_with("big||"));
+}

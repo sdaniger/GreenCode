@@ -133,8 +133,8 @@ fn auth(cfg: &mut Config, args: &[String]) -> anyhow::Result<()> {
             let mut name = match target {
                 Some(n) => n,
                 None => {
-                    let mut names: Vec<String> = PRESETS.iter().map(|p| p.0.to_string()).collect();
-                    names.extend(cfg.providers.keys().filter(|k| !PRESETS.iter().any(|p| p.0 == k.as_str())).cloned());
+                    let mut names: Vec<String> = PRESETS.iter().map(|p| p.name.to_string()).collect();
+                    names.extend(cfg.providers.keys().filter(|k| greencode_core::config::preset(k).is_none()).cloned());
                     names.push("antigravity".into());
                     for (i, n) in names.iter().enumerate() {
                         let st = if n == "antigravity" {
@@ -245,6 +245,38 @@ fn auth(cfg: &mut Config, args: &[String]) -> anyhow::Result<()> {
                 println!("Signed in to mistral with Mistral Vibe.");
                 return Ok(());
             }
+            if greencode_core::login::supports(&name) {
+                let key_too = greencode_core::config::preset(&name).is_some_and(|p| !p.env.is_empty());
+                let browser = !key_too || {
+                    let choice = read_line("1) Sign in with a browser  2) API key  [1]: ")?;
+                    choice.is_empty() || choice == "1"
+                };
+                if browser {
+                    let rt = tokio::runtime::Runtime::new()?;
+                    let start = rt.block_on(greencode_core::login::start(&name))?;
+                    match &start.code {
+                        Some(code) => eprintln!("Open {} and enter the code: {code}", start.url),
+                        None => eprintln!("Open this URL in a browser:\n{}", start.url),
+                    }
+                    #[cfg(target_os = "macos")]
+                    let _ = std::process::Command::new("/usr/bin/open").arg(&start.url).status();
+                    if let Some(paste) = start.paste.clone() {
+                        eprintln!("If the browser cannot return here, paste the URL it ended on and press Enter.");
+                        // Left blocked on stdin when the browser does return; the process exits right after.
+                        std::thread::spawn(move || {
+                            let mut line = String::new();
+                            if std::io::stdin().read_line(&mut line).is_ok() && !line.trim().is_empty() {
+                                let _ = paste.send(line);
+                            }
+                        });
+                    }
+                    eprintln!("Waiting for approval…");
+                    let cred = rt.block_on(start.done)?;
+                    auth::save(cfg, &name, cred)?;
+                    println!("Signed in to {name}.");
+                    return Ok(());
+                }
+            }
             let p = cfg.providers.get(&name).ok_or_else(|| anyhow::anyhow!("unknown provider {name}"))?;
             if p.api_key_env.is_empty() && name != "anthropic" && name != "chatgpt" {
                 println!("{name} needs no key.");
@@ -296,6 +328,9 @@ fn auth(cfg: &mut Config, args: &[String]) -> anyhow::Result<()> {
                 use std::io::IsTerminal;
                 let tty = std::io::stdin().is_terminal();
                 let stty = |arg: &str| { let _ = std::process::Command::new("stty").arg(arg).status(); };
+                if let Some(p) = greencode_core::config::preset(&name).filter(|p| !p.key_url.is_empty()) {
+                    eprintln!("Get a {} key at {}", p.label, p.key_url);
+                }
                 if tty { stty("-echo"); }
                 let key = read_line(&format!("API key for {name}: "));
                 if tty { stty("echo"); eprintln!(); }

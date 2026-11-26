@@ -786,31 +786,134 @@ pub struct ProviderCfg {
     pub oauth: bool,
 }
 
-/// Built-in providers: (name, kind, base URL, key variable). config.toml entries of the same name win.
-pub const PRESETS: &[(&str, &str, &str, &str)] = &[
-    ("anthropic", "anthropic", "https://api.anthropic.com", "ANTHROPIC_API_KEY"),
-    ("openai", "openai", "https://api.openai.com/v1", "OPENAI_API_KEY"),
-    ("chatgpt", "codex", "https://chatgpt.com/backend-api/codex", ""),
-    ("openrouter", "openai", "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY"),
-    ("google", "openai", "https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY"),
-    ("xai", "openai", "https://api.x.ai/v1", "XAI_API_KEY"),
-    ("groq", "openai", "https://api.groq.com/openai/v1", "GROQ_API_KEY"),
-    ("deepseek", "openai", "https://api.deepseek.com/v1", "DEEPSEEK_API_KEY"),
-    ("mistral", "openai", "https://api.mistral.ai/v1", "MISTRAL_API_KEY"),
-    ("together", "openai", "https://api.together.xyz/v1", "TOGETHER_API_KEY"),
-    ("fireworks", "openai", "https://api.fireworks.ai/inference/v1", "FIREWORKS_API_KEY"),
-    ("cerebras", "openai", "https://api.cerebras.ai/v1", "CEREBRAS_API_KEY"),
-    ("deepinfra", "openai", "https://api.deepinfra.com/v1/openai", "DEEPINFRA_API_KEY"),
-    ("perplexity", "openai", "https://api.perplexity.ai", "PERPLEXITY_API_KEY"),
-    ("nvidia", "openai", "https://integrate.api.nvidia.com/v1", "NVIDIA_API_KEY"),
-    ("huggingface", "openai", "https://router.huggingface.co/v1", "HF_TOKEN"),
-    ("github", "openai", "https://models.github.ai/inference", "GITHUB_TOKEN"),
-    ("github-copilot", "openai", "https://api.githubcopilot.com", "COPILOT_GITHUB_TOKEN"),
-    ("moonshot", "openai", "https://api.moonshot.ai/v1", "MOONSHOT_API_KEY"),
-    ("zai", "openai", "https://api.z.ai/api/paas/v4", "ZAI_API_KEY"),
-    ("ollama", "openai", "http://localhost:11434/v1", ""),
-    ("lmstudio", "openai", "http://localhost:1234/v1", ""),
+/// A built-in provider. config.toml entries of the same name win.
+pub struct Preset {
+    pub name: &'static str,
+    /// `anthropic` or `openai`; `codex` is the ChatGPT subscription.
+    pub kind: &'static str,
+    pub url: &'static str,
+    /// Environment variable holding the key; empty = none needed (local servers).
+    pub env: &'static str,
+    /// Display name.
+    pub label: &'static str,
+    /// Where the user creates a key; empty when there is none.
+    pub key_url: &'static str,
+}
+
+const fn p(name: &'static str, kind: &'static str, url: &'static str, env: &'static str, label: &'static str, key_url: &'static str) -> Preset {
+    Preset { name, kind, url, env, label, key_url }
+}
+
+/// Built-in providers, OMP's API-key catalog included (antigravity has its own backend).
+pub const PRESETS: &[Preset] = &[
+    p("anthropic", "anthropic", "https://api.anthropic.com", "ANTHROPIC_API_KEY", "Anthropic", "https://console.anthropic.com/settings/keys"),
+    p("openai", "openai", "https://api.openai.com/v1", "OPENAI_API_KEY", "OpenAI", "https://platform.openai.com/api-keys"),
+    p("chatgpt", "codex", "https://chatgpt.com/backend-api/codex", "", "ChatGPT Plus/Pro", ""),
+    p("openrouter", "openai", "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", "OpenRouter", "https://openrouter.ai/settings/keys"),
+    p("google", "openai", "https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY", "Google Gemini", "https://aistudio.google.com/apikey"),
+    p("xai", "openai", "https://api.x.ai/v1", "XAI_API_KEY", "xAI", "https://console.x.ai/team/default/api-keys"),
+    p("groq", "openai", "https://api.groq.com/openai/v1", "GROQ_API_KEY", "Groq", "https://console.groq.com/keys"),
+    p("deepseek", "openai", "https://api.deepseek.com/v1", "DEEPSEEK_API_KEY", "DeepSeek", "https://platform.deepseek.com/api_keys"),
+    p("mistral", "openai", "https://api.mistral.ai/v1", "MISTRAL_API_KEY", "Mistral", "https://console.mistral.ai/api-keys"),
+    p("together", "openai", "https://api.together.xyz/v1", "TOGETHER_API_KEY", "Together", "https://api.together.xyz/settings/api-keys"),
+    p("fireworks", "openai", "https://api.fireworks.ai/inference/v1", "FIREWORKS_API_KEY", "Fireworks", "https://app.fireworks.ai/settings/users/api-keys"),
+    p("cerebras", "openai", "https://api.cerebras.ai/v1", "CEREBRAS_API_KEY", "Cerebras", "https://cloud.cerebras.ai/platform/"),
+    p("deepinfra", "openai", "https://api.deepinfra.com/v1/openai", "DEEPINFRA_API_KEY", "DeepInfra", "https://deepinfra.com/dash/api_keys"),
+    p("perplexity", "openai", "https://api.perplexity.ai", "PERPLEXITY_API_KEY", "Perplexity", "https://www.perplexity.ai/settings/api"),
+    p("nvidia", "openai", "https://integrate.api.nvidia.com/v1", "NVIDIA_API_KEY", "NVIDIA", "https://org.ngc.nvidia.com/setup/personal-keys"),
+    p("huggingface", "openai", "https://router.huggingface.co/v1", "HF_TOKEN", "Hugging Face", "https://huggingface.co/settings/tokens/new?ownUserPermissions=inference.serverless.write&tokenType=fineGrained"),
+    p("github", "openai", "https://models.github.ai/inference", "GITHUB_TOKEN", "GitHub Models", "https://github.com/settings/personal-access-tokens"),
+    p("github-copilot", "openai", "https://api.githubcopilot.com", "COPILOT_GITHUB_TOKEN", "GitHub Copilot", ""),
+    p("moonshot", "openai", "https://api.moonshot.ai/v1", "MOONSHOT_API_KEY", "Moonshot (Kimi API)", "https://platform.moonshot.ai/console/api-keys"),
+    p("zai", "openai", "https://api.z.ai/api/paas/v4", "ZAI_API_KEY", "Z.AI", "https://z.ai/manage-apikey/apikey-list"),
+    p("ollama", "openai", "http://localhost:11434/v1", "", "Ollama (ローカル)", ""),
+    p("lmstudio", "openai", "http://localhost:1234/v1", "", "LM Studio (ローカル)", ""),
+    p("abliteration", "openai", "https://api.abliteration.ai/v1", "ABLITERATION_API_KEY", "Abliteration", "https://abliteration.ai/console"),
+    p("aiand", "openai", "https://api.aiand.com/v1", "AIAND_API_KEY", "ai&", "https://console.aiand.com/api-keys"),
+    p("aimlapi", "openai", "https://api.aimlapi.com/v1", "AIMLAPI_API_KEY", "AIML API", "https://aimlapi.com/app/keys"),
+    p("alibaba-coding-plan", "openai", "https://coding-intl.dashscope.aliyuncs.com/v1", "ALIBABA_CODING_PLAN_API_KEY", "Alibaba Coding Plan", "https://modelstudio.console.alibabacloud.com/"),
+    p("alibaba-token-plan", "openai", "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1", "ALIBABA_TOKEN_PLAN_API_KEY", "QwenCloud Token Plan", "https://modelstudio.console.alibabacloud.com/"),
+    p("baseten", "openai", "https://inference.baseten.co/v1", "BASETEN_API_KEY", "Baseten", "https://app.baseten.co/settings/api_keys"),
+    p("bifrost", "openai", "http://localhost:8080/v1", "BIFROST_API_KEY", "Bifrost", "https://docs.getbifrost.ai/features/governance/virtual-keys"),
+    p("charm-hyper", "openai", "https://hyper.charm.land/v1", "CHARM_HYPER_API_KEY", "Charm Hyper", "https://hyper.charm.land/"),
+    p("chutes", "openai", "https://llm.chutes.ai/v1", "CHUTES_API_KEY", "Chutes", "https://chutes.ai/app/settings/api-keys"),
+    p("cline-pass", "openai", "https://api.cline.bot/api/v1", "CLINE_API_KEY", "ClinePass", "https://app.cline.bot/dashboard/account"),
+    p("coralbricks", "openai", "https://inference.coralbricks.ai/v1", "CORAL_API_KEY", "CoralBricks", "https://www.coralbricks.ai/api-keys"),
+    p("coreweave", "openai", "https://api.inference.wandb.ai/v1", "WANDB_API_KEY", "CoreWeave", "https://wandb.ai/settings"),
+    p("firepass", "openai", "https://api.fireworks.ai/inference/v1", "FIREPASS_API_KEY", "Fire Pass", "https://app.fireworks.ai/settings/users/api-keys"),
+    p("gmi-cloud", "openai", "https://api.gmi-serving.com/v1", "GMI_API_KEY", "GMI Cloud", "https://console.gmicloud.ai"),
+    p("helmcode", "openai", "https://api.helmcode.com/v1", "HELMCODE_API_KEY", "Helmcode", "https://cloud.helmcode.com"),
+    p("inception", "openai", "https://api.inceptionlabs.ai/v1", "INCEPTION_API_KEY", "Inception", "https://platform.inceptionlabs.ai/dashboard/api-keys"),
+    p("kilo", "openai", "https://api.kilo.ai/api/gateway", "KILO_API_KEY", "Kilo Gateway", "https://app.kilo.ai/profile"),
+    p("kimi-code", "openai", "https://api.kimi.com/coding/v1", "KIMI_CODE_API_KEY", "Kimi Code", "https://www.kimi.com/code"),
+    p("kiro", "kiro", "https://runtime.us-east-1.kiro.dev", "KIRO_API_KEY", "Kiro (Builder ID / Google / GitHub)", "https://kiro.dev"),
+    p("xai-oauth", "openai", "https://api.x.ai/v1", "XAI_OAUTH_TOKEN", "xAI Grok OAuth (SuperGrok / X Premium+)", ""),
+    p("litellm", "openai", "http://localhost:4000/v1", "LITELLM_API_KEY", "LiteLLM", "https://docs.litellm.ai/docs/proxy/deploy"),
+    p("llamacpp", "openai", "http://127.0.0.1:8080/v1", "", "llama.cpp (ローカル)", ""),
+    p("meta", "openai", "https://api.meta.ai/v1", "META_API_KEY", "Meta Model API", "https://developer.meta.com/ai/"),
+    p("minimax", "anthropic", "https://api.minimax.io/anthropic", "MINIMAX_API_KEY", "MiniMax", "https://platform.minimax.io/user-center/basic-information/interface-key"),
+    p("minimax-code", "anthropic", "https://api.minimax.io/anthropic", "MINIMAX_CODE_API_KEY", "MiniMax Token Plan", "https://platform.minimax.io/subscribe/token-plan"),
+    p("minimax-code-cn", "anthropic", "https://api.minimaxi.com/anthropic", "MINIMAX_CODE_CN_API_KEY", "MiniMax Token Plan (中国)", "https://platform.minimaxi.com/subscribe/token-plan"),
+    p("modal", "openai", "https://inference.us-west.modal.direct/v1", "MODAL_PROXY_TOKEN", "Modal", "https://modal.com/settings/proxy-auth-tokens"),
+    p("modular", "openai", "https://api.modular.com/v1", "MODULAR_API_KEY", "Modular", "https://console.modular.com/api_keys"),
+    p("nanogpt", "openai", "https://nano-gpt.com/api/v1", "NANO_GPT_API_KEY", "NanoGPT", "https://nano-gpt.com/api"),
+    p("novita", "openai", "https://api.novita.ai/openai/v1", "NOVITA_API_KEY", "Novita", "https://novita.ai/settings/key-management"),
+    p("ollama-cloud", "openai", "https://ollama.com/v1", "OLLAMA_API_KEY", "Ollama Cloud", "https://ollama.com/settings/keys"),
+    p("opencode-go", "openai", "https://opencode.ai/zen/go/v1", "OPENCODE_API_KEY", "OpenCode Go", "https://opencode.ai/auth"),
+    p("opencode-zen", "openai", "https://opencode.ai/zen/v1", "OPENCODE_API_KEY", "OpenCode Zen", "https://opencode.ai/auth"),
+    p("otari", "openai", "https://api.otari.ai/api/v1", "OTARI_API_KEY", "Otari", "https://app.otari.ai/settings/api-keys"),
+    p("qianfan", "openai", "https://qianfan.baidubce.com/v2", "QIANFAN_API_KEY", "Qianfan", "https://console.bce.baidu.com/qianfan/ais/console/apiKey"),
+    p("qwen-portal", "openai", "https://portal.qwen.ai/v1", "QWEN_PORTAL_API_KEY", "Qwen Portal", "https://chat.qwen.ai"),
+    p("sakana", "openai", "https://api.sakana.ai/v1", "SAKANA_API_KEY", "Sakana AI", "https://console.sakana.ai/api-keys"),
+    p("sambanova", "openai", "https://api.sambanova.ai/v1", "SAMBANOVA_API_KEY", "SambaNova", "https://cloud.sambanova.ai/apis"),
+    p("scaleway", "openai", "https://api.scaleway.ai/v1", "SCW_SECRET_KEY", "Scaleway", "https://console.scaleway.com/iam/api-keys"),
+    p("siliconflow", "openai", "https://api.siliconflow.com/v1", "SILICONFLOW_API_KEY", "SiliconFlow", "https://cloud.siliconflow.com/account/ak"),
+    p("siliconflow-cn", "openai", "https://api.siliconflow.cn/v1", "SILICONFLOW_CN_API_KEY", "SiliconFlow (中国)", "https://cloud.siliconflow.cn/account/ak"),
+    p("singularityapi-dev", "openai", "https://api.singularityapi.dev/v1", "SINGULARITYAPI_DEV_API_KEY", "SingularityAPI", "https://app.singularityapi.dev"),
+    p("singularityapi-tech", "openai", "https://api.singularityapi.tech/v1", "SINGULARITYAPI_TECH_API_KEY", "SingularityAPI Reserved Lanes", "https://app.singularityapi.tech/compute/billing"),
+    p("stepfun", "openai", "https://api.stepfun.ai/v1", "STEPFUN_API_KEY", "StepFun", "https://platform.stepfun.ai/interface-key"),
+    p("synthetic", "openai", "https://api.synthetic.new/openai/v1", "SYNTHETIC_API_KEY", "Synthetic", "https://synthetic.new/user-settings/api"),
+    p("umans", "anthropic", "https://api.code.umans.ai", "UMANS_AI_CODING_PLAN_API_KEY", "Umans AI Coding Plan", "https://app.umans.ai/billing"),
+    p("venice", "openai", "https://api.venice.ai/api/v1", "VENICE_API_KEY", "Venice", "https://venice.ai/settings/api"),
+    p("vercel-ai-gateway", "openai", "https://ai-gateway.vercel.sh/v1", "AI_GATEWAY_API_KEY", "Vercel AI Gateway", "https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai-gateway%2Fapi-keys&title=AI+Gateway+API+Keys"),
+    p("vllm", "openai", "http://127.0.0.1:8000/v1", "", "vLLM (ローカル)", ""),
+    p("wafer-serverless", "openai", "https://pass.wafer.ai/v1", "WAFER_SERVERLESS_API_KEY", "Wafer Serverless", "https://app.wafer.ai/usage"),
+    p("xiaomi", "openai", "https://api.xiaomimimo.com/v1", "XIAOMI_API_KEY", "Xiaomi MiMo", "https://platform.xiaomimimo.com/console/api-keys"),
+    p("xiaomi-token-plan-ams", "openai", "https://token-plan-ams.xiaomimimo.com/v1", "XIAOMI_TOKEN_PLAN_AMS_API_KEY", "Xiaomi Token Plan (欧州)", "https://platform.xiaomimimo.com/console/plan-manage"),
+    p("xiaomi-token-plan-cn", "openai", "https://token-plan-cn.xiaomimimo.com/v1", "XIAOMI_TOKEN_PLAN_CN_API_KEY", "Xiaomi Token Plan (中国)", "https://platform.xiaomimimo.com/console/plan-manage"),
+    p("xiaomi-token-plan-sgp", "openai", "https://token-plan-sgp.xiaomimimo.com/v1", "XIAOMI_TOKEN_PLAN_SGP_API_KEY", "Xiaomi Token Plan (シンガポール)", "https://platform.xiaomimimo.com/console/plan-manage"),
+    p("yolo-auto", "openai", "https://yolo-auto.com/v1", "YOLO_AUTO_API_KEY", "Yolo-Auto", "https://yolo-auto.com/app"),
+    p("zai-coding-plan", "anthropic", "https://api.z.ai/api/anthropic", "ZAI_API_KEY", "Z.AI GLM Coding Plan", "https://z.ai/manage-apikey/apikey-list"),
+    p("factory-droid", "factory", "https://api.factory.ai", "", "Factory Droid", ""),
+    p("muse-code", "muse", "https://api.meta.ai/v1", "", "Muse Code (Meta サブスクリプション)", ""),
+    // Keys come from AWS (env, ~/.aws profile) or an `api_key` Bedrock API key; no env var is required.
+    p("amazon-bedrock", "bedrock", "https://bedrock-runtime.us-east-1.amazonaws.com", "", "Amazon Bedrock", "https://console.aws.amazon.com/bedrock/"),
+    p("bedrock-mantle", "bedrock-mantle", "https://bedrock-mantle.{region}.api.aws/openai/v1", "", "Amazon Bedrock Mantle", "https://console.aws.amazon.com/bedrock/"),
+    p("zenmux", "openai", "https://zenmux.ai/api/v1", "ZENMUX_API_KEY", "ZenMux", "https://zenmux.ai/settings/keys"),
+    p("devin", "devin", "https://server.codeium.com", "DEVIN_API_KEY", "Devin", "https://app.devin.ai/"),
+    p("devin-cli", "devin", "https://server.codeium.com", "", "Devin (CLI の認証情報を取り込む)", ""),
+    p("devin-windsurf", "devin", "https://server.codeium.com", "", "Devin (Windsurf Enterprise)", ""),
+    // <resource> is the Azure OpenAI resource name (AZURE_OPENAI_RESOURCE_NAME); api-version from AZURE_OPENAI_API_VERSION.
+    p("azure", "azure", "https://<resource>.openai.azure.com/openai/v1", "AZURE_OPENAI_API_KEY", "Azure OpenAI (base_url の <resource> を置換)", "https://portal.azure.com/"),
+    // <account>/<gateway> come from CLOUDFLARE_ACCOUNT_ID / CLOUDFLARE_GATEWAY_ID when left in place.
+    p("cloudflare-ai-gateway", "cloudflare-ai-gateway", "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>", "CLOUDFLARE_AI_GATEWAY_API_KEY", "Cloudflare AI Gateway", "https://developers.cloudflare.com/ai-gateway/configuration/authentication/"),
+    // ADC from `gcloud auth application-default login`, GOOGLE_CLOUD_ACCESS_TOKEN, or GOOGLE_CLOUD_API_KEY (express mode).
+    p("google-vertex", "vertex", "https://aiplatform.googleapis.com", "GOOGLE_CLOUD_API_KEY", "Google Vertex AI", "https://console.cloud.google.com/apis/credentials"),
+    // SNOWFLAKE_PAT, or /login snowflake; the account comes from the sign-in or SNOWFLAKE_ACCOUNT.
+    p("snowflake", "snowflake", "https://snowflake-account.invalid/api/v2/cortex", "SNOWFLAKE_PAT", "Snowflake Cortex", "https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-rest-api"),
+    // GITLAB_TOKEN (PAT), or /login gitlab-duo; GitLab mints the AI-gateway token per request.
+    p("gitlab-duo", "gitlab-duo", "https://gitlab.com", "GITLAB_TOKEN", "GitLab Duo", "https://gitlab.com/-/user_settings/personal_access_tokens"),
+    // The agent flows ride GitLab's Duo Workflow service, which needs its own OAuth app (VS Code extension).
+    p("gitlab-duo-agent", "gitlab-duo-agent", "https://gitlab.com", "GITLAB_TOKEN", "GitLab Duo Agent", "https://gitlab.com/-/user_settings/personal_access_tokens"),
+    // CURSOR_ACCESS_TOKEN, or /login cursor (the Cursor CLI's browser-poll sign-in).
+    p("cursor", "cursor", "https://api2.cursor.sh", "CURSOR_ACCESS_TOKEN", "Cursor", ""),
+    p("zhipu-coding-plan", "openai", "https://open.bigmodel.cn/api/coding/paas/v4", "ZHIPU_API_KEY", "Zhipu Coding Plan (智谱)", "https://bigmodel.cn/coding-plan/personal/overview"),
 ];
+
+/// The built-in provider called `name`.
+pub fn preset(name: &str) -> Option<&'static Preset> {
+    PRESETS.iter().find(|p| p.name == name)
+}
 
 #[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct AcpCfg {
@@ -944,7 +1047,7 @@ pub fn provider_models_text(text: &str, name: &str, models: &[String]) -> anyhow
     }
     let providers = root.get_mut("providers").and_then(Item::as_table_mut).ok_or_else(|| anyhow!("`providers` is not a table in config.toml"))?;
     if !providers.contains_key(name) {
-        let Some(&(_, kind, url, env)) = PRESETS.iter().find(|p| p.0 == name) else {
+        let Some(&Preset { kind, url, env, .. }) = preset(name) else {
             anyhow::bail!("プロバイダ `{name}` は config.toml にないため、モデルだけを追加できません");
         };
         let mut t = Table::new();
@@ -1074,7 +1177,7 @@ impl Config {
                 if policy.check_mode(cfg.mode).is_err() { cfg.mode = max; }
             }
         }
-        for &(name, kind, url, env) in PRESETS {
+        for &Preset { name, kind, url, env, .. } in PRESETS {
             cfg.providers.entry(name.into()).or_insert(ProviderCfg {
                 kind: kind.into(),
                 base_url: url.into(),
@@ -1195,7 +1298,7 @@ impl Config {
         anyhow::ensure!(!name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'), "provider name must be letters, digits, `-` or `_`");
         let mut p = p;
         // A built-in name with no URL only adds a key or models to that provider.
-        if let Some(&(_, kind, url, env)) = PRESETS.iter().find(|preset| preset.0 == name).filter(|_| p.base_url.is_empty()) {
+        if let Some(&Preset { kind, url, env, .. }) = preset(name).filter(|_| p.base_url.is_empty()) {
             (p.kind, p.base_url) = (kind.into(), url.into());
             if p.api_key_env.is_empty() { p.api_key_env = env.into(); }
         }

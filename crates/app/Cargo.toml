@@ -29,3 +29,4 @@ portable-pty = "0.9"
 
 [dev-dependencies]
 gpui-kit = { version = "0.9", features = ["test-support"] }
+image = { version = "0.25", default-features = false, features = ["tiff"] }

@@ -50,6 +50,27 @@ fn human(size: u64) -> String {
 }
 
 impl Workspace {
+    /// Adds an image to the composer's previews; it is sent with the next prompt.
+    pub(super) fn attach_image(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        // The prompt carries images as whitespace-separated paths, so a spaced name is copied first.
+        let path = if path.to_string_lossy().contains(char::is_whitespace) {
+            let name = path.file_name().map(|n| n.to_string_lossy().replace(char::is_whitespace, "-"));
+            let dir = greencode_core::home().join("attachments");
+            let copy = dir.join(format!("{}-{}", now(), name.unwrap_or_default()));
+            if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::copy(&path, &copy)) {
+                return self.fail(format!("画像を添付できません: {e}"));
+            }
+            copy
+        } else {
+            path
+        };
+        let images = &mut self.threads[self.active].images;
+        if !images.contains(&path) {
+            images.push(path);
+        }
+        cx.notify();
+    }
+
     /// Mentions each path in the composer, copying files from outside the project.
     pub(super) fn attach_paths(
         &mut self,
@@ -87,7 +108,7 @@ impl Workspace {
             match attach_plan(&path, &project, size) {
                 Plan::TooLarge => self.fail(format!("{name} は 50 MiB を超えています")),
                 Plan::Image => {
-                    self.insert_path(&path, window, cx);
+                    self.attach_image(path.clone(), cx);
                     self.notice(format!("添付: {name}（{}）", human(size)));
                 }
                 Plan::Mention(rel) => {
