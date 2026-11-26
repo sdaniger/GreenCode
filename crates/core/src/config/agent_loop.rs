@@ -156,9 +156,10 @@ pub enum Personality {
 #[serde(rename_all = "lowercase")]
 pub enum UnexpectedStopDetection {
     None,
-    #[default]
     Mechanical,
-    /// Native has no small classifier, so `smart` recovers like `mechanical`.
+    /// Also judges text-only stops (`judge` role, else the session model) and nudges a reply that stopped short.
+    /// Default here (OMP's is `mechanical`): GreenCode favors finishing the request over one extra judge call.
+    #[default]
     Smart,
 }
 

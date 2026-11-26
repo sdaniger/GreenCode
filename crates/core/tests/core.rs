@@ -778,6 +778,69 @@ fn native_prompt_stays_lean() {
     assert!(system_len + schemas < 9_000);
 }
 
+/// A text reply cut off at `max_tokens` continues instead of ending the turn.
+#[tokio::test]
+async fn a_reply_cut_off_at_max_tokens_continues() {
+    let mock = Arc::new(Mock {
+        replies: Mutex::new(VecDeque::from([
+            Reply { blocks: vec![text("part one")], stop: "max_tokens".into(), ..Default::default() },
+            Reply { blocks: vec![text(" part two")], ..Default::default() },
+        ])),
+        ..Default::default()
+    });
+    let mut cfg = Config::default();
+    cfg.learning.auto = false;
+    let mut a = agent_cfg("cut-off", cfg, mock.clone());
+    let (result, _) = run(&mut a, "write it", Decision::Allow).await;
+    result.unwrap();
+    let seen = mock.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    assert!(seen[1].1.contains("part one") && seen[1].1.contains("output token limit"), "{}", seen[1].1);
+}
+
+/// `smart` asks the judge about a text-only stop, nudges once, and takes the nudged reply as final.
+#[tokio::test]
+async fn smart_stop_detection_nudges_a_reply_that_stopped_short() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    // One judge request: the reply to the nudge is not judged again.
+    let judge = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut data = Vec::new();
+        let body = loop {
+            let mut buf = [0; 4096];
+            let n = stream.read(&mut buf).await.unwrap();
+            assert!(n > 0);
+            data.extend_from_slice(&buf[..n]);
+            if let Some(end) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&data[..end]).to_lowercase();
+                let length: usize = headers.lines().find_map(|l| l.strip_prefix("content-length: ")).unwrap().parse().unwrap();
+                if data.len() >= end + 4 + length {
+                    break String::from_utf8_lossy(&data[end + 4..]).into_owned();
+                }
+            }
+        };
+        let sse = format!("data: {}\n\ndata: [DONE]\n\n", json!({"choices": [{"delta": {"content": "yes"}, "finish_reason": "stop"}]}));
+        stream.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}", sse.len()).as_bytes()).await.unwrap();
+        body
+    });
+    let mock = Mock::new(vec![vec![text("Found it. I'll run the tests now.")], vec![text("Tests pass.")]]);
+    let mut cfg = Config::default();
+    cfg.learning.auto = false;
+    cfg.loop_opts.features.unexpected_stop_detection = greencode_core::config::agent_loop::UnexpectedStopDetection::Smart;
+    cfg.model_roles.insert("judge".into(), "judge/j".into());
+    cfg.providers.insert("judge".into(), greencode_core::config::ProviderCfg { kind: "openai".into(), base_url, ..Default::default() });
+    let mut a = agent_cfg("smart-stop", cfg, mock.clone());
+    let (result, _) = run(&mut a, "fix the failing test", Decision::Allow).await;
+    result.unwrap();
+    let asked = judge.await.unwrap();
+    assert!(asked.contains("fix the failing test") && asked.contains("I'll run the tests now"), "{asked}");
+    let seen = mock.seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    assert!(seen[1].1.contains("call the next tool now"), "{}", seen[1].1);
+}
+
 #[tokio::test]
 async fn lsp_definition_uses_the_language_server() {
     if greencode_core::config::executable("rust-analyzer").is_none() {

@@ -168,7 +168,7 @@ marketplace.autoUpdate	起動と更新	プラグインの自動更新	起動時�
 startup.changelogMode	起動と更新	更新内容の表示	更新の説明を要約・詳細・非表示から選ぶ
 session.worktreeScope	起動と更新	再開の対象	再開候補に他の作業ツリーを含めるか
 power.sleepPrevention	電源	スリープの抑止	実行中はスリープを止める
-features.unexpectedStopDetection	エージェント	途中終了の検出	本文なしで止まったときに自動で立て直す
+features.unexpectedStopDetection	エージェント	途中終了の検出	本文なしや出力上限で止まったら続けさせる。smart は「次に〇〇します」で止まった返答も判定して続けさせる
 git.enabled	Git	Git 連携	ブランチや状態、PR の情報を出す
 skills.registryUrl	スキル	スキルの配布元	スキルの検索や公開に使う配布元
 workspace.additionalDirectories	一般	追加の作業フォルダ	毎回のセッションに加える別の作業フォルダ

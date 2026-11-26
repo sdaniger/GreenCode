@@ -348,6 +348,18 @@ fn broad_output(name: &str) -> bool {
 const LOOP_REMINDER: &str = "Your previous reply repeated itself in a loop and was discarded. Continue the task without repeating that block.";
 const TOOL_CALL_REMINDER: &str = "Your reasoning only wrote planning headers and never called a tool. Stop planning and call a tool now.";
 const CONTINUE_REMINDER: &str = "You stopped without a visible reply. Continue the task: call a tool or give the final answer.";
+const CUT_OFF_REMINDER: &str = "Your reply hit the output token limit and was cut off. Continue exactly where it stopped, without repeating or summarizing what you already wrote.";
+const UNEXPECTED_STOP_REMINDER: &str = "You said you would continue with a tool call or action but stopped. The task is incomplete: call the next tool now and do not repeat prior analysis. If no tool is needed, give the final answer now.";
+/// OMP's `unexpected-stop` judge question, criteria kept as examples.
+const STOP_JUDGE: &str = "A coding agent ended its turn with the final message below. Did it stop unexpectedly? \
+A turn that finishes the request, answers it, or asks about something the request left open ends normally, even when it says \
+what it would do next. Asking permission for work the request already asked for is an unexpected stop.\n\
+Unexpected stops:\n- \"I should do the same for the JS eval worker. Doing that now.\"\n- \"Let me run the tests next.\"\n- \"I'll fix that now.\"\n\
+- request \"fix the failing test\", message \"Found the bug. Should I fix it?\"\n\
+Not unexpected stops:\n- \"I've completed the task.\"\n- \"The fix is done and tests pass.\"\n\
+- \"Option 1 is simpler. If you want it, I'll start by finding where the flag is set.\"\n\
+- request \"explain the crash, don't change anything\", message \"The cache is stale. Should I fix it?\"\n\
+Reply with one word: yes or no.";
 
 /// `one-at-a-time` leaves the rest queued for the next request.
 fn steering_batch(queued: &mut Vec<String>, mode: SteeringMode) -> Vec<String> {
@@ -1049,6 +1061,25 @@ impl Agent {
         self.cfg.context_opts.tools_format.dialect()
     }
 
+    /// `features.unexpectedStopDetection: smart`: asks the `judge` role (else the session model) whether a
+    /// text-only final reply stopped short of `request`. Errors and timeouts count as a normal end.
+    async fn stopped_early(&self, request: &str, blocks: &[Block]) -> bool {
+        let text: String = blocks.iter().filter_map(|b| match b {
+            Block::Text { text } => Some(text.as_str()),
+            _ => None,
+        }).collect::<Vec<_>>().join("\n");
+        // The stop is said at the end; a long answer keeps only its tail.
+        let tail: String = text.chars().skip(text.chars().count().saturating_sub(4000)).collect();
+        let prompt = format!("Request:\n{request}\n\nFinal message:\n{tail}");
+        let spec = crate::assist::judge_spec(&self.cfg).unwrap_or_else(|| self.meta.model.clone());
+        // Room for a reasoning model to think before its one word; Anthropic drops thinking below 1024.
+        let judged = crate::textgen::generate(&self.cfg, &spec, STOP_JUDGE, &prompt, 1024);
+        match tokio::time::timeout(std::time::Duration::from_secs(15), judged).await {
+            Ok(Ok(answer)) => answer.trim().to_ascii_lowercase().starts_with("yes"),
+            _ => false,
+        }
+    }
+
     fn can_preview_old_reads(&self) -> bool {
         // Rewriting old reads would move the cached prefix (`provider.appendOnlyContext`).
         self.cfg.old_read_previews && !self.provider.append_only() && !self.cfg.no_tools
@@ -1679,6 +1710,10 @@ Continue the work from this summary and the messages that follow it.\n\n<compact
         let _browser = tools::browser::Settle::new(self.cwd.clone());
         let mut loop_retries = 0u8;
         let mut stop_retries = 0u8;
+        let mut cut_retries = 0u8;
+        // `smart`: the reply to a stop nudge is the final answer, so it is not judged again.
+        let mut stop_nudged = false;
+        let request: String = prompt.chars().take(2000).collect();
         self.repair();
         self.todo_reminders = 0;
         self.todo_mutations = 0;
@@ -1982,7 +2017,15 @@ Continue the work from this summary and the messages that follow it.\n\n<compact
                 }
             }
             if uses.is_empty() {
+                let stops = self.cfg.loop_opts.features.unexpected_stop_detection;
                 if reply.stop == "max_tokens" {
+                    if stops != UnexpectedStopDetection::None && cut_retries < 3 {
+                        cut_retries += 1;
+                        let _ = tx.send(Event::Notify("Reply was cut off at max_tokens; continuing.".into()));
+                        self.push(Message::user(CUT_OFF_REMINDER));
+                        self.save_context()?;
+                        continue;
+                    }
                     let _ = tx.send(Event::Notify("Reply was cut off at max_tokens.".into()));
                 }
                 match crate::assist::settle_final(&mut self.assist, &self.cfg, &self.messages, tx).await {
@@ -2023,6 +2066,18 @@ Continue the work from this summary and the messages that follow it.\n\n<compact
                         self.save_context()?;
                         continue;
                     }
+                }
+                if stops == UnexpectedStopDetection::Smart
+                    && self.perms.mode() != permission::Mode::Plan
+                    && !matches!(reply.stop.as_str(), "max_tokens" | "ttsr_interrupt")
+                    && !std::mem::take(&mut stop_nudged)
+                    && self.stopped_early(&request, &reply.blocks).await
+                {
+                    stop_nudged = true;
+                    let _ = tx.send(Event::Notify("The reply stopped before the work was done; continuing.".into()));
+                    self.push(Message::user(UNEXPECTED_STOP_REMINDER));
+                    self.save_context()?;
+                    continue;
                 }
                 // one-at-a-time leaves queued steers for a follow-up request.
                 if self.steered() {
