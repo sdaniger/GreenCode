@@ -249,6 +249,13 @@ pub fn is_runtime_installed(b: &AcpCfg) -> bool {
         .is_some()
 }
 
+/// The ACP registry's `agy_acp_server.par` (stuck at 1.5.2): it lacks the Orchestrator models and most agy commands.
+pub fn is_legacy_runtime(b: &AcpCfg) -> bool {
+    b.command
+        .first()
+        .is_some_and(|c| c.ends_with("agy_acp_server.par"))
+}
+
 pub fn installed_version() -> Option<String> {
     crate::registry::installed()
         .into_iter()
@@ -256,28 +263,99 @@ pub fn installed_version() -> Option<String> {
         .map(|i| i.version)
 }
 
-pub async fn install_or_update() -> Result<AcpCfg> {
-    let json = crate::registry::fetch().await?;
-    install_from_registry_json(&json).await
+const MANIFEST_URL: &str = "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests";
+
+/// Google's release manifest key for this machine (`darwin_arm64`, `linux_amd64_musl`, …).
+fn manifest_platform() -> Result<String> {
+    let cpu = match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        arch => bail!("Antigravity CLI has no release for {arch}"),
+    };
+    Ok(match std::env::consts::OS {
+        "macos" => format!("darwin_{cpu}"),
+        "windows" => format!("windows_{cpu}"),
+        "linux" => {
+            let loader = format!("/lib/libc.musl-{}.so.1", std::env::consts::ARCH);
+            format!("linux_{cpu}{}", if Path::new(&loader).exists() { "_musl" } else { "" })
+        }
+        os => bail!("Antigravity CLI has no release for {os}"),
+    })
 }
 
-pub async fn install_from_registry_json(json: &str) -> Result<AcpCfg> {
-    let entries = crate::registry::parse(json)?;
-    let entry = entries
-        .into_iter()
-        .find(|e| e.id == REGISTRY_ID || e.id == BACKEND)
-        .context("antigravity-acp was not found in the ACP registry")?;
+/// Turns agy's release manifest into an installable entry that runs `agy acp`.
+pub fn manifest_entry(json: &str) -> Result<crate::registry::Entry> {
+    #[derive(Deserialize)]
+    struct Manifest {
+        version: String,
+        url: String,
+        sha512: String,
+    }
+    let m: Manifest = serde_json::from_str(json).context("malformed Antigravity CLI release manifest")?;
+    let url = url::Url::parse(&m.url).context("malformed Antigravity CLI release URL")?;
+    anyhow::ensure!(
+        url.scheme() == "https" && url.host_str() == Some("storage.googleapis.com"),
+        "the Antigravity CLI manifest does not point at Google's release storage"
+    );
+    anyhow::ensure!(
+        m.sha512.len() == 128 && m.sha512.chars().all(|c| c.is_ascii_hexdigit()),
+        "the Antigravity CLI manifest has no valid SHA-512"
+    );
+    // Archives hold an `antigravity` executable; Windows releases are the bare `.exe`.
+    let cmd = if url.path().ends_with(".exe") { "antigravity.exe" } else { "antigravity" };
+    let binary = json!({"archive": m.url, "cmd": cmd, "args": ["acp"], "sha256": null, "sha512": m.sha512});
+    let registry = json!({"agents": [{
+        "id": REGISTRY_ID,
+        "name": "Google Antigravity",
+        "version": m.version,
+        "distribution": {"binary": {crate::registry::platform(): binary}},
+    }]});
+    crate::registry::parse(&registry.to_string())?
+        .pop()
+        .context("empty Antigravity CLI entry")
+}
+
+/// Installs (or updates to) the newest agy CLI and serves it as the `antigravity` ACP backend.
+pub async fn install_or_update() -> Result<AcpCfg> {
+    let url = format!("{MANIFEST_URL}/{}.json", manifest_platform()?);
+    let json = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()?
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+    let entry = manifest_entry(&json)?;
     let mut cfg = crate::registry::install(&entry).await?;
+    // Earlier versions (and the registry's legacy server) are no longer referenced by the install record.
+    if let Some(current) = Path::new(&cfg.command[0]).parent() {
+        if let Some(Ok(siblings)) = current.parent().map(std::fs::read_dir) {
+            for dir in siblings.flatten().map(|e| e.path()).filter(|p| p != current && p.is_dir()) {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        }
+    }
     cfg.name = BACKEND.into();
     cfg.protocol = Protocol::Acp;
     Ok(cfg)
+}
+
+/// The agy CLI ignores `CODE_ASSIST_ENDPOINT`; `agy acp` takes the endpoint as a flag instead.
+pub fn command_for(command: &[String], env: &BTreeMap<String, String>) -> Vec<String> {
+    let mut command = command.to_vec();
+    if let (Some("acp"), Some(endpoint)) = (command.last().map(String::as_str), env.get("CODE_ASSIST_ENDPOINT")) {
+        command.push(format!("--cloud_code_endpoint={endpoint}"));
+    }
+    command
 }
 
 pub async fn ensure_installed(cfg: &Config) -> Result<(Vec<String>, BTreeMap<String, String>)> {
     if let Some(b) = cfg
         .backends
         .iter()
-        .find(|b| b.name == BACKEND && is_runtime_installed(b))
+        .find(|b| b.name == BACKEND && is_runtime_installed(b) && !is_legacy_runtime(b))
     {
         return Ok((b.command.clone(), b.env.clone()));
     }
@@ -505,6 +583,7 @@ pub async fn start_login(
     let (command, env) = ensure_installed(cfg).await?;
     let mut env = runtime_env(&env, true);
     endpoint_env(cfg.services_extra_opts.antigravity_endpoint, &mut env);
+    let command = command_for(&command, &env);
     let env_vec: Vec<(String, String)> = env.into_iter().collect();
     let (rpc, mut incoming, mut out_rx) = Rpc::spawn_with_output(&command, &env_vec, &cwd)?;
     let init = rpc
@@ -620,15 +699,18 @@ pub fn logout_in(greencode_home: &Path, gemini_home: &Path, clear_keychain: bool
     if clear_keychain {
         #[cfg(target_os = "macos")]
         {
-            if let Ok(status) = std::process::Command::new("/usr/bin/security")
-                .args(["delete-generic-password", "-s", "gemini", "-a", "antigravity-acp"])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-            {
-                if status.success() {
-                    removed = true;
+            // The agy CLI keeps its token under account `antigravity` (shared with a standalone agy); the old ACP server used `antigravity-acp`.
+            for account in ["antigravity", "antigravity-acp"] {
+                if let Ok(status) = std::process::Command::new("/usr/bin/security")
+                    .args(["delete-generic-password", "-s", "gemini", "-a", account])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                {
+                    if status.success() {
+                        removed = true;
+                    }
                 }
             }
         }
@@ -667,5 +749,30 @@ mod tests {
         assert_eq!(select_method_id(&methods, "oauth-business").as_deref(), Some("oauth-business"));
         assert_eq!(select_method_id(&methods, "missing").as_deref(), Some("oauth-personal"));
         assert_eq!(select_method_id(&json!([]), "oauth-personal"), None);
+    }
+
+    #[test]
+    fn release_manifest_becomes_an_agy_acp_entry() {
+        let sha = "a".repeat(128);
+        let manifest = |url: &str| json!({"version": "1.5.17", "url": url, "sha512": sha}).to_string();
+        let entry = manifest_entry(&manifest("https://storage.googleapis.com/antigravity-public/cli.tar.gz")).unwrap();
+        assert_eq!((entry.id.as_str(), entry.version.as_str()), (REGISTRY_ID, "1.5.17"));
+        let bin = &entry.distribution.binary.unwrap()[crate::registry::platform()];
+        assert_eq!((bin.cmd.as_str(), bin.args.as_slice(), bin.sha512.as_deref()), ("antigravity", &["acp".to_string()][..], Some(sha.as_str())));
+        let exe = manifest_entry(&manifest("https://storage.googleapis.com/antigravity-public/cli_windows_x64.exe")).unwrap();
+        assert_eq!(exe.distribution.binary.unwrap()[crate::registry::platform()].cmd, "antigravity.exe");
+        // Only Google's release storage, and only with a real checksum.
+        assert!(manifest_entry(&manifest("https://evil.example/cli.tar.gz")).is_err());
+        assert!(manifest_entry(&json!({"version": "1", "url": "https://storage.googleapis.com/x.tgz", "sha512": "00"}).to_string()).is_err());
+    }
+
+    #[test]
+    fn endpoint_becomes_an_agy_acp_flag() {
+        let env = BTreeMap::from([("CODE_ASSIST_ENDPOINT".to_string(), "https://sandbox".to_string())]);
+        let agy = vec!["/x/antigravity".to_string(), "acp".to_string()];
+        assert_eq!(command_for(&agy, &env)[2], "--cloud_code_endpoint=https://sandbox");
+        assert_eq!(command_for(&agy, &BTreeMap::new()), agy);
+        let legacy = vec!["/x/agy_acp_server.par".to_string()];
+        assert_eq!(command_for(&legacy, &env), legacy);
     }
 }

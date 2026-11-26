@@ -557,12 +557,16 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             (Some("install"), Some(id), 3) => {
-                let lookup = if id == "antigravity" { greencode_core::antigravity::REGISTRY_ID } else { id.as_str() };
                 let rt = tokio::runtime::Runtime::new()?;
+                if greencode_core::antigravity::is_alias(id) || id == greencode_core::antigravity::REGISTRY_ID {
+                    rt.block_on(greencode_core::antigravity::install_or_update())?;
+                    println!("Installed Google Antigravity {}", greencode_core::antigravity::installed_version().unwrap_or_default());
+                    return Ok(());
+                }
                 let entries = registry::parse(&rt.block_on(registry::fetch())?)?;
-                let entry = entries.iter().find(|e| e.id == lookup).ok_or_else(|| anyhow::anyhow!("unknown registry agent: {id}"))?;
+                let entry = entries.iter().find(|e| e.id == *id).ok_or_else(|| anyhow::anyhow!("unknown registry agent: {id}"))?;
                 rt.block_on(registry::install(entry))?;
-                println!("Installed {} ({lookup})", entry.name);
+                println!("Installed {} ({id})", entry.name);
             }
             (Some("remove"), Some(id), 3) => {
                 let lookup = if id == "antigravity" { greencode_core::antigravity::REGISTRY_ID } else { id.as_str() };

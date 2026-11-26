@@ -305,6 +305,15 @@ async fn make_backend(
         .iter()
         .find(|b| b.name == bname)
         .ok_or_else(|| anyhow::anyhow!("unknown backend `{}`", meta.backend))?;
+    // The registry's legacy server lacks the Orchestrator models and agy's commands: switch to the agy CLI once.
+    let upgraded;
+    let b = if bname == antigravity::BACKEND && antigravity::is_legacy_runtime(b) {
+        let (command, env) = antigravity::ensure_installed(cfg).await?;
+        upgraded = config::AcpCfg { command, env, ..b.clone() };
+        &upgraded
+    } else {
+        b
+    };
     if bname == antigravity::BACKEND && !antigravity::is_runtime_installed(b) {
         anyhow::bail!("Google Antigravity ランタイムが未インストールです。/login antigravity または 設定 → 接続（CLI では greencode-cli auth login antigravity）を実行してください");
     }

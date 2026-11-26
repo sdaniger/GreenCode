@@ -2,7 +2,7 @@
 use std::{collections::BTreeMap, path::{Component, Path}};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512};
 use crate::config::{AcpCfg, Protocol};
 
 const URL: &str = "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json";
@@ -40,6 +40,8 @@ pub struct Binary {
     #[serde(default)] pub args: Vec<String>,
     #[serde(default)] pub env: BTreeMap<String, String>,
     pub sha256: Option<String>,
+    /// Google's agy release manifest publishes SHA-512 instead.
+    #[serde(default)] pub sha512: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -96,8 +98,9 @@ fn records() -> Result<Vec<Installed>> {
 pub fn installed() -> Vec<Installed> { records().unwrap_or_default() }
 
 /// Installed entries the registry lists at another version; only those are update candidates.
+/// Antigravity is skipped: GreenCode installs it from Google's agy release manifest, which runs ahead of the registry.
 pub fn outdated(installed: &[Installed], entries: &[Entry]) -> Vec<Entry> {
-    entries.iter().filter(|entry| installed.iter().any(|i| i.id == entry.id && i.version != entry.version)).cloned().collect()
+    entries.iter().filter(|entry| entry.id != crate::antigravity::REGISTRY_ID && installed.iter().any(|i| i.id == entry.id && i.version != entry.version)).cloned().collect()
 }
 
 /// `marketplace.autoUpdate`: what startup does with the update candidates.
@@ -230,6 +233,7 @@ pub async fn install(entry: &Entry) -> Result<AcpCfg> {
             bytes.extend_from_slice(&chunk);
         }
         if let Some(expected) = &b.sha256 { anyhow::ensure!(format!("{:x}", Sha256::digest(&bytes)).eq_ignore_ascii_case(expected), "archive sha256 mismatch"); }
+        if let Some(expected) = &b.sha512 { anyhow::ensure!(format!("{:x}", Sha512::digest(&bytes)).eq_ignore_ascii_case(expected), "archive sha512 mismatch"); }
         let agents = crate::home().join("agents");
         std::fs::create_dir_all(&agents)?;
         anyhow::ensure!(!std::fs::symlink_metadata(&agents)?.file_type().is_symlink(), "agents directory is a symlink");
@@ -237,17 +241,22 @@ pub async fn install(entry: &Entry) -> Result<AcpCfg> {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let stage = Staging(agents.join(format!(".stage-{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))));
         std::fs::create_dir(&stage.0)?;
-        let archive = stage.0.join(".download");
-        std::fs::write(&archive, &bytes)?;
         let contents = stage.0.join("contents");
         std::fs::create_dir(&contents)?;
         let url = b.archive.split('?').next().unwrap_or(&b.archive);
-        let zip = url.ends_with(".zip");
-        let (program, args): (&str, &[&str]) = if zip { ("/usr/bin/unzip", &["-q", "-o"]) } else if url.ends_with(".tar.gz") || url.ends_with(".tgz") { ("tar", &["xzf"]) } else if url.ends_with(".tar.bz2") { ("tar", &["xjf"]) } else { bail!("unsupported archive format") };
-        check_archive(&archive, zip).await?;
-        let status = tokio::process::Command::new(program).args(args).arg(&archive).current_dir(&contents).status().await?;
-        std::fs::remove_file(&archive)?;
-        anyhow::ensure!(status.success(), "archive extraction failed: {status}");
+        if url.ends_with(".exe") {
+            // A bare executable (agy's Windows releases): the download is the command itself.
+            std::fs::write(contents.join(relative), &bytes)?;
+        } else {
+            let archive = stage.0.join(".download");
+            std::fs::write(&archive, &bytes)?;
+            let zip = url.ends_with(".zip");
+            let (program, args): (&str, &[&str]) = if zip { ("/usr/bin/unzip", &["-q", "-o"]) } else if url.ends_with(".tar.gz") || url.ends_with(".tgz") { ("tar", &["xzf"]) } else if url.ends_with(".tar.bz2") { ("tar", &["xjf"]) } else { bail!("unsupported archive format") };
+            check_archive(&archive, zip).await?;
+            let status = tokio::process::Command::new(program).args(args).arg(&archive).current_dir(&contents).status().await?;
+            std::fs::remove_file(&archive)?;
+            anyhow::ensure!(status.success(), "archive extraction failed: {status}");
+        }
         finalize_extracted(&contents)?;
         let cmd = std::fs::canonicalize(contents.join(relative)).context("archive command missing")?;
         anyhow::ensure!(cmd.starts_with(&contents) && cmd.is_file(), "archive command is not a file inside the install directory");

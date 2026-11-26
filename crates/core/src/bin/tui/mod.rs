@@ -1127,7 +1127,9 @@ impl App<'_> {
                     return self.local("skill", name);
                 }
             }
-            if !matches!(cmd, "compact" | "ratchet") && COMMANDS.iter().any(|(name, _)| *name == cmd) {
+            // An external backend's own command of the same name (agy's /goal, /plan, /schedule…) wins, as in the GUI.
+            let backend_owned = self.meta.backend != "native" && self.commands.iter().any(|name| name == cmd);
+            if !backend_owned && !matches!(cmd, "compact" | "ratchet") && COMMANDS.iter().any(|(name, _)| *name == cmd) {
                 return self.local(cmd, arg.trim());
             }
         }

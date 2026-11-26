@@ -134,7 +134,7 @@ Open ⌘K and select a backend in a new thread: `pi`, `omp`, `opencode`, `codex`
 Pi, OMP and OpenCode are discovered in common installation directories even when Finder's PATH is minimal.
 Kiro, Grok Build, fx and Gemini CLI appear as `kiro`, `grok`, `fx` and `gemini` when their executables are installed.
 Those directories are also appended to subprocess PATH so script-based agents can find Node/Bun.
-They use their own credentials, skills, extensions, MCP setup and native conversation state. Codex/Claude use pinned ACP adapters via npx. Google Antigravity uses the official `antigravity-acp` ACP runtime (downloaded from the ACP registry or using an installed `agy` CLI) with Google OAuth sign-in, matching T3 Code.
+They use their own credentials, skills, extensions, MCP setup and native conversation state. Codex/Claude use pinned ACP adapters via npx. Google Antigravity runs the official agy CLI (`agy acp`, installed from Google's SHA-512-checked release manifest) with Google OAuth sign-in, so its full model list (including the Orchestrator models) and its slash commands (`/goal`, `/teamwork`, `/boost`, `/swarm`, `/schedule`, …) are available.
 
 ```sh
 greencode-cli --backends
@@ -204,7 +204,7 @@ The reasoning column offers model-specific native effort levels, Pi/OMP thinking
 - **ChatGPT Plus/Pro** (`/login chatgpt`): device flow like Copilot; the native loop then talks to the Codex Responses endpoint as `chatgpt/<model>`. Tokens go to `~/.greencode/chatgpt-oauth.json` (600) and refresh automatically.
 - **GitHub Copilot**: device flow. The code is copied to the clipboard and the browser opens; approve there and GreenCode finishes by itself.
 - **Mistral Vibe** (`/login vibe`, or the browser chip in `/login mistral`): the same browser sign-in as the Vibe CLI and OMP. Approve in the browser; GreenCode exchanges it for a regular Mistral API key billed against the plan's Vibe quota and stores it as the `mistral` key in `~/.greencode/auth.json`.
-- **Google Antigravity** (`/login antigravity`, or Settings → 接続): uses the official `antigravity-acp` runtime (auto-installed from the ACP registry, or installed `agy acp`) and signs in via Google OAuth (`oauth-personal` / `oauth-business`) or `GEMINI_API_KEY`; credentials stay inside the official runtime's storage (`~/.gemini/antigravity-acp/`).
+- **Google Antigravity** (`/login antigravity`, or Settings → 接続): runs the official agy CLI as `agy acp` (auto-installed and updated from Google's release manifest, or an installed `agy`; the older registry `antigravity-acp` server is replaced on first use) and signs in via Google OAuth (`oauth-personal` / `oauth-business`) or `GEMINI_API_KEY`; credentials stay in agy's own storage (macOS keychain `gemini`/`antigravity`). Backend commands with the same name as a GreenCode command go to agy.
 - **API-key providers** (`/login openai`): one masked field. The key is stored in `~/.greencode/auth.json` (600), replacing any earlier one.
 - `/logout [provider]` (also in the palette and Settings → 接続) removes a stored key or subscription. `/usage` shows Claude and Copilot subscription limits. Select text in a reply and press ⇧⌘C to quote it into the draft with a comment.
 

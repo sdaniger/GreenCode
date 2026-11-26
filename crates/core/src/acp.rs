@@ -59,7 +59,8 @@ impl Acp {
         // `op://` values in `[[backends]] env` are read here so an error names the backend.
         let who = format!("backend {}", meta.backend);
         let env = env.iter().map(|(k, v)| Ok((k.clone(), crate::secrets::resolve(v, &who)?))).collect::<Result<Vec<_>>>()?;
-        let (rpc, incoming, mut out_rx) = Rpc::spawn_with_output(command, &env, &meta.cwd)?;
+        let command = if crate::antigravity::is_alias(&meta.backend) { crate::antigravity::command_for(command, &env.iter().cloned().collect()) } else { command.to_vec() };
+        let (rpc, incoming, mut out_rx) = Rpc::spawn_with_output(&command, &env, &meta.cwd)?;
         let init = rpc.request("initialize", json!({
             "protocolVersion": 1,
             "clientCapabilities": {"fs": {"readTextFile": true, "writeTextFile": true}},

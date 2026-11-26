@@ -8,7 +8,7 @@ use greencode_core::{
     session::{Meta, Session},
     Command, Event,
 };
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha512};
 use std::{
     os::unix::fs::PermissionsExt,
     path::PathBuf,
@@ -61,14 +61,8 @@ async fn managed_zip_install_sets_permissions_and_exposes_single_backend() {
         std::env::set_var("GEMINI_HOME", &gemini);
     }
 
-    let zip_bytes = build_zip(
-        &root,
-        &[
-            ("agy_acp_server.par", b"#!/bin/sh\necho ok\n"),
-            ("localharness_external", b"#!/bin/sh\necho harness\n"),
-        ],
-    );
-    let sha256 = format!("{:x}", Sha256::digest(&zip_bytes));
+    let zip_bytes = build_zip(&root, &[("antigravity", b"#!/bin/sh\necho ok\n")]);
+    let sha512 = format!("{:x}", Sha512::digest(&zip_bytes));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let served = zip_bytes.clone();
@@ -90,56 +84,26 @@ async fn managed_zip_install_sets_permissions_and_exposes_single_backend() {
         }
     });
 
-    let bad_registry = serde_json::json!({
-        "agents": [{
-            "id": "antigravity-acp",
+    // The shape `antigravity::manifest_entry` builds from Google's release manifest, served locally.
+    let entry = |sha512: &str| {
+        let json = serde_json::json!({"agents": [{
+            "id": antigravity::REGISTRY_ID,
             "name": "Google Antigravity",
-            "version": "1.5.0",
-            "description": "Google's AI coding agent",
-            "distribution": {
-                "binary": {
-                    registry::platform(): {
-                        "archive": format!("http://{addr}/agy-acp-server.zip"),
-                        "cmd": "./agy_acp_server.par",
-                        "sha256": "deadbeef"
-                    }
-                }
-            }
-        }]
-    });
-    let err = antigravity::install_from_registry_json(&bad_registry.to_string())
-        .await
-        .unwrap_err();
-    assert!(err.to_string().contains("sha256"), "{err:#}");
-
-    let good_registry = serde_json::json!({
-        "agents": [{
-            "id": "antigravity-acp",
-            "name": "Google Antigravity",
-            "version": "1.5.0",
-            "description": "Google's AI coding agent",
-            "distribution": {
-                "binary": {
-                    registry::platform(): {
-                        "archive": format!("http://{addr}/agy-acp-server.zip"),
-                        "cmd": "./agy_acp_server.par",
-                        "sha256": sha256
-                    }
-                }
-            }
-        }]
-    });
-    let installed_cfg = antigravity::install_from_registry_json(&good_registry.to_string())
-        .await
-        .unwrap();
-    assert_eq!(installed_cfg.name, "antigravity");
-    let install_dir = home.join("agents/antigravity-acp/1.5.0");
-    let server_bin = install_dir.join("agy_acp_server.par");
-    let harness_bin = install_dir.join("localharness_external");
-    assert!(server_bin.is_file());
-    assert!(harness_bin.is_file());
-    assert_ne!(std::fs::metadata(&server_bin).unwrap().permissions().mode() & 0o111, 0);
-    assert_ne!(std::fs::metadata(&harness_bin).unwrap().permissions().mode() & 0o111, 0);
+            "version": "1.5.17",
+            "distribution": {"binary": {registry::platform(): {
+                "archive": format!("http://{addr}/cli.zip"),
+                "cmd": "antigravity",
+                "args": ["acp"],
+                "sha512": sha512,
+            }}},
+        }]});
+        registry::parse(&json.to_string()).unwrap().pop().unwrap()
+    };
+    let err = registry::install(&entry(&"0".repeat(128))).await.unwrap_err();
+    assert!(err.to_string().contains("sha512"), "{err:#}");
+    registry::install(&entry(&sha512)).await.unwrap();
+    let agy = home.join("agents/antigravity-acp/1.5.17/antigravity");
+    assert_ne!(std::fs::metadata(&agy).unwrap().permissions().mode() & 0o111, 0);
 
     let loaded = Config::load().unwrap();
     let ag_backends: Vec<_> = loaded
@@ -149,8 +113,11 @@ async fn managed_zip_install_sets_permissions_and_exposes_single_backend() {
         .collect();
     assert_eq!(ag_backends.len(), 1);
     assert_eq!(ag_backends[0].name, "antigravity");
-    assert!(ag_backends[0].command[0].ends_with("agy_acp_server.par"));
+    assert!(ag_backends[0].command[0].ends_with("/antigravity"));
+    assert_eq!(ag_backends[0].command[1], "acp");
     assert!(antigravity::is_runtime_installed(ag_backends[0]));
+    assert!(!antigravity::is_legacy_runtime(ag_backends[0]));
+    assert_eq!(antigravity::installed_version().as_deref(), Some("1.5.17"));
 
     server.await.unwrap();
     std::fs::remove_dir_all(&root).unwrap();
