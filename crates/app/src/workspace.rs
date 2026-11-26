@@ -8772,10 +8772,14 @@ impl Workspace {
                                 ),
                             )
                         })
-                        .child(control_button("model", format!("{model} ▾"), pal)
+                        .child(control_button("model", "", pal)
                             .accessibility_label(format!("モデルを選択: {model}"))
                             .max_w(px(220.))
-                            .truncate()
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .children(models::harness_icon(&backend, 14., pal.fg))
+                            .child(div().min_w_0().truncate().child(format!("{model} ▾")))
                             .on_click(cx.listener(
                                 |this, _: &ClickEvent, window, cx| this.open_model_picker(window, cx),
                             )))

@@ -36,6 +36,24 @@ pub(super) fn is_reasoning_option(option: &Value) -> bool {
     )
 }
 
+/// The harness's logo as T3 Code shows it: brand colors where the mark has one, else `color`.
+pub(super) fn harness_icon(backend: &str, size: f32, color: Hsla) -> Option<AnyElement> {
+    let (path, color) = match backend {
+        "native" => return Some(img("harness/native.svg").size(px(size)).flex_shrink_0().into_any_element()),
+        "antigravity" => return Some(img("harness/antigravity.png").size(px(size)).flex_shrink_0().into_any_element()),
+        "claude-code" | "claude" => ("harness/claude.svg", rgb(0xd97757).into()),
+        "codex" => ("harness/codex.svg", color),
+        "opencode" => ("harness/opencode.svg", color),
+        "pi" => ("harness/pi.svg", color),
+        "kiro" => ("harness/kiro.svg", color),
+        "grok" => ("harness/grok.svg", color),
+        "cursor" => ("harness/cursor.svg", color),
+        "devin" => ("harness/devin.svg", color),
+        _ => return None,
+    };
+    Some(svg().path(path).size(px(size)).flex_shrink_0().text_color(color).into_any_element())
+}
+
 fn effort_label(value: &str) -> String {
     match value {
         "low" => "Low".into(),
@@ -592,8 +610,11 @@ impl Workspace {
         );
         for (key, label) in self.model_providers(cx) {
             let selected = picker.provider.as_deref() == Some(key.as_str());
-            // Two letters of the backend name stand in for T3's provider icons.
             let initials: String = label.chars().take(2).collect::<String>().to_uppercase();
+            let color = if selected { pal.fg } else { pal.muted };
+            let icon = harness_icon(&key, 20., color).unwrap_or_else(|| {
+                div().text_size(px(11.)).text_color(color).child(SharedString::from(initials)).into_any_element()
+            });
             let pick = key.clone();
             rail = rail.child(
                 div()
@@ -613,12 +634,7 @@ impl Workspace {
                         }
                         cx.notify();
                     }))
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(if selected { pal.fg } else { pal.muted })
-                            .child(SharedString::from(initials)),
-                    ),
+                    .child(icon),
             );
         }
 
@@ -650,6 +666,7 @@ impl Workspace {
                 let display = row.name.clone();
                 let id = row.id.clone();
                 let shortcut = (ix < 9).then(|| format!("⌘{}", ix + 1));
+                let icon = harness_icon(&row.backend, 16., pal.fg);
                 list = list.child(
                     div()
                         .id(("model-row", ix))
@@ -666,6 +683,7 @@ impl Workspace {
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                             this.choose_model(row.clone(), window, cx)
                         }))
+                        .children(icon)
                         .child(
                             div()
                                 .flex_1()

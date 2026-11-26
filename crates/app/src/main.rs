@@ -6,6 +6,32 @@ use greencode_core::config::Config;
 
 actions!(greencode, [Quit]);
 
+/// gpui-kit's icons plus the harness logos shown in the model picker.
+struct Assets;
+
+impl AssetSource for Assets {
+    fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        let bytes: &'static [u8] = match path {
+            "harness/native.svg" => include_bytes!("../../../packaging/app-icon.svg"),
+            "harness/antigravity.png" => include_bytes!("../assets/harness/antigravity.png"),
+            "harness/claude.svg" => include_bytes!("../assets/harness/claude.svg"),
+            "harness/codex.svg" => include_bytes!("../assets/harness/codex.svg"),
+            "harness/opencode.svg" => include_bytes!("../assets/harness/opencode.svg"),
+            "harness/pi.svg" => include_bytes!("../assets/harness/pi.svg"),
+            "harness/kiro.svg" => include_bytes!("../assets/harness/kiro.svg"),
+            "harness/grok.svg" => include_bytes!("../assets/harness/grok.svg"),
+            "harness/cursor.svg" => include_bytes!("../assets/harness/cursor.svg"),
+            "harness/devin.svg" => include_bytes!("../assets/harness/devin.svg"),
+            _ => return gpui_kit::assets::Assets.load(path),
+        };
+        Ok(Some(std::borrow::Cow::Borrowed(bytes)))
+    }
+
+    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+        gpui_kit::assets::Assets.list(path)
+    }
+}
+
 fn main() {
     let (cfg, cfg_error) = match Config::load() {
         Ok(c) => (c, None),
@@ -24,7 +50,7 @@ fn main() {
     }
     let app = gpui_kit::application();
     app.on_open_urls(move |urls| urls.into_iter().for_each(|u| drop(links.send(u))));
-    app.with_assets(gpui_kit::assets::Assets).run(move |cx| {
+    app.with_assets(Assets).run(move |cx| {
         gpui_kit::init(cx);
         // ⌘Q goes through Workspace::on_key so `quit_mode` can require a hold or two presses.
         // The menu's Quit action, if a menu is installed, still quits directly.
