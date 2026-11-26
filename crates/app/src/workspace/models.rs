@@ -45,6 +45,7 @@ pub(super) fn harness_icon(backend: &str, size: f32, color: Hsla) -> Option<AnyE
         "codex" => ("harness/codex.svg", color),
         "opencode" => ("harness/opencode.svg", color),
         "pi" => ("harness/pi.svg", color),
+        "omp" => ("harness/omp.svg", color),
         "kiro" => ("harness/kiro.svg", color),
         "grok" => ("harness/grok.svg", color),
         "cursor" => ("harness/cursor.svg", color),

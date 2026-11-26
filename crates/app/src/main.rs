@@ -18,6 +18,7 @@ impl AssetSource for Assets {
             "harness/codex.svg" => include_bytes!("../assets/harness/codex.svg"),
             "harness/opencode.svg" => include_bytes!("../assets/harness/opencode.svg"),
             "harness/pi.svg" => include_bytes!("../assets/harness/pi.svg"),
+            "harness/omp.svg" => include_bytes!("../assets/harness/omp.svg"),
             "harness/kiro.svg" => include_bytes!("../assets/harness/kiro.svg"),
             "harness/grok.svg" => include_bytes!("../assets/harness/grok.svg"),
             "harness/cursor.svg" => include_bytes!("../assets/harness/cursor.svg"),
