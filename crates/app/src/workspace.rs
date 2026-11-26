@@ -2791,8 +2791,11 @@ impl Workspace {
             } else {
                 PathBuf::new()
             };
+            // Models cached from the legacy Antigravity server miss most of agy's list; probing upgrades it.
+            let legacy = b.name == greencode_core::antigravity::BACKEND && greencode_core::antigravity::is_legacy_runtime(b);
             let known = self.probed.contains(&(b.name.clone(), scope.clone()))
-                || (cached.get(&b.name).is_some_and(|models| !models.is_empty())
+                || (!legacy
+                    && cached.get(&b.name).is_some_and(|models| !models.is_empty())
                     && self.backend_options.contains_key(&b.name));
             // Config resolves installed agents to an absolute path; skip the ones that are not installed.
             if (known && !force)

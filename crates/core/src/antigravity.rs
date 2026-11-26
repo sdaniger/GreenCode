@@ -359,6 +359,11 @@ pub async fn ensure_installed(cfg: &Config) -> Result<(Vec<String>, BTreeMap<Str
     {
         return Ok((b.command.clone(), b.env.clone()));
     }
+    // A probe may already have upgraded the runtime while this process still holds the legacy config.
+    let (command, env, _) = resolve_command();
+    if command.first().is_some_and(|c| Path::new(c).is_file() && !c.ends_with("agy_acp_server.par")) {
+        return Ok((command, env));
+    }
     let installed = install_or_update().await?;
     Ok((installed.command, installed.env))
 }
