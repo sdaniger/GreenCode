@@ -3454,6 +3454,7 @@ dependencies = [
  "reqwest",
  "resvg 0.46.0",
  "rusqlite",
+ "semver",
  "serde",
  "serde-saphyr",
  "serde_json",

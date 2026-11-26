@@ -9,7 +9,8 @@ use std::{fs, path::Path, process::{Command, Stdio}, time::Duration};
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_REPO: &str = "sdaniger/GreenCode";
 const MAX_ASSET_BYTES: usize = 128 * 1024 * 1024;
-const MAX_FEED_BYTES: usize = 64 * 1024;
+// shortcut: the manifest lists every ancestor; revisit encoding before the repo reaches 24,000 commits.
+const MAX_FEED_BYTES: usize = 1024 * 1024;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -46,8 +47,11 @@ pub struct UpdateResult {
 }
 
 #[derive(Deserialize)]
-struct MainFeed {
+struct ReleaseFeed {
     commit: String,
+    // Older manifests have no ancestry proof and cannot authorize an update.
+    #[serde(default)]
+    ancestors: Vec<String>,
     sha256: std::collections::BTreeMap<String, String>,
 }
 
@@ -92,7 +96,10 @@ pub async fn run(repo: &str, channel: Channel, executable: Option<&Path>) -> Res
         .https_only(true)
         .timeout(Duration::from_secs(120))
         .build()?;
-    update_from(&client, "https://github.com", &repo, channel, main_commit(), executable).await
+    let main = main_commit();
+    let commit = main.or_else(|| option_env!("GREENCODE_RELEASE_COMMIT").filter(|sha| valid_commit(sha)));
+    let current = main.map_or_else(|| CURRENT_VERSION.into(), |sha| format!("main@{}", &sha[..12]));
+    update_from(&client, "https://github.com", &repo, channel, current, commit, executable).await
 }
 
 async fn update_from(
@@ -100,13 +107,13 @@ async fn update_from(
     github: &str,
     repo: &str,
     channel: Channel,
+    current: String,
     commit: Option<&str>,
     executable: Option<&Path>,
 ) -> Result<UpdateResult> {
     let name = asset_name()?;
     let releases = format!("{github}/{repo}/releases");
-    let current = commit.map_or_else(|| CURRENT_VERSION.into(), |sha| format!("main@{}", &sha[..12]));
-    let (latest, url, available, tag, digest) = match channel {
+    let stable = match channel {
         Channel::Stable => {
             let response = client.get(format!("{releases}/latest")).send().await
                 .and_then(reqwest::Response::error_for_status)
@@ -119,38 +126,38 @@ async fn update_from(
                     && path.eq_ignore_ascii_case(&format!("/{repo}/releases/tag")),
                 "no stable release is published yet"
             );
-            let version = tag.strip_prefix('v').filter(|version| {
-                !version.is_empty() && version.bytes().all(|b| valid_repo_byte(b) || b == b'+')
-            }).context("invalid stable release tag")?;
-            let checksum_url = format!("{releases}/download/{tag}/SHA256SUMS");
-            let bytes = download(client, &checksum_url, MAX_FEED_BYTES).await
-                .context("could not read the stable release checksums")?;
-            let digest = checksum_for(std::str::from_utf8(&bytes)?, &name)
-                .with_context(|| format!("stable release {tag} has no checksum for {name}"))?;
-            (
-                version.to_owned(),
-                url.to_string(),
-                commit.is_some() || compare_versions(CURRENT_VERSION, version).is_lt(),
-                tag.to_owned(),
-                digest,
-            )
+            let version = tag.strip_prefix('v').context("invalid stable release tag")?;
+            let newer = semver::Version::parse(version).context("invalid stable release version")?
+                .cmp_precedence(&semver::Version::parse(CURRENT_VERSION)?).is_gt();
+            if !newer {
+                let latest = version.to_owned();
+                return Ok(UpdateResult { current, latest, url: url.into(), available: false, installed: false });
+            }
+            Some((tag.to_owned(), version.to_owned(), url.to_string()))
         }
-        Channel::Main => {
-            let tag = "main-build";
-            let feed_url = format!("{releases}/download/{tag}/update.json");
-            let bytes = download(client, &feed_url, MAX_FEED_BYTES).await
-                .context("could not read the main update feed; retry once the build is published")?;
-            let feed: MainFeed = serde_json::from_slice(&bytes).context("invalid main update feed")?;
-            let sha = feed.commit.as_str();
-            anyhow::ensure!(valid_commit(sha), "main update feed has no valid commit SHA");
-            let digest = feed.sha256.get(&name).and_then(|value| parse_digest(value))
-                .with_context(|| format!("main update feed has no checksum for {name}"))?;
-            (format!("main@{}", &sha[..12]), format!("{github}/{repo}/commit/{sha}"), commit != Some(sha), tag.into(), digest)
-        }
+        Channel::Main => None,
     };
-    let installed = if let Some(executable) = executable.filter(|_| available) {
-        let archive_url = format!("{releases}/download/{tag}/{name}");
-        let archive = download(client, &archive_url, MAX_ASSET_BYTES).await
+    let tag = stable.as_ref().map_or("main-build", |(tag, _, _)| tag.as_str());
+    let archive_url = format!("{releases}/download/{tag}");
+    let bytes = download(client, &format!("{archive_url}/update.json"), MAX_FEED_BYTES).await
+        .context("could not read the update manifest; retry once the build is published")?;
+    let feed: ReleaseFeed = serde_json::from_slice(&bytes).context("invalid update manifest")?;
+    let sha = feed.commit.as_str();
+    anyhow::ensure!(valid_commit(sha), "update manifest has no valid commit SHA");
+    let (latest, url) = match stable {
+        Some((_, version, url)) => (version, url),
+        None => (format!("main@{}", &sha[..12]), format!("{github}/{repo}/commit/{sha}")),
+    };
+    let available = commit.is_some_and(|current| {
+        !sha.eq_ignore_ascii_case(current)
+            && feed.ancestors.iter().any(|ancestor| ancestor.eq_ignore_ascii_case(current))
+    });
+    let digest = available.then(|| {
+        feed.sha256.get(&name).and_then(|value| parse_digest(value))
+            .with_context(|| format!("update manifest has no checksum for {name}"))
+    }).transpose()?;
+    let installed = if let (Some(executable), Some(digest)) = (executable, digest) {
+        let archive = download(client, &format!("{archive_url}/{name}"), MAX_ASSET_BYTES).await
             .context("could not download the update archive")?;
         let actual = format!("{:x}", Sha256::digest(&archive));
         anyhow::ensure!(actual == digest, "update checksum mismatch; retry after the release finishes publishing");
@@ -160,19 +167,6 @@ async fn update_from(
         false
     };
     Ok(UpdateResult { current, latest, url, available, installed })
-}
-
-fn compare_versions(current: &str, latest: &str) -> std::cmp::Ordering {
-    let parse = |value: &str| -> Option<Vec<u64>> {
-        let value = value.split_once('-').map_or(value, |(v, _)| v);
-        let parts: Vec<_> = value.split('.').collect();
-        if parts.is_empty() || parts.iter().any(|part| part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit())) { return None; }
-        parts.into_iter().map(str::parse).collect::<std::result::Result<Vec<_>, _>>().ok()
-    };
-    match (parse(current), parse(latest)) {
-        (Some(a), Some(b)) => (0..a.len().max(b.len())).find_map(|i| (a.get(i).copied().unwrap_or(0) != b.get(i).copied().unwrap_or(0)).then_some(a.get(i).copied().unwrap_or(0).cmp(&b.get(i).copied().unwrap_or(0)))).unwrap_or(std::cmp::Ordering::Equal),
-        _ => current.cmp(latest),
-    }
 }
 
 async fn download(client: &Client, url: &str, limit: usize) -> Result<Vec<u8>> {
@@ -192,15 +186,6 @@ async fn download(client: &Client, url: &str, limit: usize) -> Result<Vec<u8>> {
 fn parse_digest(value: &str) -> Option<String> {
     let value = value.strip_prefix("sha256:").unwrap_or(value).trim();
     (value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())).then(|| value.to_ascii_lowercase())
-}
-
-fn checksum_for(text: &str, name: &str) -> Option<String> {
-    text.lines().find_map(|line| {
-        let mut fields = line.split_whitespace();
-        let digest = parse_digest(fields.next()?)?;
-        let file = fields.next()?.trim_start_matches('*');
-        (Path::new(file).file_name().and_then(|n| n.to_str()) == Some(name)).then_some(digest)
-    })
 }
 
 fn asset_name() -> Result<String> {
@@ -261,19 +246,6 @@ mod tests {
         assert!(normalize_repository("acme/..").is_err());
     }
 
-    #[test]
-    fn release_version_comparison_pads_components() {
-        assert!(compare_versions("0.1.0", "v0.1.1").is_lt());
-        assert!(!compare_versions("0.1.0", "0.1.0").is_lt());
-        assert!(!compare_versions("0.1.10", "0.1.2").is_lt());
-    }
-
-    #[test]
-    fn checksum_lines_match_archive_names() {
-        let digest = "a".repeat(64);
-        assert_eq!(checksum_for(&format!("{digest} *greencode-macos-arm64.tar.gz\n"), "greencode-macos-arm64.tar.gz"), Some(digest));
-    }
-
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn public_release_feeds_verify_downloads_before_replacement() {
@@ -301,21 +273,36 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let sha = "0123456789abcdef0123456789abcdef01234567";
+        let older = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let unrelated = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let name = asset_name().unwrap();
         let digest = format!("{:x}", Sha256::digest(&archive));
-        let stable_checksums = format!("{digest}  {name}\n");
-        let feed = serde_json::to_vec(&serde_json::json!({
+        let legacy_feed = serde_json::to_vec(&serde_json::json!({
             "commit": sha, "sha256": { (name.as_str()): digest },
+        })).unwrap();
+        let stale_feed = serde_json::to_vec(&serde_json::json!({
+            "commit": older, "ancestors": [], "sha256": { (name.as_str()): digest },
+        })).unwrap();
+        let feed = serde_json::to_vec(&serde_json::json!({
+            "commit": sha, "ancestors": [older], "sha256": { (name.as_str()): digest },
         })).unwrap();
         let archive_path = format!("/acme/green/releases/download/main-build/{name}");
         let server = tokio::spawn(async move {
             let feed_path = "/acme/green/releases/download/main-build/update.json";
             let stable_path = "/acme/green/releases/tag/v99.0.0";
             let redirect = format!("302 Found\r\nLocation: {stable_path}");
+            let same_version_path = format!("/acme/green/releases/tag/v{CURRENT_VERSION}");
+            let same_version = format!("302 Found\r\nLocation: {same_version_path}");
             for (path, status, body) in [
+                ("/acme/green/releases/latest", same_version.as_str(), b"".as_slice()),
+                (same_version_path.as_str(), "200 OK", b"".as_slice()),
                 ("/acme/green/releases/latest", redirect.as_str(), b"".as_slice()),
                 (stable_path, "200 OK", b"".as_slice()),
-                ("/acme/green/releases/download/v99.0.0/SHA256SUMS", "200 OK", stable_checksums.as_bytes()),
+                ("/acme/green/releases/download/v99.0.0/update.json", "200 OK", feed.as_slice()),
+                (feed_path, "200 OK", legacy_feed.as_slice()),
+                (feed_path, "200 OK", stale_feed.as_slice()),
+                (feed_path, "200 OK", feed.as_slice()),
+                (feed_path, "200 OK", feed.as_slice()),
                 (feed_path, "200 OK", feed.as_slice()),
                 (feed_path, "200 OK", feed.as_slice()),
                 (feed_path, "200 OK", b"{}"),
@@ -341,29 +328,37 @@ mod tests {
         });
 
         let client = Client::builder().no_proxy().timeout(Duration::from_secs(5)).build().unwrap();
-        let stable = update_from(&client, &base, "acme/green", Channel::Stable, None, None).await.unwrap();
+        let same_version = update_from(&client, &base, "acme/green", Channel::Stable, "main@aaaa".into(), Some(older), Some(&executable)).await.unwrap();
+        assert!(!same_version.available && !same_version.installed);
+        let stable = update_from(&client, &base, "acme/green", Channel::Stable, CURRENT_VERSION.into(), Some(older), None).await.unwrap();
         assert!(stable.available && !stable.installed);
         assert_eq!(stable.latest, "99.0.0");
         assert_eq!(stable.url, format!("{base}/acme/green/releases/tag/v99.0.0"));
 
-        let update = |commit, executable| update_from(&client, &base, "acme/green", Channel::Main, commit, executable);
-        let check = update(None, None).await.unwrap();
+        let update = |commit, executable| update_from(&client, &base, "acme/green", Channel::Main, "main@aaaa".into(), commit, executable);
+        for commit in [Some(older), Some(sha), Some(unrelated), None] {
+            let blocked = update(commit, Some(&executable)).await.unwrap();
+            assert!(!blocked.available && !blocked.installed);
+            assert_eq!(output(), b"original");
+            assert_eq!(run(&gui), b"gui-original");
+        }
+        let check = update(Some(older), None).await.unwrap();
         assert!(check.available && !check.installed);
         assert_eq!(check.latest, "main@0123456789ab");
         assert_eq!(check.url, format!("{base}/acme/green/commit/{sha}"));
 
         let unchanged = update(Some(sha), Some(&executable)).await.unwrap();
         assert!(!unchanged.available && !unchanged.installed);
-        let error = update(None, Some(&executable)).await.unwrap_err();
-        assert!(error.to_string().contains("invalid main update feed"));
+        let error = update(Some(older), Some(&executable)).await.unwrap_err();
+        assert!(error.to_string().contains("invalid update manifest"));
         assert_eq!(output(), b"original");
         assert_eq!(run(&gui), b"gui-original");
-        let error = update(None, Some(&executable)).await.unwrap_err();
+        let error = update(Some(older), Some(&executable)).await.unwrap_err();
         assert!(error.to_string().contains("checksum mismatch"));
         assert_eq!(output(), b"original");
         assert_eq!(run(&gui), b"gui-original");
 
-        assert!(update(None, Some(&executable)).await.unwrap().installed);
+        assert!(update(Some(older), Some(&executable)).await.unwrap().installed);
         assert_eq!(output(), b"updated");
         assert_eq!(run(&gui), b"gui-updated", "the GUI next to the CLI moves to the same build");
         server.await.unwrap();

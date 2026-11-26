@@ -26,16 +26,18 @@ In-app updates remain macOS-only.
 
 `stable` follows tagged GitHub Releases. `main` follows the commit builds published
 by GitHub Actions in the [`main-build` prerelease](https://github.com/sdaniger/GreenCode/releases/tag/main-build).
-No GitHub sign-in, token, or `gh` command is needed. The updater reads public release
-files: `SHA256SUMS` for `stable` and `update.json` for `main`. The main feed is
-published after the archives, so it identifies a published build, not a commit
-that is still building.
+No GitHub sign-in, token, or `gh` command is needed. Both channels read a public `update.json`
+with the published commit, its Git ancestry, and archive checksums. The updater only offers
+builds descended from the running build. `stable` also requires a higher release version.
+It never downloads archives for older or unrelated builds, including when switching channels.
+If the running build has no embedded commit ID or the manifest has no ancestry, the updater
+cannot verify the upgrade. Use a trusted release archive for a manual upgrade.
 
 ```sh
 greencode-cli update --check --channel main  # show the available commit without installing
-greencode-cli update --channel main          # switch to the main build
+greencode-cli update --channel main          # install a newer main build, if available
 greencode-cli update                         # follow the installed channel
-greencode-cli update --channel stable        # switch back, even if stable is older
+greencode-cli update --channel stable        # install a newer stable release, if available
 ```
 
 In the desktop app, click **アップデート** in the top-right toolbar.

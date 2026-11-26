@@ -41,9 +41,14 @@ jobs:
           sudo apt-get install -y libfontconfig-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev \
             libvulkan1 mesa-vulkan-drivers xvfb xdotool
       - name: Build release binaries
-        env:
-          GREENCODE_MAIN_COMMIT: ${{ github.ref == 'refs/heads/main' && github.sha || '' }}
-        run: cargo build --locked --workspace --release
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/heads/main ]]; then
+            export GREENCODE_MAIN_COMMIT="$(git rev-parse HEAD)"
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            export GREENCODE_RELEASE_COMMIT="$(git rev-parse HEAD)"
+          fi
+          cargo build --locked --workspace --release
       - name: Smoke-test CLI
         shell: bash
         run: |
@@ -128,13 +133,21 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
-      - name: Create checksums
-        working-directory: dist
-        run: sha256sum greencode-* > SHA256SUMS
+      - name: Create release manifest and checksums
+        run: |
+          (cd dist && sha256sum greencode-* > SHA256SUMS)
+          commit=$(git rev-parse HEAD)
+          git rev-list --skip=1 "$commit" | jq -Rs 'split("\n") | map(select(length > 0))' > "$RUNNER_TEMP/ancestors.json"
+          jq -cRn --arg commit "$commit" --slurpfile ancestors "$RUNNER_TEMP/ancestors.json" \
+            '{commit: $commit, ancestors: $ancestors[0], sha256: ([inputs | split("  ") | {key: .[1], value: .[0]}] | from_entries)}' \
+            < dist/SHA256SUMS > dist/update.json
       - uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/v')
         with:
@@ -161,8 +174,5 @@ jobs:
             assets+=("$archive#$GITHUB_SHA")
           done
           gh release upload main-build --clobber "${assets[@]}" dist/SHA256SUMS
-          jq -Rn --arg commit "$GITHUB_SHA" \
-            '{commit: $commit, sha256: ([inputs | split("  ") | {key: .[1], value: .[0]}] | from_entries)}' \
-            < dist/SHA256SUMS > dist/update.json
           gh release upload main-build --clobber dist/update.json
           gh release edit main-build --draft=false --prerelease --latest=false
