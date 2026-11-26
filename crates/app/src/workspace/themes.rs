@@ -57,6 +57,14 @@ impl ThemeMode {
             Self::Dark => Self::System,
         }
     }
+
+    pub(super) fn uses_dark_slot(self, system_dark: bool) -> bool {
+        match self {
+            Self::System => system_dark,
+            Self::Light => false,
+            Self::Dark => true,
+        }
+    }
 }
 
 /// A built-in palette or a theme file in `~/.greencode/themes` (by slug).
@@ -105,7 +113,7 @@ impl Choice {
 }
 
 /// Every selectable theme: custom files first, then the built-in palettes. `System` is a mode, not a theme.
-pub(super) fn choices(custom: &[(String, CustomTheme)]) -> Vec<Choice> {
+pub(super) fn choices(custom: &[(String, CustomTheme)]) -> impl Iterator<Item = Choice> + '_ {
     custom
         .iter()
         .map(|(slug, _)| Choice::Custom(slug.clone()))
@@ -115,20 +123,13 @@ pub(super) fn choices(custom: &[(String, CustomTheme)]) -> Vec<Choice> {
                 .filter(|t| *t != ThemeId::System)
                 .map(Choice::Builtin),
         )
-        .collect()
 }
 
 pub(super) fn resolve(mode: ThemeMode, system_dark: bool, light: Choice, dark: Choice) -> Choice {
-    match mode {
-        ThemeMode::System => {
-            if system_dark {
-                dark
-            } else {
-                light
-            }
-        }
-        ThemeMode::Light => light,
-        ThemeMode::Dark => dark,
+    if mode.uses_dark_slot(system_dark) {
+        dark
+    } else {
+        light
     }
 }
 
@@ -381,11 +382,9 @@ impl Workspace {
 
     /// Sets the theme slot the user is looking at: the mode's slot, or the current system appearance's slot.
     pub(super) fn set_theme(&mut self, choice: Choice, window: &mut Window, cx: &mut Context<Self>) {
-        let dark = match self.theme_mode() {
-            ThemeMode::Light => false,
-            ThemeMode::Dark => true,
-            ThemeMode::System => Self::window_is_dark(window),
-        };
+        let dark = self
+            .theme_mode()
+            .uses_dark_slot(Self::window_is_dark(window));
         set_slot(&mut self.ui, dark, &choice);
         self.save_ui();
         self.apply_theme(window, cx);

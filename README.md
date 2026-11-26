@@ -15,6 +15,7 @@ Check `greencode-cli --help` for which automation commands your build includes.
 Download a [release archive](https://github.com/sdaniger/GreenCode/releases) for macOS (Apple Silicon or Intel),
 Linux x86-64 (built on Ubuntu 24.04), or Windows x86-64. Each contains `greencode` (desktop GUI) and
 `greencode-cli` (CLI/TUI), with `.exe` extensions on Windows. `SHA256SUMS` lists the SHA-256 of each archive.
+The macOS archive also includes `GreenCode.app` with its Finder and Dock icon.
 
 On Linux, the GUI needs X11 or Wayland, Vulkan, Fontconfig and XKB libraries. On Windows, install
 Git for Windows to use the native `bash` tool. The Windows embedded terminal uses ConPTY;
@@ -260,9 +261,11 @@ The listener is local only; a public URL requires your own tunnel, such as `clou
   with `gh`. `/branch NAME`, `/push`, `/pr` do the same.
 - **Terminal** (⌘J): project-scoped PTY tabs with 5,000 lines of history; the terminal resizes with the panel. Close or add tabs in the drawer; selected output can be inserted into the composer. The last 500 lines are saved locally when a tab closes or the app exits.
 - **Settings**: open **設定** in the sidebar, press `⌘,`, or run `/settings`. **一般** contains notifications,
-  quitting, screenshots and automatic archiving. **外観** has theme previews; **入力と会話** has send,
-  work history and automatic writing options. **音声入力**, **モデルと権限**, **接続**, and **自動化** have
-  separate pages. Settings rows show the current choice in a dropdown and use switches for on/off options.
+  quitting, screenshots and automatic archiving. In **外観**, pick an appearance mode, then a color theme for
+  that mode. **システムに合わせる** edits the theme for the current system appearance; switch to **ライト**
+  or **ダーク** to edit the other theme. **入力と会話** has send, work history and automatic writing options.
+  **音声入力**, **モデルと権限**, **接続**, and **自動化** have separate pages. Settings rows show the current
+  choice in a dropdown and use switches for on/off options.
   **ショートカットとファイル** contains custom keybindings and configuration files. Changes
   save as you make them; UI preferences and custom bindings such as `{"keys": {"cmd-shift-p": "/plan"}}`
   are stored in `~/.greencode/ui.json`.

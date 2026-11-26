@@ -30,8 +30,9 @@ release: ## optimized binaries in target/release (greencode, greencode-cli)
 
 bundle: release ## assemble target/GreenCode.app so greencode:// links and `greencode-cli app` reach the GUI (macOS)
 	rm -rf target/GreenCode.app
-	mkdir -p target/GreenCode.app/Contents/MacOS
+	mkdir -p target/GreenCode.app/Contents/MacOS target/GreenCode.app/Contents/Resources
 	cp target/release/greencode target/release/greencode-cli target/GreenCode.app/Contents/MacOS/
+	cp packaging/macos/AppIcon.icns target/GreenCode.app/Contents/Resources/
 	sed "s/@VERSION@/$$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)/" packaging/macos/Info.plist > target/GreenCode.app/Contents/Info.plist
 	/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f target/GreenCode.app
 

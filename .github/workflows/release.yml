@@ -101,8 +101,9 @@ jobs:
       - name: Package macOS app
         if: runner.os == 'macOS'
         run: |
-          mkdir -p dist/GreenCode.app/Contents/MacOS
+          mkdir -p dist/GreenCode.app/Contents/MacOS dist/GreenCode.app/Contents/Resources
           cp target/release/greencode target/release/greencode-cli dist/GreenCode.app/Contents/MacOS/
+          cp packaging/macos/AppIcon.icns dist/GreenCode.app/Contents/Resources/
           sed "s/@VERSION@/$(sed -n 's/^version *= *\"\(.*\)\"/\1/p' Cargo.toml | head -1)/" packaging/macos/Info.plist > dist/GreenCode.app/Contents/Info.plist
           plutil -lint dist/GreenCode.app/Contents/Info.plist
           tar -czf "dist/greencode-${{ matrix.platform }}-${{ matrix.arch }}.tar.gz" -C target/release greencode greencode-cli -C "$GITHUB_WORKSPACE/dist" GreenCode.app

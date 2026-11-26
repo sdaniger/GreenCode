@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>GreenCode: a G formed from a code bracket</title>
+  <defs>
+    <linearGradient id="tile" x2="0" y2="1" gradientUnits="objectBoundingBox">
+      <stop stop-color="#16463A"/>
+      <stop offset="1" stop-color="#0A211D"/>
+    </linearGradient>
+    <linearGradient id="mark" x2="0" y2="1" gradientUnits="objectBoundingBox">
+      <stop stop-color="#C5FFDC"/>
+      <stop offset="1" stop-color="#59E3A7"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="187" fill="url(#tile)"/>
+  <rect x="103" y="103" width="818" height="818" rx="184" fill="none" stroke="#78E9B7" stroke-opacity=".24" stroke-width="6"/>
+  <path d="M656 334H437L279 512l158 178h218l88-99v-70H536" fill="none" stroke="url(#mark)" stroke-width="80" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

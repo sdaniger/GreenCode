@@ -717,8 +717,6 @@ enum Act {
     OpenFile(PathBuf),
     Revoke(String),
     Theme(Choice),
-    /// Sets the light (`false`) or dark (`true`) theme slot from Settings → 外観.
-    ThemeSlot(bool, Choice),
     ThemeMode(themes::ThemeMode),
     CycleThemeMode,
     ImportTheme,
@@ -1595,10 +1593,10 @@ fn appearance_preview(system: bool, light: Pal, dark: Pal) -> Div {
     }
 }
 
-fn theme_settings(ws: &Workspace, pal: Pal, cx: &mut Context<Workspace>) -> Div {
+fn theme_settings(ws: &Workspace, pal: Pal, window: &Window, cx: &mut Context<Workspace>) -> Div {
     let tile = |id: String, label: String, selected: bool, act: Act, cx: &mut Context<Workspace>| {
         gpui_kit::base::Button::new((ElementId::from("theme"), SharedString::from(id)))
-            .accessibility_label(SharedString::from(label.clone()))
+            .accessibility_label(SharedString::from(label))
             .aria_toggled(if selected { accesskit::Toggled::True } else { accesskit::Toggled::False })
             .min_w_0()
             .p_2()
@@ -1629,7 +1627,7 @@ fn theme_settings(ws: &Workspace, pal: Pal, cx: &mut Context<Workspace>) -> Div 
     let modes = div().grid().grid_cols(3).gap_3().children(themes::ThemeMode::ALL.map(|m| {
         tile(
             format!("mode-{}", m.id()),
-            m.label().to_string(),
+            m.hint().to_string(),
             m == mode,
             Act::ThemeMode(m),
             cx,
@@ -1644,47 +1642,55 @@ fn theme_settings(ws: &Workspace, pal: Pal, cx: &mut Context<Workspace>) -> Div 
                 .child(label(m.hint().to_string(), m == mode)),
         )
     }));
-    let choices = themes::choices(&ws.custom_themes);
-    let grid = |slot_dark: bool, choices: &[Choice], cx: &mut Context<Workspace>| {
-        let selected = ws.theme_slot(slot_dark);
-        div().grid().grid_cols(2).gap_2().children(choices.iter().map(|choice| {
-            let choice = choice.clone();
-            let is_selected = choice == selected;
-            let swatch = ws.theme_pal(&choice, slot_dark);
-            let name = choice.label(&ws.custom_themes);
-            tile(
-                format!("slot-{slot_dark}-{}", choice.id()),
-                name.clone(),
-                is_selected,
-                Act::ThemeSlot(slot_dark, choice),
-                cx,
-            )
-            .child(
-                div().w_full().min_w_0().flex().items_center().gap_2()
-                    .child(
-                        div().size_7().flex_shrink_0().flex().items_center()
-                            .justify_center().rounded_full().bg(swatch.sidebar)
-                            .border_1().border_color(swatch.muted)
-                            .child(
-                                div().size_5().flex().items_center().justify_center()
-                                    .rounded_full().bg(swatch.card)
-                                    .child(div().size_2p5().rounded_full().bg(swatch.accent)),
-                            ),
-                    )
-                    .child(label(name, is_selected)),
-            )
-        }))
-    };
+    let slot_dark = mode.uses_dark_slot(Workspace::window_is_dark(window));
+    let selected = ws.theme_slot(slot_dark);
+    let choices = themes::choices(&ws.custom_themes)
+        // Keep the selected theme visible if it was set from an older build or a command.
+        .filter(|choice| *choice == selected || choice.dark(&ws.custom_themes, slot_dark) == slot_dark);
+    let grid = div().grid().grid_cols(2).gap_2().children(choices.map(|choice| {
+        let is_selected = choice == selected;
+        let swatch = ws.theme_pal(&choice, slot_dark);
+        let name = match choice {
+            Choice::Builtin(ThemeId::Light) if !slot_dark => "標準".into(),
+            Choice::Builtin(ThemeId::Dark) if slot_dark => "標準".into(),
+            _ => choice.label(&ws.custom_themes),
+        };
+        tile(
+            format!("slot-{slot_dark}-{}", choice.id()),
+            name.clone(),
+            is_selected,
+            Act::Theme(choice),
+            cx,
+        )
+        .child(
+            div().w_full().min_w_0().flex().items_center().gap_2()
+                .child(
+                    div().size_7().flex_shrink_0().flex().items_center()
+                        .justify_center().rounded_full().bg(swatch.sidebar)
+                        .border_1().border_color(swatch.muted)
+                        .child(
+                            div().size_5().flex().items_center().justify_center()
+                                .rounded_full().bg(swatch.card)
+                                .child(div().size_2p5().rounded_full().bg(swatch.accent)),
+                        ),
+                )
+                .child(label(name, is_selected)),
+        )
+    }));
     let configured = ws.ui["background_image"].as_str().map(|p| p.to_string());
     let opacity = (ws.background_opacity() * 100.).round() as u32;
     div()
         .flex().flex_col().gap_3().pb_6()
         .child(heading("外観モード"))
         .child(modes)
-        .child(heading("ライトのテーマ").pt_2())
-        .child(grid(false, &choices, cx))
-        .child(heading("ダークのテーマ").pt_2())
-        .child(grid(true, &choices, cx))
+        .child(heading("配色テーマ").pt_2())
+        .when(mode == themes::ThemeMode::System, |d| {
+            let appearance = if slot_dark { "ダーク" } else { "ライト" };
+            d.child(div().text_sm().text_color(pal.muted).child(format!(
+                "現在は{appearance}。ここで選んだ配色は、システムが{appearance}のときに使われます。"
+            )))
+        })
+        .child(grid)
         .child(heading("カスタムテーマ").pt_2())
         .child(
             div().flex().flex_wrap().items_center().gap_1p5()
@@ -6852,12 +6858,6 @@ impl Workspace {
                 }
             }
             Act::Theme(choice) => self.set_theme(choice, window, cx),
-            Act::ThemeSlot(dark, choice) => {
-                themes::set_slot(&mut self.ui, dark, &choice);
-                self.save_ui();
-                self.apply_theme(window, cx);
-                cx.notify();
-            }
             Act::ThemeMode(mode) => self.set_theme_mode(mode, window, cx),
             Act::CycleThemeMode => {
                 let mode = self.theme_mode().cycle();
@@ -10208,7 +10208,7 @@ impl Workspace {
                         .pb_10()
                         .child(title)
                         .children(banner.map(|b| b.pb_4()))
-                        .when(name == "外観", |d| d.child(theme_settings(self, pal, cx)))
+                        .when(name == "外観", |d| d.child(theme_settings(self, pal, window, cx)))
                         .child(col.build()),
                 )
                 .into_any_element()
@@ -14489,10 +14489,26 @@ mod tests {
         cx.simulate_keystrokes("escape");
 
         cx.update(|window, cx| {
+            ws.update(cx, |ws, cx| {
+                ws.run(super::Act::ThemeMode(themes::ThemeMode::Dark), window, cx);
+                ws.run(super::Act::Theme(Choice::Builtin(ThemeId::Graphite)), window, cx);
+                assert_eq!(ws.theme_choice(false), Choice::Builtin(ThemeId::Graphite));
+                ws.run(super::Act::ThemeMode(themes::ThemeMode::System), window, cx);
+            });
+        });
+
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(greencode_core::home().join("ui.json")).unwrap())
+                .unwrap();
+        assert_eq!(saved["theme_dark"], json!("graphite"));
+        assert_eq!(saved["theme_light"], json!("paper"));
+
+        cx.update(|window, cx| {
             let restored = cx.new(|cx| Workspace::new(Config::default(), None, window, cx));
             restored.read_with(cx, |ws, cx| {
                 assert!(!cx.theme().is_dark());
                 assert_eq!(ws.theme_choice(false), Choice::Builtin(ThemeId::Paper));
+                assert_eq!(ws.theme_choice(true), Choice::Builtin(ThemeId::Graphite));
             });
 
             std::fs::write(greencode_core::home().join("ui.json"), r#"{"theme":true}"#).unwrap();
