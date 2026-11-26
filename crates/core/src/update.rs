@@ -1,4 +1,4 @@
-//! GitHub updater for tagged releases and builds from main.
+//! Public release feeds for tagged releases and builds from main.
 
 use anyhow::{bail, Context, Result};
 use reqwest::Client;
@@ -9,6 +9,7 @@ use std::{fs, path::Path, process::{Command, Stdio}, time::Duration};
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_REPO: &str = "sdaniger/GreenCode";
 const MAX_ASSET_BYTES: usize = 128 * 1024 * 1024;
+const MAX_FEED_BYTES: usize = 64 * 1024;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -44,21 +45,10 @@ pub struct UpdateResult {
     pub installed: bool,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct ApiRelease {
-    tag_name: String,
-    html_url: String,
-    prerelease: bool,
-    assets: Vec<ApiAsset>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct ApiAsset {
-    name: String,
-    label: Option<String>,
-    browser_download_url: String,
-    #[serde(default)]
-    digest: Option<String>,
+#[derive(Deserialize)]
+struct MainFeed {
+    commit: String,
+    sha256: std::collections::BTreeMap<String, String>,
 }
 
 fn valid_commit(sha: &str) -> bool {
@@ -102,72 +92,69 @@ pub async fn run(repo: &str, channel: Channel, executable: Option<&Path>) -> Res
         .https_only(true)
         .timeout(Duration::from_secs(120))
         .build()?;
-    update_from(&client, "https://api.github.com", &repo, channel, main_commit(), executable, github_token().as_deref()).await
-}
-
-/// Anonymous API calls share a 60-per-hour limit per IP; a token (env or `gh auth token`) lifts it.
-fn github_token() -> Option<String> {
-    let env = ["GH_TOKEN", "GITHUB_TOKEN"].iter().find_map(|k| std::env::var(k).ok().filter(|v| !v.trim().is_empty()));
-    env.or_else(|| {
-        let out = Command::new("gh").args(["auth", "token"]).stderr(Stdio::null()).output().ok()?;
-        let token = String::from_utf8(out.stdout).ok()?.trim().to_string();
-        (out.status.success() && !token.is_empty()).then_some(token)
-    })
+    update_from(&client, "https://github.com", &repo, channel, main_commit(), executable).await
 }
 
 async fn update_from(
     client: &Client,
-    api_base: &str,
+    github: &str,
     repo: &str,
     channel: Channel,
     commit: Option<&str>,
     executable: Option<&Path>,
-    token: Option<&str>,
 ) -> Result<UpdateResult> {
-    let endpoint = match channel {
-        Channel::Stable => "latest",
-        Channel::Main => "tags/main-build",
-    };
-    let asset_name = asset_name()?;
-    let mut request = client
-        .get(format!("{api_base}/repos/{repo}/releases/{endpoint}"))
-        .header("accept", "application/vnd.github+json");
-    if let Some(token) = token {
-        request = request.bearer_auth(token);
-    }
-    let response = request.send().await?;
-    let status = response.status().as_u16();
-    let exhausted = response.headers().get("x-ratelimit-remaining").is_some_and(|v| v == "0");
-    if (status == 403 || status == 429) && exhausted {
-        bail!("GitHub API rate limit reached for {repo}; set GH_TOKEN or run `gh auth login`, then retry");
-    }
-    if status == 404 && channel == Channel::Main {
-        bail!("{repo} has no main build published yet; wait for the Release workflow on main to finish");
-    }
-    let api: ApiRelease = response
-        .error_for_status()
-        .with_context(|| format!("could not read the GitHub update for {repo} ({channel:?})"))?
-        .json()
-        .await?;
-    anyhow::ensure!(api.prerelease == (channel == Channel::Main), "unexpected release channel for {}", api.tag_name);
-    let asset = api.assets.iter().find(|a| a.name == asset_name)
-        .with_context(|| format!("release {} has no {asset_name} asset", api.tag_name))?;
+    let name = asset_name()?;
+    let releases = format!("{github}/{repo}/releases");
     let current = commit.map_or_else(|| CURRENT_VERSION.into(), |sha| format!("main@{}", &sha[..12]));
-    let (latest, url, available) = match channel {
+    let (latest, url, available, tag, digest) = match channel {
         Channel::Stable => {
-            let version = api.tag_name.trim_start_matches('v');
-            (version.to_owned(), api.html_url, commit.is_some() || compare_versions(CURRENT_VERSION, version).is_lt())
+            let response = client.get(format!("{releases}/latest")).send().await
+                .and_then(reqwest::Response::error_for_status)
+                .map_err(reqwest::Error::without_url)
+                .context("could not find the latest stable release")?;
+            let url = response.url().clone();
+            let (path, tag) = url.path().rsplit_once('/').context("invalid stable release URL")?;
+            anyhow::ensure!(
+                url.origin() == reqwest::Url::parse(github)?.origin()
+                    && path.eq_ignore_ascii_case(&format!("/{repo}/releases/tag")),
+                "no stable release is published yet"
+            );
+            let version = tag.strip_prefix('v').filter(|version| {
+                !version.is_empty() && version.bytes().all(|b| valid_repo_byte(b) || b == b'+')
+            }).context("invalid stable release tag")?;
+            let checksum_url = format!("{releases}/download/{tag}/SHA256SUMS");
+            let bytes = download(client, &checksum_url, MAX_FEED_BYTES).await
+                .context("could not read the stable release checksums")?;
+            let digest = checksum_for(std::str::from_utf8(&bytes)?, &name)
+                .with_context(|| format!("stable release {tag} has no checksum for {name}"))?;
+            (
+                version.to_owned(),
+                url.to_string(),
+                commit.is_some() || compare_versions(CURRENT_VERSION, version).is_lt(),
+                tag.to_owned(),
+                digest,
+            )
         }
         Channel::Main => {
-            let sha = asset.label.as_deref().filter(|sha| valid_commit(sha))
-                .context("main build has no valid commit SHA")?;
-            anyhow::ensure!(asset.digest.as_deref().and_then(parse_digest).is_some(), "main build has no SHA-256 digest");
-            (format!("main@{}", &sha[..12]), format!("https://github.com/{repo}/commit/{sha}"), commit != Some(sha))
+            let tag = "main-build";
+            let feed_url = format!("{releases}/download/{tag}/update.json");
+            let bytes = download(client, &feed_url, MAX_FEED_BYTES).await
+                .context("could not read the main update feed; retry once the build is published")?;
+            let feed: MainFeed = serde_json::from_slice(&bytes).context("invalid main update feed")?;
+            let sha = feed.commit.as_str();
+            anyhow::ensure!(valid_commit(sha), "main update feed has no valid commit SHA");
+            let digest = feed.sha256.get(&name).and_then(|value| parse_digest(value))
+                .with_context(|| format!("main update feed has no checksum for {name}"))?;
+            (format!("main@{}", &sha[..12]), format!("{github}/{repo}/commit/{sha}"), commit != Some(sha), tag.into(), digest)
         }
     };
     let installed = if let Some(executable) = executable.filter(|_| available) {
-        let checksum = api.assets.iter().find(|a| a.name == "SHA256SUMS");
-        install(client, executable, asset, checksum).await?;
+        let archive_url = format!("{releases}/download/{tag}/{name}");
+        let archive = download(client, &archive_url, MAX_ASSET_BYTES).await
+            .context("could not download the update archive")?;
+        let actual = format!("{:x}", Sha256::digest(&archive));
+        anyhow::ensure!(actual == digest, "update checksum mismatch; retry after the release finishes publishing");
+        replace_binary(executable, &archive).context("could not replace the installed GreenCode binaries")?;
         true
     } else {
         false
@@ -188,28 +175,14 @@ fn compare_versions(current: &str, latest: &str) -> std::cmp::Ordering {
     }
 }
 
-async fn install(client: &Client, executable: &Path, asset: &ApiAsset, checksum: Option<&ApiAsset>) -> Result<()> {
-    let expected = if let Some(digest) = asset.digest.as_deref().and_then(parse_digest) {
-        Some(digest)
-    } else if let Some(checksum) = checksum {
-        let text = download(client, &checksum.browser_download_url, 64 * 1024).await?;
-        checksum_for(std::str::from_utf8(&text)?, &asset.name)
-    } else {
-        None
-    };
-    let expected = expected.with_context(|| format!("release has no checksum for {}", asset.name))?;
-    let archive = download(client, &asset.browser_download_url, MAX_ASSET_BYTES).await?;
-    let actual = format!("{:x}", Sha256::digest(&archive));
-    anyhow::ensure!(actual == expected, "update checksum mismatch for {}", asset.name);
-    replace_binary(executable, &archive)
-}
-
 async fn download(client: &Client, url: &str, limit: usize) -> Result<Vec<u8>> {
-    let mut response = client.get(url).send().await?.error_for_status()?;
+    let mut response = client.get(url).send().await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(reqwest::Error::without_url)?;
     let len = response.content_length().unwrap_or(0);
     anyhow::ensure!(len <= limit as u64, "update asset is too large");
     let mut bytes = Vec::with_capacity(len as usize);
-    while let Some(chunk) = response.chunk().await? {
+    while let Some(chunk) = response.chunk().await.map_err(reqwest::Error::without_url)? {
         anyhow::ensure!(chunk.len() <= limit - bytes.len(), "update asset is too large");
         bytes.extend_from_slice(&chunk);
     }
@@ -303,7 +276,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn main_update_checks_commit_and_verifies_download_before_replacement() {
+    async fn public_release_feeds_verify_downloads_before_replacement() {
         use std::os::unix::fs::PermissionsExt;
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -328,25 +301,28 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let sha = "0123456789abcdef0123456789abcdef01234567";
-        let release = serde_json::to_vec(&serde_json::json!({
-            "tag_name": "main-build",
-            "html_url": "https://github.com/acme/green/releases/tag/main-build",
-            "prerelease": true,
-            "assets": [{
-                "name": asset_name().unwrap(), "label": sha,
-                "digest": format!("sha256:{:x}", Sha256::digest(&archive)),
-                "browser_download_url": format!("{base}/asset"),
-            }]
+        let name = asset_name().unwrap();
+        let digest = format!("{:x}", Sha256::digest(&archive));
+        let stable_checksums = format!("{digest}  {name}\n");
+        let feed = serde_json::to_vec(&serde_json::json!({
+            "commit": sha, "sha256": { (name.as_str()): digest },
         })).unwrap();
+        let archive_path = format!("/acme/green/releases/download/main-build/{name}");
         let server = tokio::spawn(async move {
-            let path = "/repos/acme/green/releases/tags/main-build";
-            for (path, body) in [
-                (path, release.as_slice()),
-                (path, release.as_slice()),
-                (path, release.as_slice()),
-                ("/asset", b"incomplete upload"),
-                (path, release.as_slice()),
-                ("/asset", archive.as_slice()),
+            let feed_path = "/acme/green/releases/download/main-build/update.json";
+            let stable_path = "/acme/green/releases/tag/v99.0.0";
+            let redirect = format!("302 Found\r\nLocation: {stable_path}");
+            for (path, status, body) in [
+                ("/acme/green/releases/latest", redirect.as_str(), b"".as_slice()),
+                (stable_path, "200 OK", b"".as_slice()),
+                ("/acme/green/releases/download/v99.0.0/SHA256SUMS", "200 OK", stable_checksums.as_bytes()),
+                (feed_path, "200 OK", feed.as_slice()),
+                (feed_path, "200 OK", feed.as_slice()),
+                (feed_path, "200 OK", b"{}"),
+                (feed_path, "200 OK", feed.as_slice()),
+                (archive_path.as_str(), "200 OK", b"incomplete upload"),
+                (feed_path, "200 OK", feed.as_slice()),
+                (archive_path.as_str(), "200 OK", archive.as_slice()),
             ] {
                 let (mut conn, _) = listener.accept().await.unwrap();
                 let mut reader = BufReader::new(&mut conn);
@@ -356,22 +332,32 @@ mod tests {
                 loop {
                     line.clear();
                     if reader.read_line(&mut line).await.unwrap() == 0 || line == "\r\n" { break; }
+                    assert!(!line.to_ascii_lowercase().starts_with("authorization:"));
                 }
-                let header = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                let header = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
                 conn.write_all(header.as_bytes()).await.unwrap();
                 conn.write_all(body).await.unwrap();
             }
         });
 
         let client = Client::builder().no_proxy().timeout(Duration::from_secs(5)).build().unwrap();
-        let update = |commit, executable| update_from(&client, &base, "acme/green", Channel::Main, commit, executable, None);
+        let stable = update_from(&client, &base, "acme/green", Channel::Stable, None, None).await.unwrap();
+        assert!(stable.available && !stable.installed);
+        assert_eq!(stable.latest, "99.0.0");
+        assert_eq!(stable.url, format!("{base}/acme/green/releases/tag/v99.0.0"));
+
+        let update = |commit, executable| update_from(&client, &base, "acme/green", Channel::Main, commit, executable);
         let check = update(None, None).await.unwrap();
         assert!(check.available && !check.installed);
         assert_eq!(check.latest, "main@0123456789ab");
-        assert_eq!(check.url, format!("https://github.com/acme/green/commit/{sha}"));
+        assert_eq!(check.url, format!("{base}/acme/green/commit/{sha}"));
 
         let unchanged = update(Some(sha), Some(&executable)).await.unwrap();
         assert!(!unchanged.available && !unchanged.installed);
+        let error = update(None, Some(&executable)).await.unwrap_err();
+        assert!(error.to_string().contains("invalid main update feed"));
+        assert_eq!(output(), b"original");
+        assert_eq!(run(&gui), b"gui-original");
         let error = update(None, Some(&executable)).await.unwrap_err();
         assert!(error.to_string().contains("checksum mismatch"));
         assert_eq!(output(), b"original");

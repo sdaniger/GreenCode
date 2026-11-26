@@ -161,4 +161,8 @@ jobs:
             assets+=("$archive#$GITHUB_SHA")
           done
           gh release upload main-build --clobber "${assets[@]}" dist/SHA256SUMS
+          jq -Rn --arg commit "$GITHUB_SHA" \
+            '{commit: $commit, sha256: ([inputs | split("  ") | {key: .[1], value: .[0]}] | from_entries)}' \
+            < dist/SHA256SUMS > dist/update.json
+          gh release upload main-build --clobber dist/update.json
           gh release edit main-build --draft=false --prerelease --latest=false

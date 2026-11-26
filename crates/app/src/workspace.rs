@@ -2758,7 +2758,7 @@ impl Workspace {
         let task = self.rt.spawn(async move {
             let repo = update::repository(configured.as_deref(), None).map_err(|e| e.to_string())?;
             let executable = (!check_only).then(std::env::current_exe).transpose().map_err(|e| e.to_string())?;
-            update::run(&repo, channel, executable.as_deref()).await.map_err(|e| format!("{e:#}"))
+            update::run(&repo, channel, executable.as_deref()).await.map_err(|e| e.to_string())
         });
         cx.spawn(async move |this, cx| {
             let result = task.await.map_err(|e| e.to_string()).and_then(|result| result);
@@ -2777,7 +2777,7 @@ impl Workspace {
                     ).into()),
                     Err(error) => {
                         let action = if check_only { "更新の確認" } else { "更新" };
-                        UpdateStatus::Failed(format!("{action}に失敗しました: {error}").into())
+                        UpdateStatus::Failed(format!("{action}に失敗しました。{error}").into())
                     }
                 };
                 if !this.show_update_panel {

@@ -26,7 +26,10 @@ In-app updates remain macOS-only.
 
 `stable` follows tagged GitHub Releases. `main` follows the commit builds published
 by GitHub Actions in the [`main-build` prerelease](https://github.com/sdaniger/GreenCode/releases/tag/main-build).
-The updater shows the published commit, not a newer commit that is still building.
+No GitHub sign-in, token, or `gh` command is needed. The updater reads public release
+files: `SHA256SUMS` for `stable` and `update.json` for `main`. The main feed is
+published after the archives, so it identifies a published build, not a commit
+that is still building.
 
 ```sh
 greencode-cli update --check --channel main  # show the available commit without installing
@@ -39,12 +42,12 @@ In the desktop app, click **アップデート** in the top-right toolbar.
 Choose a channel, then click **更新を確認** to check without installing or
 **今すぐ更新** to install. The result appears below the buttons.
 The composer also accepts `/update check main`, `/update main`, and `/update stable`.
-An update replaces only the executable you invoked, after verifying the archive's
-SHA-256. Restart that executable after updating. Settings, sessions, and Git checkouts
-are not changed. Builds without channel support need a one-time manual install from
-the downloads above. The update source defaults to `sdaniger/GreenCode`; to use a
-trusted fork, set `update_repo` in `config.toml`, `GREENCODE_UPDATE_REPO`, or CLI
-`--repo OWNER/REPO`.
+The updater verifies the archive's SHA-256 before replacing the running executable
+and its GUI/CLI sibling if installed alongside it. Restart GreenCode after updating.
+Settings, sessions, and Git checkouts are not changed. If an older build reports a
+GitHub API rate limit, install a current archive from the downloads above once.
+The update source defaults to `sdaniger/GreenCode`; to use a trusted public fork,
+set `update_repo` in `config.toml`, `GREENCODE_UPDATE_REPO`, or CLI `--repo OWNER/REPO`.
 
 ## Native terminal UI
 
