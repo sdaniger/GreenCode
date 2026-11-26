@@ -1,5 +1,5 @@
 //! 詳細設定: every native `config.toml` setting (`greencode-cli config list/set/reset`) in the GUI,
-//! and エージェント: the agent settings catalog by area, editing the native setting behind each entry.
+//! 動作設定: the native settings catalog grouped by what it controls.
 use super::*;
 use greencode_core::config::settings::{self, Native, UiSetting};
 use std::collections::HashMap;
@@ -8,7 +8,9 @@ use std::collections::HashMap;
 const SHOWN: usize = 80;
 
 /// Area names, in `settings::UI_TABS` order.
-const OMP_TABS: [&str; 10] = ["外観", "モデル", "操作", "コンテキスト", "メモリ", "ファイル", "シェル", "ツール", "タスク", "プロバイダ"];
+const RUNTIME_CATEGORIES: [&str; 10] = [
+    "ターミナルの表示", "モデル", "操作", "会話履歴", "記憶", "ファイル", "シェル", "ツール", "タスク", "プロバイダ",
+];
 
 /// Native keys the GUI also keeps in `ui.json` (quick toggles elsewhere on the settings screen), with that field.
 /// A `config.toml` edit drops the override so the edit takes effect.
@@ -30,9 +32,9 @@ pub(super) struct Advanced {
     pub(super) key: Option<String>,
     /// Latest load/save result: (ok, message).
     pub(super) outcome: Option<(bool, String)>,
-    pub(super) omp: Vec<UiSetting>,
-    pub(super) omp_tab: usize,
-    /// OMP's listed choices that the native key accepts, by native key; computed with `rows`.
+    catalog: Vec<UiSetting>,
+    pub(super) runtime_category: usize,
+    /// Catalog choices that the native key accepts, by native key; computed with `rows`.
     pub(super) choices: HashMap<&'static str, Vec<&'static str>>,
 }
 
@@ -59,8 +61,8 @@ impl Advanced {
             rows: Vec::new(),
             key: None,
             outcome: None,
-            omp: settings::ui_settings(),
-            omp_tab: 0,
+            catalog: settings::ui_settings(),
+            runtime_category: 0,
             choices: HashMap::new(),
         }
     }
@@ -119,7 +121,7 @@ impl Workspace {
             Err(e) => self.advanced.outcome = Some((false, format!("設定を読み込めません: {e:#}"))),
         }
         if self.advanced.choices.is_empty() {
-            for s in &self.advanced.omp {
+            for s in &self.advanced.catalog {
                 let Some(Native::Key(key)) = s.native else { continue };
                 let valid: Vec<_> = s.values.iter().copied().filter(|v| settings::set_text("", key, &[v.to_string()]).is_ok()).collect();
                 if !valid.is_empty() {
@@ -192,89 +194,90 @@ impl Workspace {
         }
     }
 
-    pub(super) fn omp_section(&self, mut col: SettingsPage, pal: Pal, cx: &mut Context<Self>) -> SettingsPage {
+    pub(super) fn runtime_section(&self, mut col: SettingsPage, pal: Pal, window: &mut Window, cx: &mut Context<Self>) -> SettingsPage {
         let adv = &self.advanced;
-        let mut n = 0usize;
-        let mut small = |label: String, selected: bool, act: Act, cx: &mut Context<Self>| {
-            n += 1;
-            chip(("omp-chip", n), label, pal)
+        let button = |id, label, act: Act, cx: &mut Context<Self>| {
+            control_button(id, label, pal)
                 .border_1()
-                .border_color(if selected { pal.accent } else { pal.line })
-                .bg(if selected { pal.selected } else { pal.panel })
-                .text_color(pal.fg)
+                .border_color(pal.line)
+                .bg(pal.panel)
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.run(act.clone(), window, cx)))
         };
-        col = col.section("項目").child(div().flex().flex_wrap().gap_1().children(
-            OMP_TABS.iter().enumerate().map(|(i, name)| small(name.to_string(), i == adv.omp_tab, Act::OmpTab(i), cx)).collect::<Vec<_>>(),
+        let category = adv.runtime_category;
+        col = col.child(settings_row(
+            "分類".into(),
+            "ターミナルの表示、会話履歴、シェルなどの動作を設定します。",
+            settings_select(
+                "runtime-category",
+                "分類",
+                RUNTIME_CATEGORIES[category],
+                RUNTIME_CATEGORIES.iter().enumerate().map(|(i, &label)| (label, vec![Act::RuntimeCategory(i)])).collect(),
+                pal,
+                window,
+                cx,
+            ),
+            pal,
         ));
         col = col.children(adv.outcome.as_ref().map(|(ok, text)| {
             div().text_xs().text_color(if *ok { pal.muted } else { gpui_kit::red() }).child(text.clone())
         }));
-        let tab = settings::UI_TABS[adv.omp_tab.min(settings::UI_TABS.len() - 1)];
+        let tab = settings::UI_TABS[category];
         let mut group = "";
-        for (i, s) in adv.omp.iter().enumerate().filter(|(_, s)| s.tab == tab) {
+        for (i, s) in adv.catalog.iter().enumerate().filter(|(_, s)| s.tab == tab) {
             let Some(native) = s.native else { continue };
             if s.group != group {
                 group = s.group;
                 col = col.section(group);
             }
             let row = adv.rows.iter().find(|r| matches!(native, Native::Key(k) if r.key == k));
-            let mut controls = div().flex().flex_wrap().justify_end().gap_1().items_center();
+            let mut controls = div().flex().flex_wrap().gap_2().items_center();
             let mut editing = false;
             let toggle = |on: bool, act: Act, cx: &mut Context<Self>| {
                 let click = cx.listener(move |this, _: &ClickEvent, window, cx| this.run(act.clone(), window, cx));
-                switch(("omp-switch", i), s.label, on, pal).on_change(move |_, event, window, cx| click(event, window, cx))
+                switch(("runtime-switch", i), s.label, on, pal).on_change(move |_, event, window, cx| click(event, window, cx))
             };
             match native {
                 Native::Tool(name) => {
                     let on = self.tool_is_on(name);
-                    controls = controls.child(toggle(on, Act::OmpTool(name, !on), cx));
+                    controls = controls.child(toggle(on, Act::RuntimeTool(name, !on), cx));
                 }
                 Native::Key(key) => {
-                    let value = row.map(|r| r.value.clone()).unwrap_or(Value::Null);
+                    let value = row.map_or(&Value::Null, |r| &r.value);
                     if let Value::Bool(on) = value {
-                        controls = controls.child(toggle(on, Act::SettingWrite(key.into(), Some((!on).to_string())), cx));
+                        controls = controls.child(toggle(*on, Act::SettingWrite(key.into(), Some((!on).to_string())), cx));
                     } else if let Some(choices) = adv.choices.get(key) {
-                        let current = edit_text(&value);
-                        for v in choices {
-                            controls = controls.child(small(v.to_string(), current == *v, Act::SettingWrite(key.into(), Some(v.to_string())), cx));
-                        }
+                        controls = controls.child(settings_select(
+                            ("runtime-select", i),
+                            s.label,
+                            &edit_text(value),
+                            choices.iter().map(|&v| (v, vec![Act::SettingWrite(key.into(), Some(v.into()))])).collect(),
+                            pal,
+                            window,
+                            cx,
+                        ));
                     } else {
                         editing = adv.key.as_deref() == Some(key);
                         controls = controls
-                            .child(div().max_w(px(260.)).truncate().text_xs().text_color(pal.muted).child(edit_text(&value)))
-                            .child(small("編集".into(), editing, Act::SettingPick(key.into()), cx));
+                            .child(div().max_w(px(180.)).truncate().text_xs().text_color(pal.muted).child(edit_text(value)))
+                            .child(button(("runtime-edit", i), "編集…", Act::SettingPick(key.into()), cx));
                     }
                     if row.is_some_and(|r| r.set) && !editing {
-                        controls = controls.child(small("既定に戻す".into(), false, Act::SettingWrite(key.into(), None), cx));
+                        controls = controls.child(button(("runtime-reset", i), "既定に戻す", Act::SettingWrite(key.into(), None), cx));
                     }
                 }
             }
             col = col.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_0p5()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap_3()
-                            .min_h(px(28.))
-                            .child(div().flex_shrink_0().child(s.label))
-                            .child(controls),
-                    )
-                    .when(!s.description.is_empty(), |d| d.child(div().text_xs().text_color(pal.muted).child(s.description)))
+                div().flex().flex_col().gap_2()
+                    .child(settings_row(s.label.into(), s.description, controls, pal))
                     .when(editing, |d| {
                         d.child(
                             div()
                                 .flex()
                                 .gap_2()
                                 .items_center()
-                                .child(div().flex_1().child(Input::new(&adv.value)))
-                                .child(small("保存".into(), false, Act::SettingSave, cx))
-                                .child(small("既定に戻す".into(), false, Act::SettingReset, cx)),
+                                .child(div().flex_1().min_w_0().child(Input::new(&adv.value)))
+                                .child(button(("runtime-save", i), "保存", Act::SettingSave, cx))
+                                .child(button(("runtime-reset-edit", i), "既定に戻す", Act::SettingReset, cx)),
                         )
                     }),
             );

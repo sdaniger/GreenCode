@@ -262,7 +262,8 @@ The listener is local only; a public URL requires your own tunnel, such as `clou
 - **Settings**: open **設定** in the sidebar, press `⌘,`, or run `/settings`. **一般** contains notifications,
   quitting, screenshots and automatic archiving. **外観** has theme previews; **入力と会話** has send,
   work history and automatic writing options. **音声入力**, **モデルと権限**, **接続**, and **自動化** have
-  separate pages. **ショートカットとファイル** contains custom keybindings and configuration files. Changes
+  separate pages. Settings rows show the current choice in a dropdown and use switches for on/off options.
+  **ショートカットとファイル** contains custom keybindings and configuration files. Changes
   save as you make them; UI preferences and custom bindings such as `{"keys": {"cmd-shift-p": "/plan"}}`
   are stored in `~/.greencode/ui.json`.
 - A notification appears when a turn finishes or needs approval while GreenCode is in the background. ⌘K with `?text` searches conversations.
@@ -451,11 +452,10 @@ is a normal native TOML setting, so `config list/get/set` show them too (`/setti
 In the desktop app, 設定 → 詳細設定 lists every `config.toml` setting with search and does the same
 set/reset (invalid values are refused, and the app reloads the config on save); credentials and backend
 environments stay under 接続.
-設定 → OMP 設定 shows OMP 19.1.1's `/settings` screen with the same 10 tabs, groups, labels and descriptions
-(470 entries). Each entry with a GreenCode counterpart edits that native setting in place: on/off switches,
-OMP's listed choices where the native key accepts them, or a value field; tool switches (`grep.enabled`,
-`astEdit.enabled`, …) turn the native tool off through `tools` or `ext_off`. Entries without a counterpart
-are listed as such. `config import-omp` also imports those tool switches.
+**設定 → 動作設定** groups the supported native settings for terminal appearance, conversation history,
+shell, tools and other runtime behavior. Choose a category, then change its settings with switches,
+dropdowns or value fields. Tool switches such as Grep and AST Edit update `tools` or `ext_off`.
+`config import-omp` still imports the corresponding OMP settings and tool switches.
 
 | Area | Native tables / keys |
 |---|---|

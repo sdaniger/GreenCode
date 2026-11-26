@@ -650,10 +650,9 @@ enum Act {
     SettingPick(String),
     SettingSave,
     SettingReset,
-    /// OMP 設定: show this `/settings` tab.
-    OmpTab(usize),
-    /// OMP 設定: turn a native tool on (`true`) or off.
-    OmpTool(&'static str, bool),
+    RuntimeCategory(usize),
+    /// 動作設定: turn a native tool on (`true`) or off.
+    RuntimeTool(&'static str, bool),
     /// Sets a `config.toml` key to this text, or resets it with `None`.
     SettingWrite(String, Option<String>),
     NewThread,
@@ -1057,7 +1056,7 @@ fn extension_text(text: &str) -> String {
 /// Sections of the settings screen, in sidebar order; icons must be among gpui-kit's bundled defaults.
 const VOICE_SETTINGS: &str = "音声入力";
 const WORKFLOW_SETTINGS: &str = "自動化";
-const OMP_SETTINGS: &str = "OMP 設定";
+const RUNTIME_SETTINGS: &str = "動作設定";
 const SETTINGS_TABS: [(&str, Ic); 13] = [
     ("一般", Ic::Settings2),
     ("外観", Ic::Palette),
@@ -1071,7 +1070,7 @@ const SETTINGS_TABS: [(&str, Ic); 13] = [
     ("認証情報", Ic::EyeOff),
     ("ショートカットとファイル", Ic::File),
     ("詳細設定", Ic::Settings2),
-    (OMP_SETTINGS, Ic::LayoutDashboard),
+    (RUNTIME_SETTINGS, Ic::LayoutDashboard),
 ];
 
 /// Slash commands handled by the GUI in native threads, for completion.
@@ -1405,6 +1404,86 @@ fn switch(id: impl Into<ElementId>, label: impl Into<SharedString>, on: bool, pa
         .child(div().size(px(14.)).rounded_full().bg(hsla(0., 0., 1., 1.)))
 }
 
+fn settings_row(label: SharedString, hint: &str, control: impl IntoElement, pal: Pal) -> Div {
+    div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .justify_between()
+        .gap_x_6()
+        .gap_y_2()
+        .min_h(px(28.))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(148.))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .font_weight(FontWeight::MEDIUM)
+                .child(label)
+                .when(!hint.is_empty(), |d| {
+                    d.child(div().text_xs().font_weight(FontWeight::NORMAL).text_color(pal.muted).child(hint.to_string()))
+                }),
+        )
+        .child(control)
+}
+
+fn settings_select(
+    id: impl Into<ElementId>,
+    label: &str,
+    current: &str,
+    options: Vec<(&'static str, Vec<Act>)>,
+    pal: Pal,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    use gpui_kit::component::{
+        IndexPath, Sizable as _,
+        select::{SearchableVec, Select, SelectEvent, SelectState},
+    };
+    type Options = Vec<(&'static str, Vec<Act>)>;
+    type State = (Entity<SelectState<SearchableVec<&'static str>>>, Subscription, Options);
+
+    let index = options.iter().position(|(option, _)| *option == current);
+    let selected = index.map(|i| options[i].0);
+    let index = index.map(IndexPath::new);
+    let workspace = cx.weak_entity();
+    let entry = window.use_keyed_state(id, cx, |window, cx: &mut Context<State>| {
+        let items = SearchableVec::new(options.iter().map(|(label, _)| *label).collect::<Vec<_>>());
+        let select = cx.new(|cx| SelectState::new(items, index, window, cx).searchable(false));
+        let entry = cx.weak_entity();
+        let subscription = window.subscribe(&select, cx, move |_, event, window, cx| {
+            let SelectEvent::Confirm(Some(value)) = event else { return };
+            let Some(entry) = entry.upgrade() else { return };
+            let Some((_, acts)) = entry.read(cx).2.iter().find(|(label, _)| label == value) else { return };
+            let acts = acts.clone();
+            _ = workspace.update(cx, |this, cx| {
+                for act in acts {
+                    this.run(act, window, cx);
+                }
+            });
+        });
+        (select, subscription, Vec::new())
+    });
+    let select = entry.update(cx, |entry, _| {
+        entry.2 = options;
+        entry.0.clone()
+    });
+    if select.read(cx).selected_value().copied() != selected {
+        select.update(cx, |state, cx| state.set_selected_index(index, window, cx));
+    }
+    div().flex_shrink_0().w(px(160.)).child(
+        Select::new(&select)
+            .small()
+            .accessibility_label(label.to_owned())
+            .placeholder(current.to_owned())
+            .bg(pal.panel)
+            .text_color(pal.fg)
+            .border_color(pal.line),
+    )
+}
+
 /// Settings content laid out as in T3 Code: titled sections, each a bordered card of divided rows.
 struct SettingsPage {
     pal: Pal,
@@ -1442,10 +1521,10 @@ impl SettingsPage {
                 .when(!title.is_empty(), |d| {
                     d.child(
                         div()
-                            .px_1()
-                            .text_xs()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(pal.muted)
+                            .px_4()
+                            .text_base()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(pal.fg)
                             .child(title),
                     )
                 })
@@ -1459,7 +1538,7 @@ impl SettingsPage {
                         .children(rows.into_iter().enumerate().map(move |(i, row)| {
                             div()
                                 .px_4()
-                                .py_2p5()
+                                .py_3()
                                 .when(i > 0, |d| d.border_t_1().border_color(pal.line))
                                 .child(row)
                         })),
@@ -5969,15 +6048,20 @@ impl Workspace {
                 }
                 self.settings_tab = tab;
                 self.settings_scroll = ScrollHandle::default();
-                if matches!(name, "詳細設定" | OMP_SETTINGS) {
+                if matches!(name, "詳細設定" | RUNTIME_SETTINGS) {
                     self.advanced_load();
                 }
             }
             Act::SettingPick(key) => self.advanced_pick(key, window, cx),
             Act::SettingSave => self.advanced_save(false, window, cx),
             Act::SettingReset => self.advanced_save(true, window, cx),
-            Act::OmpTab(tab) => self.advanced.omp_tab = tab,
-            Act::OmpTool(name, on) => self.advanced_tool(name, on, window, cx),
+            Act::RuntimeCategory(category) => {
+                self.advanced.runtime_category = category;
+                self.advanced.key = None;
+                self.advanced.outcome = None;
+                self.settings_scroll.set_offset(point(px(0.), px(0.)));
+            }
+            Act::RuntimeTool(name, on) => self.advanced_tool(name, on, window, cx),
             Act::SettingWrite(key, value) => {
                 self.advanced.key = None;
                 self.advanced_write(&key, value);
@@ -9386,32 +9470,10 @@ impl Workspace {
     }
 
     /// The settings screen: every row changes its setting on click and saves at once.
-    fn settings_view(&self, pal: Pal, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+    fn settings_view(&self, pal: Pal, window: &mut Window, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let (fields, _) = self.settings.as_ref()?;
         let t = self.thread();
-        // The label, an optional short note under it, and the control on the right.
-        let row = |label: SharedString, hint: &str, control: AnyElement| {
-            div()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .justify_between()
-                .gap_4()
-                .min_h(px(28.))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w(px(148.))
-                        .flex()
-                        .flex_col()
-                        .gap_0p5()
-                        .child(label)
-                        .when(!hint.is_empty(), |d| {
-                            d.child(div().text_xs().text_color(pal.muted).child(hint.to_string()))
-                        }),
-                )
-                .child(control)
-        };
+        let row = |label, hint: &str, control: AnyElement| settings_row(label, hint, control, pal);
         let n = std::cell::Cell::new(0usize);
         let next_id = || {
             n.set(n.get() + 1);
@@ -9440,42 +9502,10 @@ impl Workspace {
                     .into_any_element(),
             )
         };
-        // Every option side by side; clicking one runs its actions in order.
-        let choice = |options: Vec<(&'static str, Vec<Act>)>, current: Option<usize>, cx: &mut Context<Self>| {
-            div()
-                .flex()
-                .flex_shrink_0()
-                .gap_0p5()
-                .p_0p5()
-                .rounded_lg()
-                .bg(pal.hover)
-                .children(
-                    options
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, (label, acts))| {
-                            let selected = current == Some(i);
-                            gpui_kit::base::Button::new(("setting-choice", next_id()))
-                                .accessibility_label(label)
-                                .aria_toggled(if selected { accesskit::Toggled::True } else { accesskit::Toggled::False })
-                                .px_2()
-                                .py_0p5()
-                                .rounded_md()
-                                .text_xs()
-                                .cursor_pointer()
-                                .text_color(if selected { pal.fg } else { pal.muted })
-                                .when(selected, |d| d.bg(pal.panel).shadow_sm())
-                                .hover(|s| s.text_color(pal.fg))
-                                .child(label)
-                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                    for act in &acts {
-                                        this.run(act.clone(), window, cx)
-                                    }
-                                }))
-                        })
-                        .collect::<Vec<_>>(),
-                )
-                .into_any_element()
+        let mut choice = |label: &'static str, options: Vec<(&'static str, Vec<Act>)>, current: Option<usize>, cx: &mut Context<Self>| {
+            let value = current.and_then(|i| options.get(i)).map_or("カスタム", |(value, _)| *value);
+            let id = (ElementId::from("setting-choice"), SharedString::from(label));
+            settings_select(id, label, value, options, pal, window, cx).into_any_element()
         };
         // Options of an action that steps through them in this order: an option repeats the step until it is reached.
         let cycle = |labels: &[&'static str], current: usize, act: Act| {
@@ -9525,16 +9555,17 @@ impl Workspace {
                     .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
                     .child("設定"),
             )
-            .child(div().flex().flex_col().gap_0p5().px_2().children(
+            .child(div().id("settings-nav").min_h_0().overflow_y_scroll().flex().flex_col().gap_0p5().px_2().children(
                 SETTINGS_TABS.iter().enumerate().map(|(i, &(name, icon))| {
                     gpui_kit::base::Button::new(("settings-tab", i))
                         .accessibility_label(name)
                         .aria_toggled(if i == tab { accesskit::Toggled::True } else { accesskit::Toggled::False })
                         .flex()
                         .items_center()
+                        .justify_start()
                         .gap_2()
-                        .px_2()
-                        .py_1()
+                        .px_3()
+                        .py_1p5()
                         .rounded_md()
                         .cursor_pointer()
                         .hover(|s| s.bg(pal.hover))
@@ -9593,7 +9624,7 @@ impl Workspace {
                     .child(row(
                         "アプリの終了".into(),
                         "⌘Q を押したとき",
-                        choice(cycle(&["2回押す", "すぐに終了", "長押し"], quit, Act::CycleQuitMode), Some(quit), cx),
+                        choice("アプリの終了", cycle(&["2回押す", "すぐに終了", "長押し"], quit, Act::CycleQuitMode), Some(quit), cx),
                     ))
                     .section("画面の撮影")
                     .child(toggle(
@@ -9679,18 +9710,19 @@ impl Workspace {
                     .child(row(
                         "作業の履歴".into(),
                         "ファイルの読み書きやコマンドの実行結果",
-                        choice(cycle(&["すべて", "失敗のみ", "非表示", "回答だけ"], tools, Act::ToolVisibility), Some(tools), cx),
+                        choice("作業の履歴", cycle(&["すべて", "失敗のみ", "非表示", "回答だけ"], tools, Act::ToolVisibility), Some(tools), cx),
                     ))
                     .section("入力")
                     .child(row(
                         "送信キー".into(),
                         "",
-                        choice(cycle(&["Enter", "⌘Enter"], cmd_enter as usize, Act::SendShortcut), Some(cmd_enter as usize), cx),
+                        choice("送信キー", cycle(&["Enter", "⌘Enter"], cmd_enter as usize, Act::SendShortcut), Some(cmd_enter as usize), cx),
                     ))
                     .child(row(
                         "作業中に送信したとき".into(),
                         "実行中に送信できない接続先では、次の送信として予約します。",
                         choice(
+                            "作業中に送信したとき",
                             cycle(&["送信を予約", "実行中に送信"], steer as usize, Act::Toggle("follow_up_steer")),
                             Some(steer as usize),
                             cx,
@@ -9835,6 +9867,7 @@ impl Workspace {
                         "回答前の検討量".into(),
                         "対応するモデルで使用",
                         choice(
+                            "回答前の検討量",
                             efforts
                                 .iter()
                                 .zip(["既定", "低", "中", "高"])
@@ -9848,12 +9881,12 @@ impl Workspace {
                     .child(row(
                         "新しいスレッド".into(),
                         policy_hint(mode_locked, ""),
-                        choice(mode_choices(Act::DefaultMode), modes.iter().position(|m| *m == self.cfg.mode), cx),
+                        choice("新しいスレッドの権限", mode_choices(Act::DefaultMode), modes.iter().position(|m| *m == self.cfg.mode), cx),
                     ))
                     .child(row(
                         "現在のスレッド".into(),
                         "",
-                        choice(mode_choices(Act::Mode), modes.iter().position(|m| *m == t.perms.mode()), cx),
+                        choice("現在のスレッドの権限", mode_choices(Act::Mode), modes.iter().position(|m| *m == t.perms.mode()), cx),
                     ))
                     .child(toggle(
                         "シェルの書き込み先を制限",
@@ -9886,7 +9919,7 @@ impl Workspace {
                     .child(row(
                         "会話履歴の整理".into(),
                         "履歴が長くなったとき、続きを進めるために内容を短くまとめます。",
-                        choice(cycle(&["要約", "引き継ぎメモ", "オフ"], compaction, Act::CycleCompaction), Some(compaction), cx),
+                        choice("会話履歴の整理", cycle(&["要約", "引き継ぎメモ", "オフ"], compaction, Act::CycleCompaction), Some(compaction), cx),
                     ))
                     .child(toggle(
                         "作業で得た知識を保存",
@@ -10050,6 +10083,7 @@ impl Workspace {
                         "サブモジュール".into(),
                         "",
                         choice(
+                            "サブモジュール",
                             cycle(&["再帰的", "トップレベルのみ", "スキップ"], submodules, Act::CycleWorktreeSubmodules),
                             Some(submodules),
                             cx,
@@ -10094,7 +10128,7 @@ impl Workspace {
             }
             "認証情報" => col = self.secrets_section(col, pal, cx),
             "詳細設定" => col = self.advanced_section(col, pal, cx),
-            OMP_SETTINGS => col = self.omp_section(col, pal, cx),
+            RUNTIME_SETTINGS => col = self.runtime_section(col, pal, window, cx),
             WORKFLOW_SETTINGS => {
                 let workflows = greencode_core::workflow::paths().workflows;
                 col = col
@@ -10328,7 +10362,7 @@ impl Render for Workspace {
         let model_picker = self
             .model_picker_view(pal, cx)
             .map(|p| p.into_any_element());
-        let settings = self.settings_view(pal, cx).map(|p| p.into_any_element());
+        let settings = self.settings_view(pal, window, cx).map(|p| p.into_any_element());
         let theme_editor = self
             .theme_editor_view(pal, cx)
             .map(|p| p.into_any_element());
@@ -13747,25 +13781,25 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    async fn omp_settings_tab_edits_native_settings_and_tools(cx: &mut TestAppContext) {
+    async fn runtime_settings_edit_native_settings_and_tools(cx: &mut TestAppContext) {
         let (ws, cx) = open(cx);
         cx.simulate_keystrokes("cmd-,");
         cx.update(|window, cx| {
             ws.update(cx, |ws, cx| {
-                ws.run(super::Act::SettingsTab(super::OMP_SETTINGS), window, cx);
-                // OMP's choices become chips only where the native key accepts them.
+                ws.run(super::Act::SettingsTab(super::RUNTIME_SETTINGS), window, cx);
+                // Only list values that GreenCode accepts for the native setting.
                 assert_eq!(ws.advanced.choices["tui.symbol_preset"], ["unicode", "nerd", "ascii"]);
                 ws.run(super::Act::SettingWrite("tui.symbol_preset".into(), Some("ascii".into())), window, cx);
                 assert_eq!(ws.cfg.tui.symbol_preset, greencode_core::config::SymbolPreset::Ascii);
                 ws.run(super::Act::SettingWrite("tui.symbol_preset".into(), None), window, cx);
                 assert_eq!(ws.cfg.tui.symbol_preset, greencode_core::config::SymbolPreset::Unicode);
                 // A built-in tool goes through the allowlist; an `ext` one through the ツール tab's switch.
-                ws.run(super::Act::OmpTool("grep", false), window, cx);
+                ws.run(super::Act::RuntimeTool("grep", false), window, cx);
                 assert!(!greencode_core::tools::tool_on(&ws.cfg.tools, "grep") && greencode_core::tools::tool_on(&ws.cfg.tools, "read"));
-                ws.run(super::Act::OmpTool("ast", false), window, cx);
+                ws.run(super::Act::RuntimeTool("ast", false), window, cx);
                 assert!(ws.cfg.ext_off.iter().any(|t| t == "ast"));
                 // The GUI's own overrides survive the reload a config edit triggers.
-                ws.run(super::Act::OmpTool("grep", true), window, cx);
+                ws.run(super::Act::RuntimeTool("grep", true), window, cx);
                 assert!(ws.cfg.tools.is_empty() && ws.cfg.ext_off.iter().any(|t| t == "ast"));
             })
         });
