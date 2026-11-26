@@ -2796,7 +2796,9 @@ impl Workspace {
             let known = self.probed.contains(&(b.name.clone(), scope.clone()))
                 || (!legacy
                     && cached.get(&b.name).is_some_and(|models| !models.is_empty())
-                    && self.backend_options.contains_key(&b.name));
+                    && self.backend_options.contains_key(&b.name)
+                    // Caches written before model names were kept have no model option.
+                    && (b.protocol != greencode_core::config::Protocol::Acp || self.cached_model_option(&b.name).is_some()));
             // Config resolves installed agents to an absolute path; skip the ones that are not installed.
             if (known && !force)
                 || !b.command.first().is_some_and(|c| {

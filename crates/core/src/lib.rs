@@ -424,7 +424,7 @@ pub fn cache_backend_options(backend: &str, options: &[Value]) -> std::io::Resul
 
 /// Options that can be controlled from the model picker.
 pub fn picker_backend_option(option: &Value) -> bool {
-    matches!(option["category"].as_str(), Some("reasoning" | "effort" | "thought" | "thinking" | "thought_level" | "thinking_level" | "reasoning_effort"))
+    matches!(option["category"].as_str(), Some("model" | "reasoning" | "effort" | "thought" | "thinking" | "thought_level" | "thinking_level" | "reasoning_effort"))
         || matches!(option["id"].as_str(), Some("reasoning_effort" | "effort" | "thinking" | "thinking_level" | "reasoning"))
         || (option["category"] == "model_config" && matches!(option["id"].as_str(), Some("fast" | "fast-mode")))
 }

@@ -129,17 +129,22 @@ impl Workspace {
                     }
                 }
             }
-            add(&t.meta.backend, ids, model_option);
+            add(&t.meta.backend, ids, model_option.or_else(|| self.cached_model_option(&t.meta.backend)));
         }
         if t.meta.backend != "native" {
             add("native", self.models(), None);
         }
         for (backend, ids) in &cached {
             if backend != &t.meta.backend && backend != "native" {
-                add(backend, ids.clone(), None);
+                add(backend, ids.clone(), self.cached_model_option(backend));
             }
         }
         result
+    }
+
+    /// The model option an ACP backend reported last, for its model names.
+    pub(super) fn cached_model_option(&self, backend: &str) -> Option<&Value> {
+        self.backend_options.get(backend)?.iter().find(|o| o["category"] == "model")
     }
 
     /// Rail entries: one per backend, in list order (T3's provider rail).
@@ -1090,6 +1095,18 @@ mod tests {
             ws.active = ws.threads.len() - 1;
             assert!(!ws.reasoning_rows().1.iter().any(|row| row.2));
             assert_eq!(ws.fast_option(), Some((json!("fast-mode"), None)));
+        }));
+    }
+
+    #[gpui_kit::test]
+    async fn cached_acp_models_show_their_names(cx: &mut TestAppContext) {
+        let (ws, cx) = open(cx);
+        cx.update(|_, cx| ws.update(cx, |ws, _| {
+            ws.backend_models.insert("claude-code".into(), vec!["default".into(), "opus".into()]);
+            let option = json!({"id":"model","category":"model","currentValue":"opus","options":[{"value":"default","name":"Default (recommended)"},{"value":"opus","name":"Opus 5.5"}]});
+            ws.backend_options.insert("claude-code".into(), greencode_core::cacheable_picker_options(&[option]));
+            let names: Vec<_> = ws.offered_models().into_iter().filter(|r| r.backend == "claude-code").map(|r| r.name).collect();
+            assert_eq!(names, ["Default (recommended)", "Opus 5.5"]);
         }));
     }
 
