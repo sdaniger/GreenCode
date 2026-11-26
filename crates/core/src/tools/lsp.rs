@@ -208,7 +208,14 @@ async fn shared_server(root: &Path, exe: &Path, args: &[&str]) -> Result<Arc<Ser
     shared_at(&broker_socket(root), root, exe, args).await
 }
 
+/// The broker speaks over a Unix socket; elsewhere `lsp.shared` reports that and the caller runs its own server.
+#[cfg(not(unix))]
+async fn shared_at(_socket: &Path, _root: &Path, _exe: &Path, _args: &[&str]) -> Result<Arc<Server>> {
+    bail!("lsp.shared needs Unix sockets")
+}
+
 /// `shared_server` at an explicit socket, so tests can run a broker in-process.
+#[cfg(unix)]
 async fn shared_at(socket: &Path, root: &Path, exe: &Path, args: &[&str]) -> Result<Arc<Server>> {
     use tokio::net::UnixStream;
     let socket = socket.to_path_buf();
@@ -839,6 +846,11 @@ pub async fn serve_broker(socket: &Path) -> Result<()> {
         .and_then(|v| v.parse::<u64>().ok())
         .map_or(Duration::from_secs(120), Duration::from_millis);
     serve_broker_with(socket, idle).await
+}
+
+#[cfg(not(unix))]
+pub async fn serve_broker(_socket: &Path) -> Result<()> {
+    bail!("lsp.shared needs Unix sockets")
 }
 
 /// `serve_broker` with an explicit idle timeout, for tests.

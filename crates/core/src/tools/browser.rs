@@ -19,7 +19,6 @@ use std::{
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
-    net::UnixStream,
     process::{Child, Command},
     sync::Mutex,
 };
@@ -210,9 +209,11 @@ fn installed_webkit(cfg: &BrowserCfg, env: &Env) -> Option<PathBuf> {
 fn webkit_host(location: &Path) -> Option<PathBuf> {
     let name = if cfg!(windows) { "ABHost.exe" } else { "ABHost" };
     let candidate = if location.is_dir() { location.join(name) } else { location.to_path_buf() };
-    let ok = candidate.is_file()
-        && (cfg!(windows)
-            || std::os::unix::fs::PermissionsExt::mode(&candidate.metadata().ok()?.permissions()) & 0o111 != 0);
+    #[cfg(unix)]
+    let runnable = std::os::unix::fs::PermissionsExt::mode(&candidate.metadata().ok()?.permissions()) & 0o111 != 0;
+    #[cfg(not(unix))]
+    let runnable = true;
+    let ok = candidate.is_file() && runnable;
     ok.then_some(candidate)
 }
 
@@ -536,11 +537,10 @@ struct Tern {
 
 impl Tern {
     async fn over_socket(path: &str, product: &'static str) -> Result<Tern> {
-        let stream = UnixStream::connect(path)
+        let (read, write) = unix_socket(path)
             .await
             .with_context(|| format!("cannot connect to the {product} socket at {path}"))?;
-        let (read, write) = stream.into_split();
-        Tern::greet(Box::new(write), Box::new(read), product, None).await
+        Tern::greet(write, read, product, None).await
     }
 
     async fn over_host(executable: &Path) -> Result<Tern> {
@@ -660,9 +660,25 @@ impl Tern {
 
 // ─── cmux socket ───────────────────────────────────────────────────────────────
 
+type SocketHalves = (Box<dyn AsyncRead + Send + Unpin>, Box<dyn AsyncWrite + Send + Unpin>);
+
+/// Tern and cmux listen on Unix sockets, which this build only has on Unix.
+async fn unix_socket(path: &str) -> std::io::Result<SocketHalves> {
+    #[cfg(unix)]
+    {
+        let (read, write) = tokio::net::UnixStream::connect(path).await?.into_split();
+        Ok((Box::new(read), Box::new(write)))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "Unix sockets are not available on this platform"))
+    }
+}
+
 struct Cmux {
-    read: BufReader<tokio::net::unix::OwnedReadHalf>,
-    write: tokio::net::unix::OwnedWriteHalf,
+    read: BufReader<Box<dyn AsyncRead + Send + Unpin>>,
+    write: Box<dyn AsyncWrite + Send + Unpin>,
     next: u64,
 }
 
@@ -671,10 +687,9 @@ impl Cmux {
         if !path.starts_with('/') {
             bail!("cmux browser needs a socket path (CMUX_SOCKET_PATH), not the relay endpoint {path}");
         }
-        let stream = UnixStream::connect(path)
+        let (read, write) = unix_socket(path)
             .await
             .with_context(|| format!("cannot connect to the cmux socket at {path}"))?;
-        let (read, write) = stream.into_split();
         let mut cmux = Cmux { read: BufReader::new(read), write, next: 1 };
         if let Some(password) = password.filter(|p| !p.is_empty()) {
             cmux.write.write_all(format!("auth {password}\n").as_bytes()).await?;

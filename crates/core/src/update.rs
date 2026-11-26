@@ -102,7 +102,17 @@ pub async fn run(repo: &str, channel: Channel, executable: Option<&Path>) -> Res
         .https_only(true)
         .timeout(Duration::from_secs(120))
         .build()?;
-    update_from(&client, "https://api.github.com", &repo, channel, main_commit(), executable).await
+    update_from(&client, "https://api.github.com", &repo, channel, main_commit(), executable, github_token().as_deref()).await
+}
+
+/// Anonymous API calls share a 60-per-hour limit per IP; a token (env or `gh auth token`) lifts it.
+fn github_token() -> Option<String> {
+    let env = ["GH_TOKEN", "GITHUB_TOKEN"].iter().find_map(|k| std::env::var(k).ok().filter(|v| !v.trim().is_empty()));
+    env.or_else(|| {
+        let out = Command::new("gh").args(["auth", "token"]).stderr(Stdio::null()).output().ok()?;
+        let token = String::from_utf8(out.stdout).ok()?.trim().to_string();
+        (out.status.success() && !token.is_empty()).then_some(token)
+    })
 }
 
 async fn update_from(
@@ -112,17 +122,29 @@ async fn update_from(
     channel: Channel,
     commit: Option<&str>,
     executable: Option<&Path>,
+    token: Option<&str>,
 ) -> Result<UpdateResult> {
     let endpoint = match channel {
         Channel::Stable => "latest",
         Channel::Main => "tags/main-build",
     };
     let asset_name = asset_name()?;
-    let api: ApiRelease = client
+    let mut request = client
         .get(format!("{api_base}/repos/{repo}/releases/{endpoint}"))
-        .header("accept", "application/vnd.github+json")
-        .send()
-        .await?
+        .header("accept", "application/vnd.github+json");
+    if let Some(token) = token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await?;
+    let status = response.status().as_u16();
+    let exhausted = response.headers().get("x-ratelimit-remaining").is_some_and(|v| v == "0");
+    if (status == 403 || status == 429) && exhausted {
+        bail!("GitHub API rate limit reached for {repo}; set GH_TOKEN or run `gh auth login`, then retry");
+    }
+    if status == 404 && channel == Channel::Main {
+        bail!("{repo} has no main build published yet; wait for the Release workflow on main to finish");
+    }
+    let api: ApiRelease = response
         .error_for_status()
         .with_context(|| format!("could not read the GitHub update for {repo} ({channel:?})"))?
         .json()
@@ -220,22 +242,37 @@ fn asset_name() -> Result<String> {
     }
 }
 
+/// Replaces the running binary and, when installed next to it, its GUI/CLI sibling, so both stay on one build.
 fn replace_binary(executable: &Path, archive: &[u8]) -> Result<()> {
     let executable = executable.canonicalize().with_context(|| format!("cannot locate {}", executable.display()))?;
     let parent = executable.parent().context("installed executable has no parent directory")?;
     let name = executable.file_name().context("installed executable has no file name")?;
+    let sibling = if name == "greencode" { "greencode-cli" } else { "greencode" };
+    let mut targets = vec![executable.clone()];
+    if name == "greencode" || name == "greencode-cli" {
+        targets.extend(Some(parent.join(sibling)).filter(|p| p.is_file()));
+    }
     let staging = tempfile::tempdir_in(parent)?;
     let archive_path = staging.path().join("archive.tar.gz");
     fs::write(&archive_path, archive)?;
-    let replacement = staging.path().join("binary");
-    // Extract only the selected binary to stdout; tar never creates archive paths on disk.
-    let status = Command::new("tar")
-        .arg("-xOzf").arg(&archive_path).arg("--").arg(name)
-        .stdout(Stdio::from(fs::File::create(&replacement)?))
-        .status()?;
-    anyhow::ensure!(status.success() && replacement.metadata()?.len() != 0, "update archive has no {} binary", name.to_string_lossy());
-    fs::set_permissions(&replacement, executable.metadata()?.permissions())?;
-    fs::rename(&replacement, &executable).with_context(|| format!("cannot replace {}", executable.display()))?;
+    // Extract every binary before replacing any, so a bad archive leaves the install untouched.
+    let mut staged = Vec::new();
+    for (i, target) in targets.iter().enumerate() {
+        let name = target.file_name().context("installed executable has no file name")?;
+        let replacement = staging.path().join(format!("binary-{i}"));
+        // Extract only the selected binary to stdout; tar never creates archive paths on disk.
+        let status = Command::new("tar")
+            .arg("-xOzf").arg(&archive_path).arg("--").arg(name)
+            .stdout(Stdio::from(fs::File::create(&replacement)?))
+            .stderr(Stdio::null())
+            .status()?;
+        anyhow::ensure!(status.success() && replacement.metadata()?.len() != 0, "update archive has no {} binary", name.to_string_lossy());
+        fs::set_permissions(&replacement, target.metadata()?.permissions())?;
+        staged.push((replacement, target));
+    }
+    for (replacement, target) in staged {
+        fs::rename(&replacement, target).with_context(|| format!("cannot replace {}", target.display()))?;
+    }
     Ok(())
 }
 
@@ -274,14 +311,19 @@ mod tests {
         let source = temp.path().join("source");
         fs::create_dir(&source).unwrap();
         fs::write(source.join("greencode-cli"), "#!/bin/sh\nprintf updated").unwrap();
+        fs::write(source.join("greencode"), "#!/bin/sh\nprintf gui-updated").unwrap();
         let archive = temp.path().join("update.tar.gz");
         assert!(Command::new("tar").arg("-czf").arg(&archive).arg("-C").arg(&source)
-            .arg("greencode-cli").status().unwrap().success());
+            .arg("greencode-cli").arg("greencode").status().unwrap().success());
         let archive = fs::read(archive).unwrap();
         let executable = temp.path().join("greencode-cli");
-        fs::write(&executable, "#!/bin/sh\nprintf original").unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
-        let output = || Command::new(&executable).output().unwrap().stdout;
+        let gui = temp.path().join("greencode");
+        for (path, text) in [(&executable, "original"), (&gui, "gui-original")] {
+            fs::write(path, format!("#!/bin/sh\nprintf {text}")).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let run = |path: &Path| Command::new(path).output().unwrap().stdout;
+        let output = || run(&executable);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -322,7 +364,7 @@ mod tests {
         });
 
         let client = Client::builder().no_proxy().timeout(Duration::from_secs(5)).build().unwrap();
-        let update = |commit, executable| update_from(&client, &base, "acme/green", Channel::Main, commit, executable);
+        let update = |commit, executable| update_from(&client, &base, "acme/green", Channel::Main, commit, executable, None);
         let check = update(None, None).await.unwrap();
         assert!(check.available && !check.installed);
         assert_eq!(check.latest, "main@0123456789ab");
@@ -333,9 +375,11 @@ mod tests {
         let error = update(None, Some(&executable)).await.unwrap_err();
         assert!(error.to_string().contains("checksum mismatch"));
         assert_eq!(output(), b"original");
+        assert_eq!(run(&gui), b"gui-original");
 
         assert!(update(None, Some(&executable)).await.unwrap().installed);
         assert_eq!(output(), b"updated");
+        assert_eq!(run(&gui), b"gui-updated", "the GUI next to the CLI moves to the same build");
         server.await.unwrap();
     }
 }
