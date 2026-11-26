@@ -375,12 +375,141 @@ impl Workspace {
             cx.notify();
         }
     }
+
+    /// An agent's `schedule_task` / `list_scheduled_tasks` / `delete_scheduled_task` on `ui["schedules"]`.
+    pub(super) fn schedule_request(&mut self, req: &Value) -> Value {
+        let now = now();
+        if !self.ui["schedules"].is_array() {
+            self.ui["schedules"] = json!([]);
+        }
+        let list = self.ui["schedules"].as_array_mut().unwrap();
+        // `/schedule` entries have no id until an agent sees them.
+        for (i, s) in list.iter_mut().enumerate() {
+            if s["id"].is_null() {
+                s["id"] = json!(format!("s{now:x}{i}"));
+            }
+        }
+        let show = |s: &Value| {
+            json!({"scheduledTaskId": s["id"], "title": s["title"], "prompt": s["prompt"], "project": s["project"],
+                "enabled": s["enabled"] != false, "everyMs": s["every"].as_u64().map(|e| e * 1000), "timeOfDay": s["time"],
+                "weekdays": s["weekdays"], "backend": s["backend"], "model": s["model"], "nextRunAt": s["next"]})
+        };
+        let id = req["scheduledTaskId"].as_str();
+        let result = match req["action"].as_str() {
+            Some("list") => {
+                let all = req["allProjects"] == true;
+                let rows: Vec<Value> = list.iter().filter(|s| all || s["project"] == req["project"]).map(show).collect();
+                return json!({"scheduledTasks": rows, "note": "Runs happen only while the GreenCode app is open."});
+            }
+            Some("delete") => {
+                let before = list.len();
+                list.retain(|s| s["id"].as_str() != id);
+                if list.len() == before {
+                    return json!({"error": "unknown scheduledTaskId"});
+                }
+                json!({"scheduledTaskId": id, "deleted": true})
+            }
+            Some("save") => {
+                let ix = match id {
+                    Some(id) => match list.iter().position(|s| s["id"] == id) {
+                        Some(ix) => ix,
+                        None => return json!({"error": "unknown scheduledTaskId"}),
+                    },
+                    None => {
+                        if req["prompt"].as_str().is_none_or(|p| p.trim().is_empty()) || !req["schedule"].is_object() {
+                            return json!({"error": "a new scheduled task needs `prompt` and `schedule`"});
+                        }
+                        list.push(json!({"id": format!("s{now:x}{}", list.len()), "project": req["project"]}));
+                        list.len() - 1
+                    }
+                };
+                let mut s = list[ix].clone();
+                for (key, field) in [("prompt", "prompt"), ("title", "title"), ("enabled", "enabled")] {
+                    if !req[key].is_null() {
+                        s[field] = req[key].clone();
+                    }
+                }
+                for key in ["backend", "model"] {
+                    if let Some(v) = req["target"][key].as_str() {
+                        s[key] = json!(v);
+                    }
+                }
+                let schedule = &req["schedule"];
+                match schedule["type"].as_str() {
+                    None => {}
+                    Some("interval") => match schedule["everyMs"].as_u64().filter(|ms| *ms >= 60_000) {
+                        Some(ms) => {
+                            let obj = s.as_object_mut().unwrap();
+                            obj.remove("time");
+                            obj.remove("weekdays");
+                            s["every"] = json!(ms / 1000);
+                            s["next"] = json!(now + ms / 1000);
+                        }
+                        None => return json!({"error": "`everyMs` must be at least 60000"}),
+                    },
+                    Some("fixed_time") => {
+                        let time = schedule["timeOfDay"].as_str().unwrap_or("");
+                        let weekdays: Vec<u64> = schedule["weekdays"].as_array().into_iter().flatten().filter_map(Value::as_u64).collect();
+                        if weekdays.iter().any(|d| *d > 6) {
+                            return json!({"error": "`weekdays` are 0 (Sunday) to 6"});
+                        }
+                        let Some(next) = next_fixed(now, time, &weekdays, utc_offset()) else {
+                            return json!({"error": "`timeOfDay` must be HH:MM"});
+                        };
+                        s.as_object_mut().unwrap().remove("every");
+                        s["time"] = json!(time);
+                        s["weekdays"] = json!(weekdays);
+                        s["next"] = json!(next);
+                    }
+                    Some(other) => return json!({"error": format!("unknown schedule type `{other}`: interval or fixed_time")}),
+                }
+                if s["every"].is_null() && s["time"].is_null() {
+                    return json!({"error": "`schedule` is required"});
+                }
+                list[ix] = s.clone();
+                let mut v = show(&s);
+                v["nextRunAtLocal"] = json!(clock_local(s["next"].as_u64().unwrap_or(now)));
+                v["note"] = json!("Each run starts a new thread in this project while the GreenCode app is open.");
+                v
+            }
+            _ => return json!({"error": "unknown schedule action"}),
+        };
+        self.save_ui();
+        result
+    }
+}
+
+/// The next local `time` (`HH:MM`) after `after` on one of `weekdays` (0 is Sunday; empty: any day).
+pub(super) fn next_fixed(after: u64, time: &str, weekdays: &[u64], offset: i64) -> Option<u64> {
+    let (h, m) = time.split_once(':')?;
+    let (h, m): (i64, i64) = (h.parse().ok()?, m.parse().ok()?);
+    if !(0..24).contains(&h) || !(0..60).contains(&m) {
+        return None;
+    }
+    let today = (after as i64 + offset).div_euclid(86400);
+    (today..today + 8).find_map(|day| {
+        let at = day * 86400 + h * 3600 + m * 60 - offset;
+        // 1970-01-01 was a Thursday.
+        let weekday = (day + 4).rem_euclid(7) as u64;
+        (at > after as i64 && (weekdays.is_empty() || weekdays.contains(&weekday))).then_some(at as u64)
+    })
 }
 
 #[cfg(test)]
 mod tests {
     // Not `super::*`: that glob carries gpui_kit's `test` attribute, which shadows the builtin and recurses.
     use super::{clock, parse_offset, parse_when};
+
+    #[test]
+    fn next_fixed_finds_the_next_allowed_weekday() {
+        let now = 1_700_000_000; // Tuesday 2023-11-14 22:13:20 UTC
+        assert_eq!(super::next_fixed(now, "23:00", &[], 0), Some(1_700_002_800));
+        assert_eq!(super::next_fixed(now, "22:00", &[], 0), Some(1_700_002_800 + 86400 - 3600));
+        // Sunday 2023-11-19 09:00 UTC, and 09:00 local at +09:00.
+        assert_eq!(super::next_fixed(now, "09:00", &[0], 0), Some(1_700_384_400));
+        assert_eq!(super::next_fixed(now, "09:00", &[0], 32400), Some(1_700_384_400 - 32400));
+        assert_eq!(super::next_fixed(now, "24:00", &[], 0), None);
+    }
 
     #[test]
     fn schedule_parse_when_handles_relative_and_clock_times() {

@@ -85,7 +85,7 @@ async fn request_uses_responses_wire() {
     let tools = greencode_core::tools::defs(false, &[]);
     let streamed = std::sync::Mutex::new(String::new());
     let on_text = |t: &str| streamed.lock().unwrap().push_str(t);
-    let reply = client.complete(Request { model: "gpt-5.5", system: "sys", messages: &messages, tools: &tools, max_tokens: 1000 }, &on_text).await.unwrap();
+    let reply = client.complete(Request { model: "gpt-5.5", system: "sys", messages: &messages, tools: &tools, max_tokens: 1000, live: None }, &on_text).await.unwrap();
     let (head, body) = server.await.unwrap().remove(0);
     assert!(head.contains("authorization: bearer "), "{head}");
     assert!(head.contains("chatgpt-account-id: acc") && head.contains("originator: greencode"), "{head}");

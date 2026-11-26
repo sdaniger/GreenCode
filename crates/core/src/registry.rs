@@ -94,6 +94,29 @@ fn records() -> Result<Vec<Installed>> {
     }
 }
 pub fn installed() -> Vec<Installed> { records().unwrap_or_default() }
+
+/// Installed entries the registry lists at another version; only those are update candidates.
+pub fn outdated(installed: &[Installed], entries: &[Entry]) -> Vec<Entry> {
+    entries.iter().filter(|entry| installed.iter().any(|i| i.id == entry.id && i.version != entry.version)).cloned().collect()
+}
+
+/// `marketplace.autoUpdate`: what startup does with the update candidates.
+#[derive(Debug)]
+pub struct UpdatePlan {
+    /// Off: no check at all.
+    pub check: bool,
+    pub install: bool,
+    pub entries: Vec<Entry>,
+}
+
+pub fn update_plan(mode: crate::config::interaction::MarketplaceUpdate, stale: Vec<Entry>) -> UpdatePlan {
+    use crate::config::interaction::MarketplaceUpdate::*;
+    match mode {
+        Off => UpdatePlan { check: false, install: false, entries: Vec::new() },
+        Notify => UpdatePlan { check: true, install: false, entries: stale },
+        Auto => UpdatePlan { check: true, install: true, entries: stale },
+    }
+}
 fn save(records: &[Installed]) -> Result<()> {
     std::fs::create_dir_all(crate::home())?;
     let path = crate::home().join("registry-agents.json");
@@ -285,5 +308,30 @@ mod tests {
         assert_eq!(archive_sizes(&["?rw-------  2.0 unx  1024 b-  1024 stor 26-Nov-18 14:57 agy_acp_server.par", "?rwxr-xr-x  2.0 unx  0 b-  0 stor 26-Nov-18 14:57 sub/"], true).unwrap(), 1024);
         assert!(archive_sizes(&["lrwxrwxrwx  2.0 unx     6 b-     6 stor 80-Jan-01 00:00 link"], true).is_err());
         assert!(archive_sizes(&["-rw-r--r--  3.0 unx  huge tx  1 stor 26-Nov-13 04:21 a.txt"], true).is_err());
+    }
+
+    #[test]
+    fn outdated_lists_only_installed_entries_at_another_version() {
+        let entries = super::parse(r#"{"agents":[
+            {"id":"a","name":"A","version":"2","distribution":{"npx":{"package":"a"}}},
+            {"id":"b","name":"B","version":"1","distribution":{"npx":{"package":"b"}}},
+            {"id":"c","name":"C","version":"1","distribution":{"npx":{"package":"c"}}}]}"#).unwrap();
+        let installed = ["a", "b", "z"].into_iter().zip(["1", "1", "1"]).map(|(id, version)| super::Installed {
+            id: id.into(), name: id.into(), version: version.into(), command: vec![], env: Default::default(),
+        }).collect::<Vec<_>>();
+        let stale: Vec<_> = super::outdated(&installed, &entries).into_iter().map(|e| e.id).collect();
+        assert_eq!(stale, ["a"]);
+    }
+
+    #[test]
+    fn marketplace_modes_check_report_or_install() {
+        use crate::config::interaction::MarketplaceUpdate;
+        let entries = super::parse(r#"{"agents":[{"id":"a","name":"A","version":"2","distribution":{"npx":{"package":"a"}}}]}"#).unwrap();
+        let off = super::update_plan(MarketplaceUpdate::Off, entries.clone());
+        assert!(!off.check && !off.install && off.entries.is_empty());
+        let notify = super::update_plan(MarketplaceUpdate::Notify, entries.clone());
+        assert!(notify.check && !notify.install && notify.entries.len() == 1);
+        let auto = super::update_plan(MarketplaceUpdate::Auto, entries);
+        assert!(auto.check && auto.install && auto.entries.len() == 1);
     }
 }

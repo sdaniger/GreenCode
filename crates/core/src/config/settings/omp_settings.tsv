@@ -1,0 +1,470 @@
+theme.dark	appearance	Theme	Dark Theme		Theme used when the terminal has a dark background
+theme.light	appearance	Theme	Light Theme		Theme used when the terminal has a light background
+symbolPreset	appearance	Theme	Symbol Preset	unicode|nerd|ascii	Glyph set for icons and symbols (Unicode, Nerd Font, or ASCII)
+colorBlindMode	appearance	Theme	Color-Blind Mode		Use blue instead of green for diff additions
+composer.shape	appearance	Composer	Composer Shape		Visual layout of the input editor and status line
+composer.tokenRate	appearance	Composer	Generation Rate		Show a live generation tok/s readout: on the working row next to the session title, or in the native composer bar right after the thinking level, where the last reading stays between turns. Estimated from streamed deltas and corrected by the provider's billed output count as each message completes.
+statusLine.preset	appearance	Status Line	Status Line Preset	default|minimal|compact|full|nerd|ascii|custom	Pre-built status line configurations
+statusLine.separator	appearance	Status Line	Status Line Separator	powerline|powerline-thin|slash|pipe|block|none|ascii	Style of separators between segments
+statusLine.contextLine	appearance	Status Line	Context-Reactive Line	off|percentage|annotated|embedded	How the line between the left and right segments reflects context usage (box composer only)
+statusLine.sessionAccent	appearance	Status Line	Session Accent		Use the session name color for the editor border and status line gap
+statusLine.transparent	appearance	Status Line	Transparent Status Line		Use the terminal's default background for the status line instead of the theme's `statusLineBg`. Powerline end caps are dropped because they need a contrasting fill to bridge into the surrounding terminal.
+statusLine.compactThinkingLevel	appearance	Status Line	Compact Thinking Level		Show the thinking level as a single icon on the model name instead of a separate ` \xB7 <level>` suffix; in Tern's composer, as the model chip's icon instead of a separate chip (click the icon to cycle it).
+statusLine.showHookStatus	appearance	Status Line	Show Hook Status		Display hook status messages below the status line
+task.showResolvedModelBadge	appearance	Display	Show Resolved Model Badge		Display the actual model ID used by each subagent in the task widget status line
+tui.resizeScrollback	appearance	Display	Resize Scrollback	append|rebuild|preserve	How a settled terminal resize refreshes transcript rows retained in terminal scrollback
+terminal.showProgress	appearance	Display	Native Terminal Progress		Emit OSC 9;4 indeterminate progress while the agent or context maintenance is running (always on in Tern)
+terminal.programStatus	appearance	Display	Program Status (OSC 7501)		Report whether the agent is working, waiting on you, done, or failed over OSC 7501, for terminal tab indicators and agent inboxes
+tui.textSizing	appearance	Display	Large Headings (Kitty)		Render Markdown H1 headings at 2x scale using Kitty's OSC 66 text-sizing protocol. Only takes effect on Kitty terminals; ignored everywhere else. Off by default.
+tui.colorfulMarkdown	appearance	Display	Colorful Markdown		Color headings by level, bold and italic text, inline code, and table headers from the theme's ANSI palette. Off uses one heading color and plain bold/italic.
+tui.renderMermaid	appearance	Display	Render Mermaid Diagrams		Render Mermaid fenced code blocks as ASCII diagrams
+tui.renderSvg	appearance	Display	Render SVG Figures		Invite the agent to draw diagrams and charts as SVG, rendered inline as images on terminals that show graphics
+tui.renderEmbeds	appearance	Display	Render Embedded Images and Pages		Invite the agent to show pictures with <img> and web pages with <iframe>, loading them (remote addresses included) to draw inline on terminals that show graphics
+tui.autoGraph	appearance	Display	Auto-Graph Tables	auto|smart|always|off	Draw a chart under numeric tables in the agent's answers, in your theme's colors, on terminals that show graphics
+tui.reactions	appearance	Display	Agent Reactions		Invite the agent to react to your message with an emoji badge on its bubble
+tui.codexResetFireworks	appearance	Display	Codex Reset Fireworks		Celebrate unscheduled Codex weekly usage resets and newly banked saved resets with a top-third fireworks overlay that remains until Escape
+tui.titleState	appearance	Display	Terminal Title Run State		Show the agent run state in the terminal title's separator — an animated spinner while working (a static ':' under WSL), '>' when it's your turn, '!' when the agent is waiting on you
+tui.titleSpinner	appearance	Display	Terminal Title Spinner	braille|pulse|dots|line	Glyph set for the working-state spinner in the terminal title — braille sweep, filling moon, single-dot cycle, or ASCII-safe line
+tui.spinnerInterval	appearance	Display	Spinner Interval (ms)	0|80|250|1000	Milliseconds between frames of every spinner, the terminal title included; 0 shows static glyphs. Unset follows Motion
+tui.maxFps	appearance	Display	Max Frames Per Second	30|15|4|1	Ceiling on how often the TUI repaints, streaming text included. Keystroke echo keeps 30 fps, so the pane you type in stays responsive
+tui.hyperlinks	appearance	Display	Terminal Hyperlinks	off|auto|always	Wrap paths and URLs in OSC 8 hyperlinks for terminal-native click-to-open (auto: detect support; off: never; always: unconditional)
+tui.mouse	appearance	Display	Mouse Click-to-Focus		Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target, and clicks on extension-owned links reach their extension (the link-hint key picks them without the mouse). Native text selection becomes Shift+drag while on, and mouse capture stops wheel scrolling — the terminal reports wheel ticks to omp instead — so scroll with the terminal's keyboard scrollback keys, or turn this off
+tui.tight	appearance	Display	Tight Layout		Remove the 1-character horizontal padding from the left and right of the terminal output
+display.shimmer	appearance	Display	Shimmer	classic|kitt|disabled	Animation style for working/loading messages; off under reduced or no Motion
+tui.motion	appearance	Display	Motion	full|reduced|none	One switch over spinners, shimmer, and decorative blink/fade. Streaming text is unaffected (see Max Frames Per Second). A spinner interval you set still wins
+display.pinnedAgents	appearance	Display	Pinned Agents	off|collapsed|full	Pinned live-agent jump list above the editor (off hides it; collapsed shows a few rows with an expander; full lists all)
+display.subagentLivePreview	appearance	Display	Subagent Live Preview		Show each pinned subagent's current (or most recent) tool call beneath its row
+display.smoothStreaming	appearance	Display	Smooth Streaming		Reveal assistant text and streamed tool input smoothly while chunks arrive (Tern types assistant text out itself)
+display.hideToolActivity	appearance	Display	Hide Tool Activity		Hide model-initiated tool calls and results from the transcript
+display.showTokenUsage	appearance	Display	Show Token Usage		Show per-turn token usage on assistant messages
+display.showTurnTime	appearance	Display	Show Turn Time		Show the total prompt-to-yield time (including tool calls) on assistant message usage rows
+display.cacheMissMarker	appearance	Display	Cache Miss Marker		Show a divider after an assistant turn whose request lost (missed) the prompt cache
+display.shellVisualization	appearance	Display	Shell Visualization		Show bash commands as an interactive execution visualization instead of plain shell commands
+display.advisorCollapsedLines	appearance	Display	Advisor Collapsed Lines	0|1|2|3|5	Maximum note lines a collapsed advisor card shows below its header (0 keeps the full preview; expand with the tool-output toggle)
+display.collapseCompacted	appearance	Display	Collapse Compacted History		Collapse pre-compaction history behind the summary divider on the live transcript; disable to keep the full transcript inline with dividers at each compaction point
+showHardwareCursor	appearance	Display	Show Hardware Cursor		Show terminal cursor for IME support
+tui.imeSafeCursor	appearance	Display	IME-Safe Prompt Layout		Move the prompt's bottom border to a separate row so macOS IME preedit cannot displace it
+title.icons	appearance	Display	Title Icons	nf+emoji|emoji|boring	Icon and short code that head new generated or /rename session titles
+terminal.showImages	appearance	Images	Show Inline Images		Render images inline in the terminal
+images.autoResize	appearance	Images	Auto-Resize Images		Resize large images to 2000x2000 max for better model compatibility
+images.blockImages	appearance	Images	Block Images		Prevent images from being sent to LLM providers
+defaultThinkingLevel	model	Thinking	Thinking Level		Reasoning depth for thinking-capable models
+hideThinkingBlock	model	Thinking	Hide Thinking Blocks		Hide thinking blocks in assistant responses
+expandThinkingBlocks	model	Thinking	Expand Thinking Blocks		Keep finished thinking blocks expanded instead of collapsing them when the turn ends
+proseOnlyThinking	model	Thinking	Prose Only Thinking		Omit code blocks from thinking summaries and replace them with an ellipsis
+omitThinking	model	Thinking	Omit Thinking summaries		Instruct upstream providers to completely omit thinking summaries from responses (where supported)
+externalThinking	model	Thinking	External Thinking		Private scratchpad; not shown to user. Disables supported GPT, Claude, and Gemini reasoning
+model.loopGuard.enabled	model	Thinking	Loop Guard		Enable automatic stream loop detection for model reasoning and prose
+model.loopGuard.checkAssistantContent	model	Thinking	Loop Guard Scan Prose		Apply loop guard to assistant prose messages in addition to thinking logs
+model.loopGuard.toolCallReminder	model	Thinking	Loop Guard Tool-Call Reminder		When a Gemini reasoning stream emits many consecutive planning headers without calling a tool, interrupt it and inject a reminder to issue a tool call (requires Loop Guard)
+model.toolCallLoopGuard.enabled	model	Thinking	Tool-Call Loop Guard		Detect consecutive identical tool calls across turns and inject a corrective steer
+model.toolCallLoopGuard.threshold	model	Thinking	Tool-Call Loop Threshold		Consecutive identical tool calls required before the corrective steer is injected
+model.toolCallLoopGuard.exemptTools	model	Thinking	Tool-Call Loop Exempt Tools		Tool names, including tools run as commands through bash (for example mcp__peers_wait), that may repeat consecutively without triggering the cross-turn loop guard
+providers.autoThinkingMaxEffort	model	Thinking	Auto Thinking Ceiling	xhigh|max	Highest effort the `auto` classifier may resolve. `xhigh` keeps the classifier one tier below the top, so only an explicit `ultrathink` reaches `max`; `max` lets a turn the classifier judges exceptional bill the top tier on models that expose it.
+temperature	model	Sampling	Temperature	-1|0|0.2|0.5|0.7|1	Sampling temperature (0 = deterministic, 1 = creative, -1 = provider default)
+topP	model	Sampling	Top P	-1|0.1|0.3|0.5|0.9|1	Nucleus sampling cutoff (0-1, -1 = provider default)
+topK	model	Sampling	Top K	-1|1|20|40|100	Sample from top-K tokens (-1 = provider default)
+minP	model	Sampling	Min P	-1|0.01|0.05|0.1	Minimum probability threshold (0-1, -1 = provider default)
+presencePenalty	model	Sampling	Presence Penalty	-1|0|0.5|1|2	Penalty for introducing already-present tokens (-1 = provider default)
+repetitionPenalty	model	Sampling	Repetition Penalty	-1|0.8|1|1.1|1.2|1.5	Penalty for repeated tokens (-1 = provider default)
+textVerbosity	model	Sampling	Text Verbosity	low|medium|high	OpenAI Responses and Codex response verbosity (low, medium, or high)
+tier.openai	model	Sampling	Service Tier — OpenAI		Processing tier for OpenAI / OpenAI-Codex requests, and OpenAI-family models routed via OpenRouter (none = omit). Sent as `service_tier`.
+tier.anthropic	model	Sampling	Service Tier — Anthropic		Processing tier for Claude requests. `priority` realizes fast mode (`speed: "fast"`) on supported direct Anthropic models; ignored on Bedrock/Vertex Claude and via OpenRouter.
+tier.google	model	Sampling	Service Tier — Google		Processing tier for Gemini (Google AI Studio + Vertex) requests, and Google-family models routed via OpenRouter (none = omit). Sent as the top-level `serviceTier` field.
+tier.subagent	model	Sampling	Service Tier — Subagent		Service Tier for spawned task/eval subagents. Inherit = match the main agent's live per-family tiers (tracks /fast); pick a value to apply it to whichever family the subagent's model belongs to.
+tier.advisor	model	Sampling	Service Tier — Advisor		Service Tier for the advisor model. None = standard processing; Inherit = match the main agent's live per-family tiers; pick a value to apply it to the advisor model's family.
+modelRoleStorage	model	Prompt	Model Role Storage	global|project	Where model selector role assignments are saved
+inlineToolDescriptors	model	Prompt	Inline Tool Descriptors	auto|on|off	Render full tool descriptors in the system prompt and strip top-level/nested descriptions from provider tool schemas so descriptor text is sent once. Auto enables this for Gemini models and disables it otherwise
+includeModelInPrompt	model	Prompt	Include Model in Prompt		Surface the active model identifier in the system prompt so the agent knows which model it is
+includeWorkspaceTree	model	Prompt	Include Workspace Tree		Render the workspace directory tree in the system prompt. WARNING: This can bust prompt caching across sessions when files are modified.
+encourageEdits	model	Prompt	Encourage Edits		Require the edit tool for file edits and forbid sed/perl/python edits
+skillful	model	Prompt	List Skills in Prompt		List available skills in the system prompt; disable to save context and toggle per-session with /skillful
+personality	model	Prompt	Personality	default|friendly|pragmatic|none	Communication style rendered into the system prompt's personality block
+retry.maxRetries	model	Retry & Fallback	Retry Attempts	1|2|3|5|10	Maximum retry attempts on API errors
+retry.maxDelayMs	model	Retry & Fallback	Max Retry Delay		Maximum wait between retries, in ms. When the retry would wait longer and no credential or model fallback succeeds, the request fails fast instead of sleeping (e.g. 3-hour Anthropic rate-limit windows). 0 disables the ceiling.
+retry.waitForUsageReset	model	Retry & Fallback	Wait For Usage Reset		Usage-limit waits within retry.maxDelayMs are already allowed. Enable this to also wait past that cap when the provider reports a reset time, such as a 5-hour or weekly quota window. Waits are abortable (Escape) but also hold subagents, so leave off for unattended runs.
+retry.modelFallback	model	Retry & Fallback	Retry Model Fallback		Allow retry recovery to switch to models in retry.fallbackChains after provider errors. Independent of Auto-Promote Context
+retry.fallbackOn	model	Retry & Fallback	Fallback Trigger	any|usage-limit|except-usage-limit	Which failed requests may switch to a configured fallback model
+retry.rateLimitWalksChain	model	Retry & Fallback	Rate Limit Walks Chain		On a rate limit, do not hold the retry.fallbackChains walk for a turn whose thinking is signed by the failing model. Off (the default), such a turn keeps retrying the rate-limited model until retry.maxRetries is spent before the chain is reached.
+retry.usageAwareFallback	model	Retry & Fallback	Usage-Aware Fallback		Use reliable coding-plan quota reports to prefer same-provider accounts, then configured fallback models, before a hard usage limit. Ordinary configured API keys are excluded.
+retry.usageReservePct	model	Retry & Fallback	Reserve Margin	5|10|15|20|25	Treat a coding-plan model as near its limit below this remaining percentage. Unknown or unmapped usage keeps the primary model.
+retry.usageReservePolicy	model	Retry & Fallback	Reserve Policy	confirm|auto|fail-closed	What to do when every same-provider coding-plan account is inside the reserve margin.
+retry.fallbackChains	model	Retry & Fallback	Retry Fallback Chains		JSON object mapping model roles, model selectors ("provider/model-id"), or provider wildcards ("provider/*") to ordered fallback selectors, e.g. {"default":["openai/gpt-4o-mini"],"google-antigravity/*":["google/*","google-vertex/*"]}. Model-oriented keys apply whenever that model/provider is active, regardless of role; a "provider/*" entry keeps the failing model's id and swaps the provider. An id-prefixed wildcard ("openrouter/google/*") re-prefixes the failing model's bare id (google-antigravity/gemini-x -> openrouter/google/gemini-x) and, used as a key, matches only that provider's ids under the prefix. A fallback entry may carry an explicit thinking suffix ("provider/model:low", ":high", ":max", ":off"); a bare entry inherits the failing turn's effort, and "provider/*" entries always inherit.
+retry.fallbackRevertPolicy	model	Retry & Fallback	Fallback Revert Policy	cooldown-expiry|never	When to return to the primary model after a fallback
+providers.anthropic.serverSideFallback	model	Retry & Fallback	Anthropic Server-Side Fallback (Fable 5)		When a Claude Fable 5 / Mythos 5 request is blocked by Anthropic's safety classifier, retry it on Claude Opus 5 server-side (Anthropic `server-side-fallback-2026-06-01` beta). Opt-in — leaving this off preserves the pre-fallback behavior for every request.
+advisor.enabled	model	Advisor	Enable Advisor		Pair a second model (assigned to the 'advisor' role) that passively reviews each turn and injects notes.
+advisor.syncBacklog	model	Advisor	Advisor Sync Backlog		Pause main agent until advisor backlog falls below threshold. Numeric values cap wait at 30 seconds; strict waits for all scheduled reviews without a wall-clock cap. Off disables catch-up delays. Abort, failure, and disposal release waits.
+advisor.immuneTurns	model	Advisor	Advisor Immune Turns	0|1|2|3|4|5	After an advisor concern or blocker interrupts, route further concerns as non-interrupting asides for this many primary turns. Blockers are exempt from the cooldown.
+advisor.continueSeverity	model	Advisor	Advisor Continue Severity	nit|concern|blocker	Minimum severity of an advisor note that wakes the agent after it finished with a final answer. Lower-severity notes stay as a card at the end of the transcript and reach the agent with your next message.
+advisor.reviewMode	model	Advisor	Advisor Review Mode	turn|agent-end	Default advisor cadence when no WATCHDOG.yml roster is present. turn reviews every primary turn; agent-end reviews only final yields.
+advisor.reviewInterval	model	Advisor	Advisor Review Interval	1|2|3|5|10	Default advisor cadence when no WATCHDOG.yml roster is present: review every Nth eligible primary update. 1 = every update. Skipped updates are sent with the next scheduled review.
+advisor.maxNotesPerUpdate	model	Advisor	Advisor Max Notes Per Update	1|2|3|4|5	Maximum non-blocker advice notes accepted per advisor prompt update (1–32; UI offers 1–5 quick picks). Blockers are exempt.
+advisor.evictStaleResults	model	Advisor	Advisor Evict Stale Results		Before each review, replace the advisor's read/grep/glob output from older reviews with a short placeholder. The latest review is kept.
+prewalk.enabled	model	Prewalk	Enable Prewalk		Start on the active model, then switch to a fast/cheap model (default the 'smol' role) at the first edit/write after the plan nudge's todo list exists — the strong model plans, commits the todos, and starts the implementation before handing off. Overridable per session with --prewalk / --no-prewalk.
+prewalk.from	model	Prewalk	Prewalk planning model		Model or role (default '@default') that /prewalk restart returns to for planning.
+prewalk.into	model	Prewalk	Prewalk target		Model or role (default '@smol') that prewalk hands off to at the first edit/write: /prewalk, /prewalk restart, Enable Prewalk, and --prewalk. Auto-prewalk uses its own target.
+prewalk.auto	model	Prewalk	Auto Prewalk	off|suggest|on	Ask the native judge resolved through the 'judge' role whether each new top-level user task front-loads its hard reasoning. Needs a native judge; without one nothing is classified. Independent of Enable Prewalk.
+prewalk.autoTarget	model	Prewalk	Auto-prewalk target		Model or role (default '@smol') auto-prewalk hands off to at the first edit/write.
+images.describeForTextModels	model	Vision	Describe Images for Text Models		When an image is attached to a model without vision support, save it under local:// and inject a description from a vision-capable model instead of dropping it
+images.urls.enabled	model	Vision	Serve Images as URLs		Publish outgoing images through the configured backend chain and send URL-fetching providers short URLs instead of inline base64. Falls back to inline automatically when every backend or a provider fetch fails
+images.urls.backends	model	Vision	Image URL Backends		Ordered destinations tried when publishing images for provider access
+images.urls.command	model	Vision	Image Upload Command		Argv template for the command backend; {file} is the image path, {mime}/{ext} optional. The last URL printed on stdout is used (e.g. pasta -b -f {file})
+images.urls.publicBaseUrl	model	Vision	Image URL Public Base		Externally reachable base URL fronting the blob server (required for ssh, optional for direct)
+images.urls.ttlHours	model	Vision	Image URL Lifetime (hours)		Serving window for locally hosted image URLs, measured from the last time a conversation sent them; resuming a conversation re-arms the window at the same link. 0 keeps links alive while the broker runs
+images.urls.bindHost	model	Vision	Image URL Bind Host		Host the blob server binds to; loopback for tunnels, 0.0.0.0 for direct serving
+images.urls.sshTarget	model	Vision	Image URL SSH Target		user@host destination for the ssh reverse forward
+images.urls.sshRemotePort	model	Vision	Image URL SSH Remote Port		Remote listen port of the ssh reverse forward that your web server proxies to
+steeringMode	interaction	Input	Steering Mode	all|one-at-a-time	How to process queued messages while agent is working
+followUpMode	interaction	Input	Follow-Up Mode	all|one-at-a-time	How to drain follow-up messages after a turn completes
+interruptMode	interaction	Input	Interrupt Mode	immediate|wait	When steering messages interrupt tool execution
+btw.inject	interaction	Input	/btw Steering Inject		When you ask /btw for a steering prompt, it drafts one in <inject> tags, highlighted in the answer; Alt+I (app.btw.inject) sends it to the main session
+tui.vimMode	interaction	Input	Vim Editing Mode		Modal prompt editing. Escape leaves Insert mode; Normal mode has hjkl, 0, $, ^, w, b, e, gg, G, counts, x/D/C, dd/yy, p and u; operators take motions or text objects (diw, ca(, dap); v/V start a Visual selection that y copies and d deletes
+tui.vimModeDisplay	interaction	Input	Vim Mode Indicator	text|icon|none	How the current Vim mode appears in the status line
+loop.mode	interaction	Input	Loop Mode	prompt|compact|reset	What happens between /loop iterations before re-submitting the prompt
+loop.conditionTimeoutMs	interaction	Input	Loop Condition Timeout (ms)	0|10000|30000|120000	Max wait for a `/loop --while` / `--until` condition command before treating it as broken and stopping the loop. Set to 0 to wait indefinitely
+composer.recallClearedDrafts	interaction	Input	Recall Cleared Drafts		Keep drafts cleared with Ctrl+c in local … history until exit; disabling affects future clears
+doubleEscapeAction	interaction	Input	Double-Escape Action	rewind|tree|none	What pressing Escape twice with an empty editor does: open the transcript rewind selector, open the session tree, or nothing
+input.bareExitOnEmptySession	interaction	Input	Bare Exit on Empty Session		Submitting exactly `exit`, `quit`, or `q` (any case) before the first message quits instead of prompting the model
+input.bareSlashCommands	interaction	Input	Bare Slash Commands		Submitting exactly a command name without the leading `/` (e.g. `model`, `compact`) runs that slash command; once the session has messages, press Enter twice to confirm
+treeFilterMode	interaction	Input	Session Tree Filter		Default filter mode when opening the session tree
+autocompleteMaxVisible	interaction	Input	Autocomplete Items	3|5|7|10|15|20	Max visible items in autocomplete dropdown (3-20)
+spelling.typoDetection	interaction	Input	Typo Detection (macOS)		Mark misspelled prompt words with the active macOS dictionaries
+spelling.autocomplete	interaction	Input	Word Autocomplete	off|auto|ngram|smollm|apple	No word completion
+composer.predictions	interaction	Input	Composer Predictions		After a completed turn, ask the active model to predict your next message and show it as ghost text in the empty composer; Tab or Right inserts it without sending. Extra usage: every completed turn sends one more billed request over the whole conversation (counted in /stats)
+composer.predictionAlternatives	interaction	Input	Prediction Alternatives		Ask for up to four distinct predictions instead of one, most likely first. The ghost text shows the first one your draft matches; after inserting one, press Tab again to pick another. The same single request returns a few more output tokens
+spelling.autocorrect	interaction	Input	Autocorrect (macOS)		Apply confident macOS spelling corrections after completed words
+emojiAutocomplete	interaction	Input	Emoji Autocomplete		Suggest emojis from `:name:` shortcodes and expand text emoticons like `:D` or `:-)`
+paste.largeMenuThreshold	interaction	Input	Large Paste Menu	0|100|250|500|1000	When a paste reaches this many lines, offer a menu to wrap it in a code block, wrap it in XML tags, or save it to a file. 0 disables the menu (large pastes still collapse to a [Paste] marker).
+tools.approval	interaction	Approvals	Tool Approval Policies		Per-tool approval policies. Set to 'allow' to auto-approve, 'prompt' to require confirmation, or 'deny' to block. Overrides are honored in every approval mode.
+tools.approvalMode	interaction	Approvals	Tool Approval	always-ask|always-ask-cached|write|yolo	Default approval behavior for tool calls. 'Always ask' auto-approves read-only tools only. 'Ask and remember' also asks before file reads, and can remember a file or folder. 'Write' auto-approves read and workspace-write tools. 'Yolo' auto-approves all tiers; user policy may still prompt or block.
+tools.restrictedFolders	interaction	Approvals	Restricted Folders		Folders where every read, write, edit, search, or command needs an explicit approval, whatever the approval mode or a remembered grant. The folder and everything under it is restricted; commands are matched by the directory they run in. A JSON list of paths, e.g. ["~/secrets"].
+completion.notify	interaction	Notifications	Completion Notification	on|off	Notify when the agent finishes a turn
+error.notify	interaction	Notifications	Error Notification	on|off	Notify when the agent stops with an error
+ask.timeout	interaction	Notifications	Ask Timeout	0|15|30|60|120	Submit an ask form's current values (your preselected answers) after this many seconds (0 disables). Also bounds cfg:// approval prompts; an unanswered approval denies the write instead of auto-submitting
+ask.notify	interaction	Notifications	Ask Notification	on|off	Notify when the ask tool is waiting for input
+pty.notify	interaction	Notifications	Console Notification	on|off	Notify when an interactive console (bash `pty`) is waiting on you
+recap.enabled	interaction	Notifications	Idle Recap		Generate a brief LLM recap of where things stand after the terminal has been idle
+recap.idleSeconds	interaction	Notifications	Idle Recap Delay	60|120|240|300|600	Seconds to wait while idle before showing the recap
+stt.enabled	interaction	Speech	Speech-to-Text		Enable speech-to-text input via microphone
+stt.submitTrigger	interaction	Speech	Speech-to-Text Submit Trigger		Choose when speech dictation automatically submits: Never, Release (2+ words), Release with complete sentence, or When I Say Submit.
+collab.relayUrl	interaction	Collab	Relay URL		Relay used by /collab (wss://host[:port])
+collab.webUrl	interaction	Collab	Web UI URL		Browser UI used by /collab links; empty derives from collab.relayUrl; explicit http:// is localhost-only
+collab.displayName	interaction	Collab	Display Name		Name shown to other collab participants (default: OS username)
+collab.autoStart	interaction	Collab	Auto Start	off|view|control	Host every interactive session via collab.relayUrl as it starts and publish it to the local registry (omp collab list); rooms rotate on session switch
+share.serverUrl	interaction	Collab	Share Server		Share viewer/upload base used by /share (encrypted blob upload + viewer; links are <base>/<id>#<key>)
+share.store	interaction	Collab	Share Store	blob|gist	Where /share uploads the encrypted session blob
+share.redactSecrets	interaction	Collab	Share Secret Redaction		Run the secret obfuscator over /share snapshots before upload (uses the secrets.* config)
+stream.serverUrl	interaction	Stream	Stream Server		Live stream server used by `omp stream` (https://host[:port]); viewers watch at <base>/<your Stencil username>
+stream.redactPatterns	interaction	Stream	Extra Redaction Patterns		Additional regular expressions redacted from every streamed row, on top of env/secrets.yml values and built-in credential shapes
+magicKeywords.enabled	interaction	Magic Keywords	Magic Keywords		Enable hidden notices for standalone … keywords
+autoResume	interaction	Startup & Updates	Auto Resume		Automatically resume the most recent session in the current directory. If its model cannot be restored and model fallback is disabled, interactive startup warns and starts a new session without the saved history
+startup.quiet	interaction	Startup & Updates	Quiet Startup		Skip welcome screen and startup status messages
+startup.showSplash	interaction	Startup & Updates	Show Startup Splash		Show the full animated setup splash on normal interactive startup without rerunning setup. Quiet Startup still suppresses it.
+startup.setupWizard	interaction	Startup & Updates	Setup Wizard		Show newly added onboarding steps once per setup version
+startup.checkUpdate	interaction	Startup & Updates	Check for Updates		Check for omp updates on startup
+update.channel	interaction	Startup & Updates	Update Channel	stable|canary	Update channel used by omp update and the startup update check
+update.auto	interaction	Startup & Updates	Auto Update		Install omp updates in the background on startup; the next launch runs the new version
+marketplace.autoUpdate	interaction	Startup & Updates	Marketplace Auto-Update	off|notify|auto	Check for plugin updates on startup
+startup.changelogMode	interaction	Startup & Updates	Startup Changelog	summary|expanded|hidden	Choose whether update notes start as a summary, full details, or stay hidden
+session.worktreeScope	interaction	Startup & Updates	Resume Worktree Scope	directory|repo	Choose whether the resume picker's current folder includes sessions from other repository worktrees
+power.sleepPrevention	interaction	Power	Sleep Prevention	off|idle|display|system	Prevent the system sleeping while the agent is running a turn; an idle session, including one waiting on background jobs, does not hold it. Each level is cumulative — it adds the flags of all lower levels.
+features.unexpectedStopDetection	interaction	Agent	Unexpected Stops	none|mechanical|smart	Automatically recover when the assistant stops without a visible message. Smart also classifies text-only stops with a small model.
+git.enabled	interaction	Git	Enable Git Integration		Show git branch, status, and PR information in the TUI and watch repository metadata.
+skills.registryUrl	interaction	Skills	Skill Registry		Skillshare registry used by `omp skill` to install, search, and publish skills (https://host[:port])
+workspace.additionalDirectories	context	General	Additional Workspace Dirs		Extra workspace directories added to every session as additional roots (multi-root workspace). Managed live via /add-dir and /remove-dir. Paths resolve relative to cwd; absolute paths recommended. The agent is told these roots exist and can read/grep/glob them.
+contextFiles.extra	context	General	Extra Context Files		Extra instruction filenames loaded beside AGENTS.md. Use a JSON list of names, not paths, e.g. ["AGENTS.local.md"]; [] disables extras. Start a new session to load them.
+contextPromotion.enabled	context	General	Auto-Promote Context		Promote to the model's contextPromotionTarget on context overflow instead of compacting. Retry fallback switches are controlled by Retry Model Fallback
+extendedContext	context	General	Extended Context		Use larger context windows where supported; may incur premium pricing. Off keeps default or standard-pricing windows
+branchSummary.enabled	context	General	Branch Summaries		Prompt to summarize when leaving a branch
+compaction.enabled	context	Compaction	Auto-Compact		Automatically compact context when it gets too large
+compaction.experimentalContextManagement	context	Compaction	Notes-backed context windows (experimental)		Keep persistent notes and searchable raw history across context windows.
+compaction.midTurnEnabled	context	Compaction	Mid-Turn Compaction		Check thresholds at safe mid-turn tool-loop boundaries before the next provider request; subagents always check, since their whole assignment is one turn
+compaction.methodOrder	context	Compaction	Compaction Method Order		Preferred fallback order for automatic context maintenance; unavailable or failed methods advance to the next choice
+compaction.thresholdPercent	context	Compaction	Compaction Threshold	default|10|20|30|40|50|60|70|75|80|85|90|95	Percent threshold for context maintenance; set to Default to use legacy reserve-based behavior
+compaction.thresholdTokens	context	Compaction	Compaction Token Limit	default|25000|50000|100000|150000|200000|250000|300000|500000	Fixed token limit for context maintenance; overrides percentage if set
+compaction.handoffSaveToDisk	context	Compaction	Save Handoff Docs		Save generated handoff documents to markdown files for the auto-handoff flow
+compaction.remoteStreamingV2Enabled	context	Compaction	Remote Compaction V2		Use Responses streaming compaction for compatible remote compaction models
+compaction.asyncEnabled	context	Compaction	Async Compaction		Speculatively summarize in the background as context nears the compaction threshold, then splice the ready result in when the threshold is crossed
+compaction.idleEnabled	context	Compaction	Idle Compaction		Compact context while idle when token count exceeds threshold
+compaction.idleThresholdTokens	context	Compaction	Idle Compaction Threshold	100000|200000|300000|400000|500000|600000|700000|800000|900000	Token count above which idle compaction triggers
+compaction.idleTimeoutSeconds	context	Compaction	Idle Compaction Delay	60|120|300|600|1800|3600	Seconds to wait while idle before compacting; with a 1-hour prompt cache, compaction instead runs just before the cache expires
+compaction.supersedeReads	context	Compaction	Supersede Stale Reads		Prune older read results when the same file is read again (cache-aware, runs every turn)
+compaction.dropUseless	context	Compaction	Elide Uneventful Results		Prune tool results flagged contextually useless (no matches, timed-out waits) once consumed (cache-aware)
+ttsr.enabled	context	Rules (TTSR)	TTSR		Interrupt the agent mid-stream when output matches rule patterns (Time-Traveling Stream Rules)
+ttsr.judge	context	Rules (TTSR)	Judged Rules	auto|on|off	Ask the judge model role each `question` rule about completed replies, reasoning, and tool calls; a yes injects the rule as a warning
+ttsr.contextMode	context	Rules (TTSR)	TTSR Context Mode	discard|keep	What to do with partial output when TTSR triggers
+ttsr.interruptMode	context	Rules (TTSR)	TTSR Interrupt Mode	never|prose-only|tool-only|always	When to interrupt mid-stream vs inject warning after completion
+ttsr.repeatMode	context	Rules (TTSR)	TTSR Repeat Mode	once|after-gap	How rules can repeat: once per session or after a message gap
+ttsr.repeatGap	context	Rules (TTSR)	TTSR Repeat Gap	5|10|15|20|30	Messages before a rule can trigger again
+ttsr.builtinRules	context	Rules (TTSR)	Built-in Rules		Load the default rules shipped with the agent (override individually with ttsr.disabledRules)
+ttsr.disabledRules	context	Rules (TTSR)	Disabled Rules		Rule names to ignore entirely (applies to bundled defaults and your own rules)
+snapcompact.systemPrompt	context	Experimental	Snapcompact System Prompt	none|agents-md|all	Experimental: render selected system prompt text as dense PNG image(s) and attach to the first user message (vision models only). Saves tokens; loses prompt caching for imaged text.
+snapcompact.toolResults	context	Experimental	Snapcompact Tool Results		Experimental: render large tool results, the newest one included, as dense PNG image(s) instead of text (vision models only). Saves tokens on accumulated search and command output; read results stay text unless the model is known to edit exactly from images.
+tools.format	context	Experimental	Tool Calling Mode	auto|native|glm|hermes|kimi|xml|anthropic|deepseek|harmony|qwen3|gemini|gemma|minimax	Controls how tools are exposed to the model. Auto uses provider-native tool calls unless the selected model is marked as not supporting them, then falls back to the GLM owned dialect. Native forces provider-native tools; the other values force the named owned dialect.
+snapcompact.shape	context	Experimental	Snapcompact Shape	auto	Frame shape snapcompact prints text with (compaction archive and inline imaging). Auto picks a shape tuned for the current model.
+memory.backend	memory	General	Memory Backend	off|local|hindsight|mnemopi|sharpshooter	Off, local summary pipeline, Mnemopi SQLite, Hindsight remote memory, or Sharpshooter
+autolearn.enabled	memory	Auto-Learn	Auto-Learn (experimental)		After the agent stops, nudge it to capture lessons to memory and create/enhance isolated managed skills
+autolearn.autoContinue	memory	Auto-Learn	Auto-run capture at stop		When on, auto-run one private capture turn at stop (uses extra tokens). When off, only standing auto-learn guidance remains.
+mnemopi.dbPath	memory	Mnemopi	Mnemopi DB Path		Optional SQLite DB path; a leading ~ is the home directory. Defaults to the agent memories directory.
+mnemopi.bank	memory	Mnemopi	Mnemopi Bank		Optional shared bank base name. Per-project modes derive project-local banks from it.
+mnemopi.scoping	memory	Mnemopi	Mnemopi Scoping	global|per-project|per-project-tagged	global = one shared bank; per-project = isolated bank per cwd; per-project-tagged = project-local writes plus global recall visibility
+mnemopi.embeddingVariant	memory	Mnemopi	Embedding variant	en|multilingual	Local embedding model family. en = stronger English model; multilingual = cross-language model. Changing this rebuilds existing memory embeddings on next start.
+mnemopi.autoRecall	memory	Mnemopi	Mnemopi Auto Recall		Recall local memories into the first turn of each session
+mnemopi.recallRelevance	memory	Mnemopi	Mnemopi Recall Relevance	auto|on|off	Ask the judge model role whether each automatically recalled memory is relevant to the task before injecting it
+mnemopi.autoRetain	memory	Mnemopi	Mnemopi Auto Retain		Retain completed conversation turns into local Mnemopi memory
+mnemopi.polyphonicRecall	memory	Mnemopi	Mnemopi Polyphonic Recall		Fuse recall with graph, fact, vector and temporal voices so linked memories surface without a keyword match
+mnemopi.enhancedRecall	memory	Mnemopi	Mnemopi Enhanced Recall		Cache recall results for repeated and similar queries with identical options; any memory write clears it
+mnemopi.proactiveLinking	memory	Mnemopi	Mnemopi Proactive Linking		Ingest new memories into the episodic graph as they are stored, linking them to related entities and memories
+mnemopi.noEmbeddings	memory	Mnemopi	Mnemopi Disable Embeddings		Force deterministic FTS-only recall instead of vector embeddings
+mnemopi.embeddingModel	memory	Mnemopi	Mnemopi Embedding Model		Advanced: explicit embedding model id that overrides the variant. Leave empty to use mnemopi.embeddingVariant.
+mnemopi.embeddingApiUrl	memory	Mnemopi	Mnemopi Embedding API URL		Optional OpenAI-compatible embedding endpoint passed to Mnemopi
+mnemopi.embeddingApiKey	memory	Mnemopi	Mnemopi Embedding API Key		Optional embedding API key passed to Mnemopi
+mnemopi.embeddingQueryPrefix	memory	Mnemopi	Mnemopi Embedding Query Prefix		Text prepended to recall queries before embedding, for instruction-tuned embedders (Qwen3-Embedding, E5); stored memories are embedded unchanged
+mnemopi.embeddingInputType	memory	Mnemopi	Mnemopi Embedding Input Type		Send input_type (query for recall, passage for stored memories) with embedding API requests; NVIDIA NIM asymmetric embedders require it
+mnemopi.llmMode	memory	Mnemopi	Mnemopi LLM Mode	none|smol|remote	Use no LLM, the online tiny model (the TINY role from /models, else @smol), or a remote OpenAI-compatible endpoint
+mnemopi.llmBaseUrl	memory	Mnemopi	Mnemopi LLM Base URL		Optional OpenAI-compatible LLM endpoint for Mnemopi remote mode
+mnemopi.llmApiKey	memory	Mnemopi	Mnemopi LLM API Key		Optional LLM API key for Mnemopi remote mode
+mnemopi.llmModel	memory	Mnemopi	Mnemopi LLM Model		Optional LLM model name for Mnemopi remote mode
+hindsight.apiUrl	memory	Hindsight	Hindsight API URL		Hindsight server URL (Cloud or self-hosted)
+hindsight.apiToken	memory	Hindsight	Hindsight API Token		Bearer token for authenticated Hindsight servers
+hindsight.bankId	memory	Hindsight	Hindsight Bank ID		Memory bank identifier (default: project name)
+hindsight.scoping	memory	Hindsight	Hindsight Scoping	global|per-project|per-project-tagged	global = one shared bank; per-project = isolated bank per cwd; per-project-tagged = shared bank with project tags so global + project memories merge on recall
+hindsight.globalScope	memory	Hindsight	Hindsight Global Scope		Let retain and learn take scope: global, which stores a memory without the project tag so every project recalls it. Needs global or per-project-tagged scoping
+hindsight.autoRecall	memory	Hindsight	Hindsight Auto Recall		Recall memories on the first turn of each session
+hindsight.autoRetain	memory	Hindsight	Hindsight Auto Retain		Retain transcript every N turns and at session boundaries
+hindsight.retainMode	memory	Hindsight	Hindsight Retain Mode	full-session|last-turn	full-session = upsert one document per session, last-turn = chunked
+hindsight.mentalModelsEnabled	memory	Hindsight	Hindsight Mental Models		Read curated reflect summaries (mental models) into developer instructions at boot. Loads existing models on the bank — does not write. Pair with hindsight.mentalModelAutoSeed to also auto-create the built-in seed set.
+hindsight.mentalModelAutoSeed	memory	Hindsight	Hindsight Mental Model Auto-Seed		At session start, create any built-in mental models (project-conventions, project-decisions, user-preferences) that do not yet exist on the bank.
+sharpshooter.model	memory	Sharpshooter	Sharpshooter Model		Model selector for extraction/consolidation, empty = smol role
+edit.mode	files	Editing	Edit Mode	magic|none	Select the edit tool variant (replace, patch, hashline, or apply_patch); magic takes described changes that a fast model writes; none removes the edit tool and keeps bash enabled
+edit.magic.model	files	Editing	Magic Edit Model		Model selector or role alias (@slow) for the model that applies magic-mode changes, empty = smol role
+edit.fuzzyMatch	files	Editing	Fuzzy Match		Accept high-confidence fuzzy matches for whitespace differences
+edit.fuzzyThreshold	files	Editing	Fuzzy Match Threshold	0.85|0.90|0.95|0.98	Similarity threshold (0-1) for accepting fuzzy matches
+edit.streamingAbort	files	Editing	Abort on Failed Preview		Abort streaming edit tool calls when patch preview fails
+edit.recoverInlineEdits	files	Editing	Recover Inline Edit Payloads		Execute edit payloads the model emits as plain text by converting them into edit tool calls
+edit.blockAutoGenerated	files	Editing	Block Auto-Generated Files		Prevent editing of files that appear to be auto-generated (protoc, sqlc, swagger, etc.)
+edit.enforceSeenLines	files	Editing	Enforce Seen-Line Guard		Reject edits anchored on lines a prior read/search never displayed in full
+edit.blackbox.enabled	files	Editing	Record Parse Regressions		Append full before/after source when an edit introduces an AST parse failure
+edit.autoRepair.enabled	files	Editing	Auto-Repair Parse Regressions		When an edit breaks a file's AST parse, ask the smol model to fix the broken region (validated by re-parse; falls back to a warning)
+readLineNumbers	files	Reading	Line Numbers		Prepend line numbers to read tool output by default
+read.defaultLimit	files	Reading	Default Read Limit	200|300|500|1000|5000	Default number of lines returned when agent calls read without a limit
+read.renderMarkdown	files	Reading	Markdown Previews		Render Markdown read results as formatted terminal Markdown previews instead of raw source
+read.toolResultPreview	files	Reading	Inline Read Previews		Render read tool results inline in the transcript instead of summary rows
+read.summarize.enabled	files	Read Summaries	Read Summaries		Return structural code summaries when read is called without an explicit selector
+read.summarize.prose	files	Read Summaries	Prose Summaries		Return structural summaries for Markdown and plain text reads
+read.summarize.minBodyLines	files	Read Summaries	Read Summary Body Lines		Minimum multiline body or literal length before read summaries collapse it
+read.summarize.minCommentLines	files	Read Summaries	Read Summary Comment Lines		Minimum multiline block comment length before read summaries collapse it
+read.summarize.minTotalLines	files	Read Summaries	Read Summary Minimum File Length		Files with fewer total lines are read verbatim instead of structurally summarized
+read.summarize.unfoldUntil	files	Read Summaries	Read Summary Unfold Target		BFS-unfold elidable spans until the summary is at least this many visible lines. 0 keeps only the outermost elisions.
+read.summarize.unfoldLimit	files	Read Summaries	Read Summary Unfold Ceiling		Hard ceiling on summary size while BFS-unfolding. An unfold whose revealed lines would exceed this is skipped (that span stays folded) and unfolding continues with the remaining spans.
+lsp.enabled	files	LSP	LSP		Language-server integration: the lsp tool, diagnostics on write/edit, and format on write (--no-lsp disables for the run)
+lsp.lazy	files	LSP	Lazy LSP Startup		Start language servers on first use (lsp tool or editing a matching file type) instead of at session startup
+lsp.shared	files	LSP	Shared Language Servers		Start language servers through the per-project daemon broker. Each connection gets its own server. While another omp instance in the project is running, a released server stays warm and the next connection reuses it instead of cold-starting (falls back to private servers when unavailable)
+lsp.formatOnWrite	files	LSP	Format on Write		Automatically format code files using LSP after writing
+lsp.diagnosticsOnWrite	files	LSP	Diagnostics on Write		Return LSP diagnostics after writing code files
+lsp.diagnosticsOnEdit	files	LSP	Diagnostics on Edit		Return LSP diagnostics after editing code files
+lsp.diagnosticsDeduplicate	files	LSP	Deduplicate Diagnostics		Suppress post-edit LSP diagnostics already shown for a file; only surface new or changed ones
+lsp.requestTimeout	files	LSP	Request Timeout	10|20|30|60|120|300	Seconds to wait for a language server's diagnostics, hover and other answers when the agent sets no timeout; late post-edit diagnostics wait at least this long. Raise it for servers that are slow on a cold start. The lsp tool's timeout argument can still raise or lower it per call
+bash.enabled	shell	Bash	Bash		Enable the bash tool for shell command execution
+bash.allowCompoundCommands	shell	Bash	Allow Compound Commands		Evaluate literal && chains per command; unmatched commands use normal bash approval policy and mode
+bash.autoBackground.enabled	shell	Bash	Bash Auto-Background		Automatically background long-running bash commands and deliver the result later
+bash.gitGuard	shell	Bash	Git Guard		Refuse git commands that discard or move shared work in a repository's main checkout: stash, reset --hard or to another commit, and checkout/switch/restore outside a merge or rebase conflict. In a linked worktree they run, saving uncommitted changes they discard first
+bash.patterns	shell	Bash	Bash Approval Patterns		Ordered bash command approval rules. Each item has match and approval fields; only '*' wildcards are supported.
+bash.allowedEnvVars	shell	Bash	Bash Allowed Environment Variables		Exact environment variable names allowed as leading KEY=VALUE prefixes when matching bash.patterns allow rules (no wildcards). Any value is accepted, so list only benign build/test variables; execution-altering variables (PATH, LD_PRELOAD, BASH_ENV, *_RUNNER, *_WRAPPER) allow arbitrary command execution.
+bashInterceptor.enabled	shell	Bash	Bash Interceptor		Block shell commands that have dedicated tools
+bash.direnv	shell	Bash	direnv Auto-Load	auto|off	Auto-load a repo's direnv/devenv `.envrc` into the bash session so devenv tools and env vars are present without manual `direnv exec`. Honors direnv's allow list: an `.envrc` you haven't `direnv allow`ed is never executed
+bash.direnvLoadTimeoutMs	shell	Bash	direnv Load Timeout (ms)		Max wait for the first `direnv export` (a cold devenv shell can be slow); on timeout the session runs without the direnv env
+shellMinimizer.enabled	shell	Bash	Shell Minimizer		Compress verbose shell output (git, npm, cargo, etc.) before returning it to the agent
+shellMinimizer.sourceOutlineLevel	shell	Bash	Shell Minimizer Source Outline	default|aggressive	Source outline mode for cat/read of source files: default or aggressive
+eval.py	shell	Eval & Runtimes	Python Eval Backend		Allow the eval tool to dispatch Python cells to the IPython kernel
+eval.js	shell	Eval & Runtimes	JavaScript Eval Backend		Allow the eval tool to dispatch JavaScript cells to the in-process runtime
+eval.autoProvision	shell	Eval & Runtimes	Eval Environment Provisioning		Automatically create the managed JavaScript eval package environment on first install
+eval.tools.enabled	shell	Eval & Runtimes	Eval-Defined Tools		Let eval cells define tools (@tool in Python, tool(fn) in JS) that task, agent(), and workpool() subagents can call
+eval.workpool.freshAgents	shell	Eval & Runtimes	Fresh Workpool Agents		Spawn a new subagent for every workpool item instead of reusing workers or batching queued items
+eval.autoBackground.enabled	shell	Eval & Runtimes	Eval Auto-Background		Automatically background long-running eval cells and deliver the result later
+python.kernelMode	shell	Eval & Runtimes	Python Kernel Mode	session|per-call	Keep the IPython kernel alive across eval calls or start fresh each time
+python.interpreter	shell	Eval & Runtimes	Python Interpreter		Optional path to an exact Python executable. When set, automatic Python runtime discovery is skipped.
+browser.enabled	tools	Available Tools	Browser		Enable the browser eval prelude for scripted browser automation
+todo.enabled	tools	Available Tools	Todos		Enable the todo tool for task tracking
+glob.enabled	tools	Available Tools	Glob		Enable the glob tool for glob-based file lookup
+grep.enabled	tools	Available Tools	Grep		Enable the grep tool for regex content search
+astGrep.enabled	tools	Available Tools	AST Grep		Enable the ast_grep tool for structural AST search
+astEdit.enabled	tools	Available Tools	AST Edit		Enable the ast_edit tool for structural AST rewrites
+find.enabled	tools	Available Tools	Find (semantic grep)	auto|on|off	Enable the find tool: natural-language search for files and line ranges, judged by the judge model role. Auto enables it when the first usable judge is native
+debug.enabled	tools	Available Tools	Debug		Enable the debug tool for DAP-based debugging
+launch.enabled	tools	Available Tools	Services		Enable named bash services and proc:// supervision for shared long-running project processes
+speechgen.enabled	tools	Available Tools	Speech Generation		Enable the tts tool for on-device (Phonon) or xAI Grok Voice speech-file synthesis
+generate_image.enabled	tools	Available Tools	Generate Image		Enable the generate_image tool (text-to-image generation and editing). Mounted as a tool command when tools.commands is on.
+computer.enabled	tools	Available Tools	Computer		Enable the scriptable host-desktop eval prelude (screenshots, input, accessibility)
+ratchet.enabled	tools	Available Tools	Ratchet		Enable the ratchet eval/hillclimb prelude; /ratchet turns it on for the current session
+archive.enabled	tools	Available Tools	Archive		Enable the read-only archive eval prelude: prompt history, recent projects, past sessions and recaps
+commit.enabled	tools	Available Tools	Selective commit		Enable the commit eval prelude and /commit: commit only the lines this agent and its subagents wrote
+checkpoint.enabled	tools	Available Tools	Checkpoint/Rewind		Enable the checkpoint and rewind tools for context checkpointing
+fetch.enabled	tools	Available Tools	Read URLs		Allow the read tool to fetch and process URLs
+vault.enabled	tools	Available Tools	Obsidian Vault		Enable the vault:// internal URL for reading and editing Obsidian vault content via the Obsidian CLI. When disabled, vault:// resolution is refused and the vault:// entry is omitted from the system prompt.
+github.enabled	tools	Available Tools	GitHub CLI		Enable the github tool (op-based dispatch for repository, issue, pull request, diff, search, checkout, push, and Actions watch workflows)
+web_search.enabled	tools	Available Tools	Web Search		Enable the web_search tool for live web results
+security.enabled	tools	Available Tools	Security		Enable OMP-native security scan planning, execution, and the read-only security:// resource namespace
+ask.enabled	tools	Available Tools	Ask		Enable the ask tool for interactive user questions
+out.enabled	tools	Available Tools	Out		Let the agent reply mid-task by writing to out://, shown like a response without ending its turn. Unset: on in the interactive TUI, off in print, RPC, and ACP
+disassembler.backend	tools	Available Tools	Disassembler	auto|ghidra|ida|binja|none	Backend for analysis selectors in read and eval's dsm namespace; bare executable reads show metadata only. Auto uses IDA Pro when installed, else Ghidra (downloaded on first analysis); Binary Ninja is used only when selected
+todo.reminders	tools	Todos	Todo Reminders		Remind the agent to complete todos before stopping
+todo.remindersMax	tools	Todos	Todo Reminder Limit	1|2|3|5	Maximum number of todo reminders before giving up
+todo.midRunNudges	tools	Todos	Mid-Run Todo Nudges	off|capped|backoff	How often a long turn is reminded to update its todo list while it keeps changing things
+todo.eager	tools	Todos	Create Todos Automatically	default|preferred|always	How strongly to push automatic todo-list creation after the first message
+todo.backend	tools	Todos	Todo Backend		Extension that the todo list is mirrored to; Native keeps it in the session only
+tasks.todoClearDelay	tools	Todos	Todo Auto-Clear Delay	0|60|300|900|1800|3600|-1	Delay before completed or abandoned todos are removed from the todo widget
+browser.cdpUrl	tools	Grep & Browser	Browser CDP URL		Default HTTP CDP discovery endpoint (for example http://127.0.0.1:9222) to attach to instead of launching a browser. An explicit app on the tool call takes precedence.
+browser.relay	tools	Grep & Browser	Browser Relay		Drive your own Chrome tabs through the omp browser relay. Install the extension once (`omp browser-relay install`); its native host serves the relay while Chrome runs. Takes precedence over Browser CDP URL; set PI_BROWSER_RELAY=0 or PI_BROWSER_RELAY=1 to override, or PI_BROWSER_RELAY=only to make it the only browser (sessions started from the extension\'s side panel). Subagents skip it unless an open passes app: "relay" or the relay is the only browser.
+browser.relayUrl	tools	Grep & Browser	Browser Relay URL		Override local browser relay discovery, for example to reach a relay forwarded from another machine.
+browser.headless	tools	Grep & Browser	Headless Browser		Run the browser without a window (disable to show it). omp's WebKit tabs gain or lose their windows at once where the engine ships its viewer (macOS); elsewhere a visible browser is Chromium, launched in the new mode by the next open.
+browser.cmux	tools	Grep & Browser	cmux Browser		Use cmux WKWebView surfaces for browser automation when a cmux socket is available (not for subagents). Set PI_BROWSER_CMUX=0 or PI_BROWSER_CMUX=1 to override.
+browser.tern	tools	Grep & Browser	Tern Browser		Inside a Tern pane, open browser tabs as picture-in-pictures over omp's pane (native web view) instead of omp's own headless browser; falls back to that browser when no Tern window can host them. Subagents skip it unless an open passes app: "tern". An explicit app, the relay and Browser CDP URL take precedence; app "own" opts one open out. Set PI_BROWSER_TERN=0 or PI_BROWSER_TERN=1 to override.
+browser.webkit	tools	Grep & Browser	WebKit Browser		Open browser tabs in omp's own headless WebKit engine instead of managed Chromium when the engine is installed (omp downloads it to ~/.o2/lib/abkit before Chrome for Testing when no browser is installed; see Browser WebKit Path). Chromium still opens a visible browser where the engine ships no viewer, and tabs the engine fails to start; an explicit app, the relay, Browser CDP URL, Tern and cmux take precedence; app "chromium" opts one open out. Set PI_BROWSER_WEBKIT=0 or PI_BROWSER_WEBKIT=1 to override.
+browser.webkitPath	tools	Grep & Browser	Browser WebKit Path		omp's WebKit engine: its host executable, or an ABKit engine directory (which holds it as ABHost; ABHost.exe on Windows). If unset, omp runs the installed engine, ~/.o2/lib/abkit/ABHost (ABHost.exe on Windows). Supports ~. PI_BROWSER_WEBKIT_PATH overrides it.
+browser.freezeOnTurnEnd	tools	Grep & Browser	Freeze Browser Tabs On Turn End		Freeze OMP-owned headless Chromium tabs when a turn settles so animated pages stop burning CPU/GPU while idle (WebKit tabs draw nothing unless asked). Tabs unfreeze automatically on next use; pass persist:true on open to opt a tab out.
+browser.idleCloseSec	tools	Grep & Browser	Browser Idle Close Timeout	0|900|1800|3600	Close OMP-owned headless browser tabs and Tern browser picture-in-pictures idle longer than this many seconds (0 = never; session dispose still reaps). Never touches relay/CDP/spawned browsers or other sessions' tabs.
+browser.screenshotDir	tools	Grep & Browser	Screenshot Directory		Directory to save screenshots. If unset, screenshots go to a temp file. Supports ~. Examples: ~/Downloads, ~/Desktop, /sdcard/Download (Android)
+grep.contextBefore	tools	Grep & Browser	Grep Context Before	0|1|2|3|5	Lines of context before each grep match
+grep.contextAfter	tools	Grep & Browser	Grep Context After	0|1|2|3|5|10	Lines of context after each grep match
+find.verifyModel	tools	Find	Find Verification Model		Model selector (e.g. openrouter/liquid/d1-ultra) tried first for find's passage verification, before the judge role; filename and sketch ranking stay on the judge role. Unset: the judge role verifies too
+computer.display	tools	Computer	Computer Display		Active window's display (active), all displays (all), or a native display id
+computer.maxWidth	tools	Computer	Computer Screenshot Width		Maximum screenshot width in pixels
+computer.maxHeight	tools	Computer	Computer Screenshot Height		Maximum screenshot height in pixels
+computer.takeover	tools	Computer	Computer Takeover	fallback|foreground|always|refuse	When window input takes over (the real pointer and keyboard; your Escape stops it) instead of running in the background
+disassembler.maxOpen	tools	Disassembler	Max Open Databases	2|4|8|16	Most databases open at once per project (each is a disasm unit in omp ps, labelled with its backend and binary); opening another evicts an unreferenced idle one. Close retained dsm handles when done
+disassembler.idleCloseSec	tools	Disassembler	Idle Close Timeout	0|300|900|1800|3600	Save and close unreferenced databases idle longer than this many seconds (0 = never); retained dsm handles stay open. The exec namespace resets on reopen
+ida.python	tools	IDA Pro	IDA Python		Python interpreter that can import ida_domain and idapro; empty auto-detects
+ida.installDir	tools	IDA Pro	IDA Install Dir		Directory containing libidalib, exported as IDADIR; empty auto-detects ($IDADIR, ida-config.json, standard install paths)
+ghidra.installDir	tools	Ghidra	Ghidra Install Dir		Ghidra 12+ install directory (contains Ghidra/application.properties); empty uses $GHIDRA_INSTALL_DIR, Homebrew, else a managed download under ~/.omp/ghidra
+ghidra.python	tools	Ghidra	Ghidra Python		Python interpreter that can import pyghidra; empty uses a managed venv built from the install's bundled wheels
+binja.installDir	tools	Binary Ninja	Binary Ninja Install Dir		Directory containing the Binary Ninja core library, or the macOS .app bundle; empty uses $BN_INSTALL_DIR, the lastrun file in the Binary Ninja user folder, then the default install locations
+binja.python	tools	Binary Ninja	Binary Ninja Python		Python 3 interpreter that can load the Binary Ninja API from the install's python directory; empty auto-detects
+github.cache.enabled	tools	GitHub	GitHub View Cache		Cache rendered issue/PR view output in ~/.omp/cache/github-cache.db so repeated reads are free
+github.cache.softTtlSec	tools	GitHub	GitHub Cache Soft TTL		Within this window, cached issue/PR view rows are returned directly (seconds; default 5 minutes)
+github.cache.hardTtlSec	tools	GitHub	GitHub Cache Hard TTL		Past the soft TTL the cached row is returned and refreshed in the background; past the hard TTL it is dropped (seconds; default 7 days)
+tools.artifactSpillThreshold	tools	Output Limits	Artifact Spill Threshold (KB)	1|2.5|5|10|20|30|50|75|100|200|500|1000	Tool output above this size is saved as an artifact; tail is kept inline
+tools.artifactTailBytes	tools	Output Limits	Artifact Tail Size (KB)	1|2.5|5|10|20|50|100|200	Amount of tail content kept inline when output spills to artifact
+tools.artifactHeadBytes	tools	Output Limits	Artifact Head Size (KB)	0|1|2.5|5|10|20|50|100|200	Amount of head content kept inline alongside the tail when output spills to artifact (middle elision). 0 disables — keep tail only.
+tools.outputMaxColumns	tools	Output Limits	Output Column Cap	0|256|512|768|1024|2048|4096	Per-line byte cap for streaming tool outputs (bash, python, js eval) and `read`. Lines wider than this are ellipsis-truncated; remaining bytes up to the next newline are dropped. 0 disables.
+tools.artifactTailLines	tools	Output Limits	Artifact Tail Lines	50|100|250|500|1000|2000|5000	Maximum lines of tail content kept inline when output spills to artifact
+tools.artifactMaxBytes	tools	Output Limits	Artifact File Cap (MB)	0|4|16|64|256|1024	Maximum size of the artifact file saved for streaming tool output (bash, python, js eval). Larger output keeps its beginning (up to 3 MB) and its most recent remainder, with a truncation notice between them. 0 = unlimited.
+images.questionTimeoutMs	tools	Execution	Image Question Timeout	0|60000|120000|180000|300000	Per-request timeout for the vision-model call behind read's ?q= image questions, in milliseconds. A stalled provider fails fast with a timeout error instead of blocking until manual abort. Set to 0 to disable the timeout.
+tools.intentTracing	tools	Execution	Intent Tracing		Ask the agent to describe the intent of each tool call before executing it. Unset: on in the interactive TUI, off in print, RPC, ACP, and SDK sessions
+tools.abortOnFabricatedResult	tools	Execution	Abort On Fabricated Tool Result		With in-band tool calls, stop the model immediately when it starts hallucinating a tool result mid-turn. Disable to let the model finish generating and discard the fabricated continuation instead.
+tools.speculativeExecution.enabled	tools	Execution	Experimental Speculative Execution		Enable the discard-safe first slice: validated local reads through direct read calls and nested eval. Network requests, provider completions, and live filesystem writes are not part of this baseline.
+tools.speculativeExecution.maxInFlight	tools	Execution	Speculative Execution Concurrency	1|2|3|4	Maximum number of validated local reads allowed to run before normal dispatch.
+tools.maxTimeout	tools	Execution	Max Tool Timeout	0|30|60|120|300|600	Maximum timeout in seconds the agent can set for any tool (0 = no limit)
+async.enabled	tools	Execution	Async Execution		Enable async bash commands and background task execution
+async.printWake	tools	Execution	Wake Print Mode on Job Results		In print mode (-p, --mode json), keep running after the last prompt while this run's background jobs are active, and start another turn in the same session with each job's result; exits once no job or result is pending. Off: print mode exits after its prompts and cancels running jobs
+async.widgets	tools	Execution	Live Job Widgets		Draw a live widget for each running background job (charts, bars, status grids derived from its output) in the wait card, the jobs pill and the jobs sheet, and caption long shell commands with one line on what they do. The `widget` model role (default: `smol`) writes one spec and at most one caption per job; updates need no further model calls
+tools.commands	tools	Discovery & MCP	Tool Commands		Mount rarely-used (discoverable) tools as bash commands with schema-derived `--help` instead of shipping their schemas on every request. Needs the bash tool: sessions without it keep every enabled tool top-level. Disable to expose every enabled tool top-level.
+tools.commandDocs	tools	Discovery & MCP	Tool Command Prompt Docs	inline|builtins|catalog	Choose which mounted commands get their `--help` text inlined in the system prompt. Built-ins keeps core tools inline while MCP and extension tools stay on demand.
+tools.commandInline	tools	Discovery & MCP	Tool Command Inline Help		When Tool Command Prompt Docs is Built-ins Only, also inline dynamic commands whose names match these glob patterns (for example mcp__context_mode_*). Catalog Only ignores this setting.
+tools.commandNotices	tools	Discovery & MCP	Tool Command Mount Notices		Show a notice when MCP or extension tools are mounted or unmounted as commands; the model still learns of the change with its next prompt.
+mcp.enableProjectConfig	tools	Discovery & MCP	MCP Project Config		Load .mcp.json/mcp.json from project root
+mcp.startupTimeoutMs	tools	Discovery & MCP	MCP Startup Window		Wait this many milliseconds for initial MCP tool discovery; 0 waits until connections settle
+mcp.shared	tools	Discovery & MCP	Shared MCP Servers		Run MCP servers through the daemon so every omp instance shares one process per server and a cached tool catalog. Servers that hold a session keep one process per instance (falls back to private servers when unavailable)
+mcp.idleStopMinutes	tools	Discovery & MCP	MCP Idle Stop		Stop a shared MCP server after this many minutes without use; it restarts on the next request
+mcp.evalNamespaces	tools	Discovery & MCP	MCP Eval Namespaces		Expose each MCP server as an eval global (github.create_issue(...)) instead of top-level tools or tool commands
+mcp.builtinTransforms	tools	Discovery & MCP	MCP Built-in Transforms		Skip recognized MCP servers that omp's own tools replace (Codex's node_repl while eval runs JavaScript)
+mcp.renderMarkdownResults	tools	Discovery & MCP	MCP Markdown Results		Render non-JSON MCP text results as Markdown in the transcript
+mcp.notifications	tools	Discovery & MCP	MCP Update Injection		Inject MCP resource updates into the agent conversation
+mcp.notificationDebounceMs	tools	Discovery & MCP	MCP Notification Debounce		Debounce window in milliseconds for MCP resource updates before injecting them into the conversation
+extensionHandlers.toolCallTimeoutMs	tools	Extensions	Tool Call Handler Timeout (ms)		Positive finite active-work timeout for extension tool_call handlers; invalid values use 30000ms, and time awaiting OMP-owned dialogs does not count
+extensionHandlers.modeControl	tools	Extensions	Extension Mode Control		Let extensions enter and exit plan, vibe, goal, and loop modes via ctx.sessionModes.set(); reading mode state stays available
+extensionRenderers.assistantText	tools	Extensions	Extension Reply Renderers		Let extensions change how assistant replies are drawn, redraw a reply in place, and receive clicks on their own links; the session, exports and model context keep the reply as written
+extensionRenderers.transcriptPresenters	tools	Extensions	Extension Transcript Presenters		Let extensions draw transcript blocks such as tool calls in full, as one compact row, or hidden; the session, exports and model context are unchanged
+dev.autoqa	tools	Developer	Auto QA		Automated tool issue reporting (`report_issue`). On by default; the first report asks for consent, and denying it disables reporting until re-enabled explicitly
+dev.autoqaPush.endpoint	tools	Developer	Auto QA Push Endpoint		Full URL receiving Auto QA JSON reports (default https://qa.omp.sh/v1/grievances)
+spotlight.experiment.enabled	tools	Developer	Spotlight Experiment		Shape tool output and rank find results with Stencil Spotlight, and log each shaped result to the session
+plan.enabled	tasks	Modes	Plan Mode		Enable plan mode for read-only exploration and planning before execution
+plan.defaultOnStartup	tasks	Modes	Start in Plan Mode		Automatically enter plan mode at the start of every new session
+plan.autosave	tasks	Modes	Autosave Plans		Automatically save approved plans to disk when plan mode completes
+plan.autosaveDir	tasks	Modes	Autosave Directory		Directory for autosaved plans. Supports ~, absolute, and cwd-relative paths. Empty uses <project>/.omp/plans/.
+goal.enabled	tasks	Modes	Goal Mode		Enable per-session goal mode and the hidden goal tool
+goal.statusInFooter	tasks	Modes	Goal Status in Footer		Show token budget alongside the goal indicator in the status line
+goal.continuationModes	tasks	Modes	Goal Continuation Modes		Run modes where active goals may auto-continue between turns ("interactive", "rpc")
+title.generator	tasks	Modes	Title Generator	fork|tiny	What names an untitled session from the user's messages
+title.refreshOnReplan	tasks	Modes	Refresh Title on Replan		Refresh generated session titles after todo init replans unless the title was set by the user
+title.refreshAfterPrompts	tasks	Modes	Refresh Title After Prompts	0|1|3|5|10	Every this many operator prompts, ask the judge model whether a generated session title still fits the conversation, and regenerate it if not
+task.eager	tasks	Subagents	Prefer Task Delegation	default|preferred|always	How strongly to push the main agent to delegate work; subagents keep the model's own policy
+task.autoParallel	tasks	Subagents	Auto Parallel	off|suggest|on	Ask the native judge resolved through the 'judge' role which parts of each new top-level prompt can run concurrently. Needs a native judge and the task tool; without them nothing is judged.
+task.batch	tasks	Subagents	Batch Task Calls		Switch the task tool to its batch shape: one call carries { context, tasks[] } — one subagent per item, with an optional per-item agent (defaulting to the session spawn-policy agent), per-item isolation, and a required shared context prepended to every assignment. With async.enabled=true, each spawn runs as an independent background agent with the normal idle/parked lifecycle; otherwise the call blocks for merged results. Disable to restore the flat single-spawn schema.
+task.steps	tasks	Subagents	Sequential Task Steps		Spawns take ordered `steps` instead of one `task`: the subagent gets the first step, then each next one once it finishes the previous; past 4 steps, earlier messages carry two or more. The last step's result is the task's result.
+task.structured	tasks	Subagents	Structured Task Results		Expose outputSchema/schemaMode on the task tool and honor agent output schemas; a subagent with a schema returns its result through the yield tool, validated against it. Off: task subagents ignore schemas, except agents whose definition sets structured: true. A subagent without a schema has no yield tool and returns its final message. Eval agent()/workpool spawns always honor schemas.
+task.speculativeLaunch	tasks	Subagents	Speculative Task Launch		Start each batch subagent as soon as its tasks[] item finishes streaming instead of waiting for the whole task call. Launched agents are aborted if the finished call fails validation, is blocked, or its arguments change. Requires auto-allowed task approval and no extension tool lifecycle handlers.
+task.enableEffort	tasks	Subagents	Per-Task Effort		Expose the optional effort parameter on task spawns, allowing callers to override each subagent's thinking level
+task.perCallModel	tasks	Subagents	Per-Call Model	off|eval|on	Whether a subagent call may pick its model with one exact provider/model-id[@upstream][:level] selector. An @upstream pin is part of the model identity and is supported only by aggregators. Only models the configuration already routes to are accepted. Project settings can turn it off but not on, and never approve a model.
+task.perCallModelAllow	tasks	Subagents	Per-Call Model Allowlist		Exact selectors: `provider/model-id`, including `@upstream` only for a pinned OpenRouter/Vercel route (e.g. `openrouter/x@y`). When set, a per-call model must also be listed here. Empty: every model the configuration grants. A project list can only narrow this one.
+task.maxConcurrency	tasks	Subagents	Max Concurrent Tasks	0|1|2|4|8|16|32|64	Maximum number of subagents running concurrently
+task.workerThreads	tasks	Subagents	Subagent Worker Threads	0|1|2|4|8	Maximum worker threads for subagents. Up to 8 concurrent subagents run on the main thread; at 9 one worker joins, and one more each time the count doubles (18, 36, 72). Workers stop a minute after no subagent is live in them; 0 keeps every subagent on the main thread
+task.enableLsp	tasks	Subagents	LSP Edit Checks in Subagents		Run LSP formatting and diagnostics on subagent edits. Off by default to keep subagents cheap; the lsp tool stays available to them either way.
+task.crossInstance	tasks	Subagents	Cross-Instance Agent Messaging		Let other omp instances in this folder read agent outputs and send messages that can wake agents
+task.maxRecursionDepth	tasks	Subagents	Max Task Recursion	-1|0|1|2|3	How many levels deep subagents can spawn their own subagents
+task.maxRuntimeMs	tasks	Subagents	Max Subagent Runtime	0|300000|900000|1800000|3600000	Hard wall-clock limit per subagent (ms). 0 disables it. Defense-in-depth against provider-side stream hangs that escape the inference-layer watchdog; triggers a normal subagent abort with a 'timed out' reason.
+task.completionProbe	tasks	Subagents	Subagent Completion Probe		Ask a working subagent, through a cached side request like /btw, to estimate how complete its task is: after 2, 5, 10 and 30 more minutes, then hourly. The estimate shows next to the subagent in wait and task views. Only subagents spawned by the main agent of an interactive session are asked; print, RPC, ACP and SDK runs never probe.
+task.agentIdleTtlMs	tasks	Subagents	Agent Idle TTL		How long an idle subagent stays live in memory before being parked to disk (ms). Parked agents are revived automatically when messaged or resumed. 0 keeps idle agents live until exit.
+task.softRequestBudget	tasks	Subagents	Soft Subagent Request Budget	0|90|150|200	Soft per-subagent request budget (assistant requests per run). Crossing it injects a wrap-up steering notice (see task.softRequestBudgetNotice); at 1.5x the budget the run is force-stopped and the agent must hand back its partial findings. 0 disables the guard. Bundled scout/sonic agents cap out at a lower built-in budget, so a value below that cap still applies to them. A task.agentSoftRequestBudget entry replaces this budget for the agent it names.
+task.softRequestBudgetNotice	tasks	Subagents	Soft Request Budget Notice		Inject one steering notice when a subagent crosses its soft request budget, asking it to wrap up before the 1.5x forced-yield stop.
+task.maxEffort	tasks	Subagents	Maximum Per-Spawn Effort		Maximum reasoning effort allowed for the task tool's per-spawn effort hint or a per-call model. An explicit `:level` is clamped to the highest supported effort at or below this ceiling, and an omitted `:level` inherits the agent's thinking level capped at this value; cold revival re-applies the cap. Unset, `:inherit` and `:off` keep their existing meaning. A per-call model must support an effort at or below this ceiling; the default preserves the model's full range.
+task.prewalk	tasks	Subagents	Generic Task Prewalk		Arm prewalk for the bundled generic `task` subagent: it starts on its resolved model, plans and begins the implementation, then hands off to the 'smol' role at its first edit/write. Per-agent overrides (task.agentPrewalk, configured from the /agents hub) and user agent `prewalk` frontmatter apply regardless of this toggle.
+task.isolation.enabled	tasks	Isolation	Allow Isolated Subagents		Allow per-task isolation with `isolated: true`; tasks without it run in the shared checkout
+isolation.backend	tasks	Isolation	Isolation Backend	auto|apfs|btrfs|zfs|reflink|overlayfs|projfs|block-clone|rcopy	Backend used for subagent isolation and worktree cloning
+worktree.clone	tasks	Isolation	Clone Checkout into Worktrees		New worktrees from `github pr_checkout` and `git worktree add` in bash start as a copy-on-write clone of the current checkout so ignored build artifacts (node_modules, target) carry over; falls back to a plain checkout when the filesystem cannot clone
+worktree.cleanSource	tasks	Isolation	Clean Source Checkout on /wt		When creating a worktree with `/wt`, reset tracked changes and remove untracked files from the original checkout after carrying them over
+worktree.onStart	tasks	Isolation	Worktree on Start	off|ask|create	Whether fresh interactive sessions start in a new linked worktree
+worktree.onExit	tasks	Isolation	Worktree on Exit	keep|ask|remove|force	What to do on exit with worktrees created since omp started (on start or with `/wt`)
+task.isolation.apply	tasks	Isolation	Apply Isolated Changes		Automatically apply successful isolated task changes to the parent checkout; disable to retain patch or branch artifacts
+ovnfs.path	tasks	Isolation	ovnfs Binary		ovnfs executable; unset looks for `ovnfs` on PATH. When it is found, ovnfs checkouts (copy-on-write views of a folder, ready in about a second at any size) serve every separate copy: the system prompt tells agents to open checkouts instead of git worktrees or copies, and with `isolation.backend` on auto, isolated subagents (when allowed) run in checkouts instead of native clones and `/wt` moves the session into a checkout instead of a linked worktree
+task.isolation.merge	tasks	Isolation	Isolation Merge Strategy	patch|branch	How isolated task changes are integrated (patch apply or branch merge)
+task.isolation.commits	tasks	Isolation	Isolation Commit Style	generic|ai	Commit message style for nested repo changes (generic or AI-generated)
+worktree.base	tasks	Isolation	Worktree Base Directory		Base directory for agent-managed worktrees — task-isolation copies, `github` PR checkouts, and `omp worktree` cleanup all live here. Unset uses ~/.omp/wt. Must be an absolute or ~-relative path; relative paths are ignored. The OMP_WORKTREE_DIR env var overrides this.
+skills.enableSkillCommands	tasks	Commands & Skills	Skill Commands		Register skills as /skill:name commands
+commands.enableClaudeUser	tasks	Commands & Skills	Claude User Commands		Load commands from ~/.claude/commands/
+commands.enableClaudeProject	tasks	Commands & Skills	Claude Project Commands		Load commands from .claude/commands/
+commands.enableOpencodeUser	tasks	Commands & Skills	OpenCode User Commands		Load commands from ~/.config/opencode/commands/
+commands.enableOpencodeProject	tasks	Commands & Skills	OpenCode Project Commands		Load commands from .opencode/commands/
+auth.unpausedProviders	providers	Services	Unpaused Providers		Turn providers we paused back on: login, token refresh and stored credentials work again. Each pause names the account risk you accept. Project settings cannot set this
+providers.maxInFlightRequests	providers	Services	Max In-Flight Requests		Maximum concurrent LLM requests per provider id (for example "openai" or "anthropic"), shared across local OMP processes with this config root. Omitted providers are unlimited.
+providers.webSearchTimeoutSeconds	providers	Services	Web Search Timeout	30|60|120|180|300	Hard timeout for each provider's search transport before web_search advances to the next fallback, in seconds (maximum …)
+providers.antigravityEndpoint	providers	Services	Antigravity Endpoint Mode	auto|production|sandbox	Endpoint routing strategy for google-antigravity providers (chat, search, image, discovery)
+providers.fetch	providers	Services	Fetch Provider	auto|native|trafilatura|lynx|parallel|firecrawl|jina	Reader backend priority for the fetch/read URL tool
+providers.webKeyless	providers	Services	Keyless Web Services	unset|yes|no	Let web search and URL reading use third-party services without your credential: keyless Parallel, Exa, Firecrawl, Keenable, and Perplexity, the Jina reader, and scraped engines (Startpage, DuckDuckGo, Ecosia, Google, Mojeek, Hacker News). Off, only services you configured run.
+codexResets.minBlockedMinutes	providers	Services	Codex Auto-Redeem Min Block		Only auto-redeem when the natural unblock — the latest reset among the exhausted 5h/weekly windows — is at least this many minutes away (don't spend a scarce credit to save a short wait). Raise it (e.g. 360) to ignore 5h-only blocks.
+codexResets.keepCredits	providers	Services	Codex Auto-Redeem Reserve		Never auto-spend below this many saved resets (0 = the last credit may be spent automatically). Credits about to expire are exempt — a reserved credit that expires preserves nothing.
+codexResets.salvageHorizonHours	providers	Services	Codex Reset Salvage Horizon		With auto-redeem enabled, spend a saved Codex reset within this many hours of expiry when either chat window has meaningful usage. 0 disables early salvage; credits expiring within 5 minutes are still attempted regardless of usage.
+claudeResets.minBlockedMinutes	providers	Services	Claude Auto-Redeem Min Block		Only auto-redeem when the natural unblock — the latest reset among the exhausted covered windows — is at least this many minutes away. A 5-hour-only reset is never used for a weekly or model-scoped block.
+claudeResets.keepCredits	providers	Services	Claude Auto-Redeem Reserve		Keep at least this many Claude resets banked (0 allows the last eligible reset to be spent automatically). The reserve applies to early salvage, but not to eligible resets expiring within 5 minutes.
+claudeResets.salvageHorizonHours	providers	Services	Claude Reset Salvage Horizon		With auto-redeem enabled, use a server-selected Cedar reset within this many hours of expiry when its covered windows have meaningful usage. 0 disables early salvage; eligible Cedar or Juniper resets expiring within 5 minutes are still attempted regardless of usage or reserve. Provider limit requirements still apply.
+exa.enabled	providers	Services	Exa		Enable the Exa web search provider
+exa.searchDelayMs	providers	Services	Exa Search Delay		Minimum delay between Exa web search requests in milliseconds; set 0 to disable pacing
+searxng.endpoint	providers	Services	SearXNG Endpoint		Base URL of a self-hosted SearXNG instance used for web search
+tts.localVoice	providers	Services	Local TTS Voice		Phonon voice used by the local TTS backend (American/British, female/male)
+tts.localSpeed	providers	Services	Local TTS Speed		Speaking rate of the local TTS backend (tts tool, omp say). 1 = normal; clamped to 0.8–1.3
+speech.enabled	providers	Services	Speech Vocalization		Speak the assistant's output aloud through the speakers as it streams
+speech.mode	providers	Services	Speech Vocalization Mode	all|assistant|yield	What to speak: all = assistant messages + thinking; assistant = messages only; yield = only the final message at turn end
+speech.enhanced	providers	Services	Enhanced Speech Rewriting		Rewrite assistant output into natural spoken prose with the tiny/smol model before synthesis (describes code, drops links and markdown). Falls back to mechanical cleanup on failure
+speech.voice	providers	Services	Speech Vocalization Voice		Phonon voice used when speaking the assistant's output aloud
+speech.speed	providers	Services	Speech Vocalization Speed		Speaking rate when reading the assistant's output aloud. 1 = normal; clamped to 0.8–1.3
+live.voice	providers	Services	Live Voice		Voice of realtime voice sessions; a custom live endpoint may take other names (set in config)
+live.endpoint	providers	Services	Live Endpoint		Base URL of an OpenAI Realtime WebRTC-compatible server (e.g. http://127.0.0.1:8080/v1) used for live voice instead of Codex; empty uses Codex
+live.apiKey	providers	Services	Live Endpoint API Key		Bearer key sent only to the live endpoint: a literal, an environment variable name, or !command
+providers.fireworksTier	providers	Fireworks	Fireworks Tier	standard|priority	Default serving path (no service_tier)
+providers.tinyModelDevice	providers	Tiny Model	Tiny Model Device		Inference backend for local tiny models (titles + memory): an ONNX execution provider, or `mlx` to download MLX weights and run them through mlx-lm on Apple silicon. Default uses CPU-only ONNX. The PI_TINY_DEVICE env var overrides this.
+providers.tinyModelDtype	providers	Tiny Model	Tiny Model Precision		ONNX quantization/precision for local tiny models. Default uses each model's shipped dtype (q4); lower precision is faster, higher is more faithful. Ignored by the MLX backend (its repos are pre-quantized 4-bit). The PI_TINY_DTYPE env var overrides this.
+providers.kimiApiFormat	providers	Protocol	Kimi API Format	auto|openai|anthropic	API format for Kimi Code provider (auto follows live model metadata)
+providers.openaiWebsockets	providers	Protocol	OpenAI Codex WebSockets	auto|off|on	WebSocket policy for OpenAI Codex models only
+providers.openaiResponsesWebsockets	providers	Protocol	OpenAI Responses WebSockets		Opt in for catalog-supported standard Responses models; model or request false disables it
+providers.openaiLiveSteering	providers	Protocol	OpenAI Live Steering		Deliver messages typed while a GPT-6 response streams into that response over the Codex WebSocket, instead of waiting for the next tool boundary
+providers.cacheRetention	providers	Protocol	Prompt Cache Retention	auto|short|long|none	Prompt-cache retention forwarded to providers that support it (Anthropic, Bedrock, OpenRouter, OpenAI)
+providers.cacheWarming	providers	Protocol	Cache Warming	off|streaming|idle	Refresh the last request's prompt-cache entry shortly before it expires (Anthropic max_tokens 0 pre-warm, else a one-token replay)
+providers.cacheWarmingStrategy	providers	Protocol	Cache Warming Strategy	auto|keepalive|compact	How a long tool call is bridged once refreshing stops paying: compact the history before the cache expires, or let it expire
+providers.cacheWarmingCompactPercent	providers	Protocol	Cache Bridge Compaction Percent	40|50|60|70|80	Share of the context window a prompt must reach before a long tool call may be bridged with compaction; the lower of this and the token limit applies
+providers.cacheWarmingCompactTokens	providers	Protocol	Cache Bridge Compaction Tokens	50000|100000|150000|200000|300000	Prompt tokens from which a long tool call may be bridged with compaction; the lower of this and the window percent applies
+providers.openrouterVariant	providers	Protocol	OpenRouter Routing	default|nitro|floor|online|exacto	Default routing-variant suffix appended to OpenRouter model IDs (overridden when the selector already names a variant)
+provider.appendOnlyContext	providers	Protocol	Append-Only Context	auto|on|off	Cache system prompt + tool specs and keep an append-only message log so provider prefix caches (DeepSeek, Xiaomi/SGLang, Anthropic) hit at maximum rate. Auto enables for known prefix-cache providers.
+providers.streamFirstEventTimeoutSeconds	providers	Timeouts	Stream First Event Timeout	-1|0|300|600|1800	Seconds to wait for the first model stream event; -1 uses provider/env defaults, 0 disables the watchdog
+providers.streamIdleTimeoutSeconds	providers	Timeouts	Stream Idle Timeout	-1|0|300|600|1800	Seconds a model stream may stay silent between events; -1 uses provider/env defaults, 0 disables the watchdog
+secrets.enabled	providers	Privacy	Hide Secrets		Obfuscate configured secrets and redact credential-shaped tokens before sending to AI providers
+telemetry.otlpExportEnabled	providers	Privacy	OTLP Telemetry Export		Allow OMP to export traces, logs, and metrics using OTEL_* endpoints. Changes take effect on the next launch.

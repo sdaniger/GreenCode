@@ -1,18 +1,64 @@
 //! Token-protected HTTP access to local threads.
-use std::{collections::HashMap, path::PathBuf, sync::{Arc, Mutex}, time::Duration};
+use std::{collections::HashMap, net::TcpStream as StdTcpStream, path::PathBuf, sync::{Arc, Mutex}, time::Duration};
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpStream}, sync::{oneshot, watch}};
+use tokio::{io::{AsyncReadExt, AsyncWriteExt}, net::{TcpListener, TcpStream}, sync::{mpsc, oneshot, watch}};
 use crate::{config::Config, permission::Perms, session::{Meta, Session}, Command, Decision, Event};
 
 struct Turn {
     events: Mutex<Vec<Value>>,
     changed: watch::Sender<usize>,
     permission: Mutex<Option<oneshot::Sender<Decision>>>,
+    dialog: Mutex<Option<oneshot::Sender<Value>>>,
+    /// Dropped when the turn ends so the engine can exit.
+    cancel: Mutex<Option<mpsc::UnboundedSender<Command>>>,
     done: Mutex<bool>,
 }
-struct State { token: String, cfg: Arc<Config>, turns: Mutex<HashMap<String, Arc<Turn>>> }
+/// A read-only link to one thread. Requests are guest messages waiting for the owner to send or dismiss them.
+#[derive(Clone, Serialize, Deserialize)]
+struct Guest { token: String, thread: String, expires: u64, requests: Vec<GuestRequest> }
+#[derive(Clone, Serialize, Deserialize)]
+struct GuestRequest { id: String, text: String, at: u64 }
+struct State { token: String, cfg: Arc<Config>, turns: Mutex<HashMap<String, Arc<Turn>>>, guests: Mutex<Vec<Guest>> }
+
+const GUEST_TTL: u64 = 24 * 3600;
+const GUEST_REQUESTS: usize = 20;
+const GUEST_TEXT: usize = 8000;
+
+fn now() -> u64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) }
+fn guests_path() -> PathBuf { crate::home().join("guest-links.json") }
+
+pub(crate) fn random_hex() -> Result<String> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).map_err(|e| anyhow::anyhow!("random token: {e}"))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Replaces `path` with `data`, readable by the owner only.
+pub(crate) fn write_private(path: &std::path::Path, data: &[u8]) -> Result<()> {
+    std::fs::create_dir_all(crate::home())?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
+    use std::io::Write;
+    let mut file = options.open(path)?;
+    #[cfg(unix)]
+    { use std::os::unix::fs::PermissionsExt; file.set_permissions(std::fs::Permissions::from_mode(0o600))?; }
+    file.write_all(data)?;
+    Ok(())
+}
+
+/// Runs `f` on the live guest links (expired ones are dropped first) and saves the result.
+fn with_guests<R>(state: &State, f: impl FnOnce(&mut Vec<Guest>) -> R) -> R {
+    let mut guests = state.guests.lock().unwrap();
+    guests.retain(|g| g.expires > now());
+    let result = f(&mut guests);
+    // A failed save only loses links across a restart; the live links keep working.
+    let _ = serde_json::to_vec(&*guests).map(|data| write_private(&guests_path(), &data));
+    result
+}
 
 /// Loads the existing secret or creates a new owner-only secret.
 pub fn token(rotate: bool) -> Result<String> {
@@ -25,30 +71,78 @@ pub fn token(rotate: bool) -> Result<String> {
             Err(e) => return Err(e.into()),
         }
     }
-    let mut bytes = [0u8; 16];
-    getrandom::fill(&mut bytes).map_err(|e| anyhow::anyhow!("random token: {e}"))?;
-    let value: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    std::fs::create_dir_all(crate::home())?;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
-    use std::io::Write;
-    let mut file = options.open(path)?;
-    #[cfg(unix)]
-    { use std::os::unix::fs::PermissionsExt; file.set_permissions(std::fs::Permissions::from_mode(0o600))?; }
-    file.write_all(value.as_bytes())?;
+    let value = random_hex()?;
+    write_private(&path, value.as_bytes())?;
     Ok(value)
 }
 
 /// Serves until the listener is closed or the process exits.
 pub async fn serve(listener: TcpListener, token: String, cfg: Config) -> Result<()> {
-    let state = Arc::new(State { token, cfg: Arc::new(cfg), turns: Mutex::new(HashMap::new()) });
+    let guests = std::fs::read(guests_path()).ok().and_then(|d| serde_json::from_slice::<Vec<Guest>>(&d).ok()).unwrap_or_default();
+    let state = Arc::new(State { token, cfg: Arc::new(cfg), turns: Mutex::new(HashMap::new()), guests: Mutex::new(guests) });
+    with_guests(&state, |_| ());
+    if let Ok(addr) = listener.local_addr() {
+        let host = if addr.ip().is_unspecified() { format!("127.0.0.1:{}", addr.port()) } else { addr.to_string() };
+        let _ = write_private(&crate::home().join("remote-url"), format!("http://{host}").as_bytes());
+    }
     loop {
         let (stream, _) = listener.accept().await?;
         let state = state.clone();
         tokio::spawn(async move { let _ = handle(stream, state).await; });
     }
+}
+
+/// The address of the running `serve`, written when it starts. Loopback is used for a
+/// wildcard bind; `share_link` replaces it with the LAN address when local access is on.
+pub fn remote_url() -> Result<url::Url> {
+    let text = std::fs::read_to_string(crate::home().join("remote-url")).context("Start `greencode-cli serve` first")?;
+    let url = url::Url::parse(text.trim()).context("invalid remote-url file")?;
+    if url.scheme() != "http" {
+        bail!("remote-url must be an http URL");
+    }
+    Ok(url)
+}
+
+fn lan_address() -> Option<String> {
+    if !crate::service::lan() {
+        return None;
+    }
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    let ip = socket.local_addr().ok()?.ip();
+    (!ip.is_loopback() && !ip.is_unspecified()).then(|| ip.to_string())
+}
+
+/// Creates a read-only guest link through the running `serve`. Used by the desktop palette.
+pub fn share_link(thread: &str) -> Result<String> {
+    use std::io::{Read, Write};
+    Session::load(thread).with_context(|| format!("thread {thread} not found"))?;
+    let token = token(false).context("Start `greencode-cli serve` first (no remote token)")?;
+    let mut url = remote_url()?;
+    if let Some(lan) = lan_address() {
+        if url.host_str().and_then(|h| h.parse::<std::net::IpAddr>().ok()).is_some_and(|ip| ip.is_loopback()) {
+            url.set_host(Some(&lan)).context("invalid LAN address")?;
+        }
+    }
+    let host = url.host_str().context("remote-url has no host")?;
+    let port = url.port_or_known_default().unwrap_or(80);
+    let addr = url.socket_addrs(|| None)?.into_iter().next().context("remote-url has no address")?;
+    let mut stream = StdTcpStream::connect_timeout(&addr, Duration::from_millis(800)).context("GreenCode remote server is not running")?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let request = format!(
+        "POST /api/threads/{thread}/share HTTP/1.1\r\nHost: {host}:{port}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes())?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    let (head, body) = response.split_once("\r\n\r\n").context("invalid response from GreenCode")?;
+    let status = head.lines().next().and_then(|line| line.split_whitespace().nth(1)).and_then(|s| s.parse::<u16>().ok()).unwrap_or(500);
+    let value: Value = serde_json::from_str(body).unwrap_or_else(|_| json!({"error": body.trim()}));
+    if !(200..300).contains(&status) {
+        bail!("{}", value["error"].as_str().unwrap_or("share failed"));
+    }
+    value["url"].as_str().map(str::to_owned).context("share response had no URL")
 }
 
 #[derive(Deserialize)]
@@ -57,6 +151,10 @@ struct Create { cwd: PathBuf, prompt: String, backend: Option<String>, model: Op
 struct Prompt { text: String }
 #[derive(Deserialize)]
 struct Approval { decision: String }
+#[derive(Deserialize)]
+struct Answer { reply: Value }
+#[derive(Deserialize, Default)]
+struct Share { ttl_secs: Option<u64> }
 
 fn start(state: &Arc<State>, meta: Meta, text: String) -> Result<(), &'static str> {
     if text.trim().is_empty() { return Err("empty prompt"); }
@@ -67,9 +165,9 @@ fn start(state: &Arc<State>, meta: Meta, text: String) -> Result<(), &'static st
     let mut turns = state.turns.lock().unwrap();
     if turns.get(&meta.id).is_some_and(|t| !*t.done.lock().unwrap()) { return Err("turn already running"); }
     let (changed, _) = watch::channel(0);
-    let turn = Arc::new(Turn { events: Mutex::new(Vec::new()), changed, permission: Mutex::new(None), done: Mutex::new(false) });
+    let (tx, mut rx) = crate::spawn(&tokio::runtime::Handle::current(), state.cfg.clone(), meta.clone(), Arc::new(Perms::new(state.cfg.mode)));
+    let turn = Arc::new(Turn { events: Mutex::new(Vec::new()), changed, permission: Mutex::new(None), dialog: Mutex::new(None), cancel: Mutex::new(Some(tx.clone())), done: Mutex::new(false) });
     turns.insert(meta.id.clone(), turn.clone());
-    let (tx, mut rx) = crate::spawn(&tokio::runtime::Handle::current(), state.cfg.clone(), meta, Arc::new(Perms::new(state.cfg.mode)));
     let _ = tx.send(Command::Prompt(text));
     tokio::spawn(async move {
         let _tx = tx;
@@ -78,7 +176,7 @@ fn start(state: &Arc<State>, meta: Meta, text: String) -> Result<(), &'static st
             let done = matches!(event, Event::Done);
             match event {
                 Event::Permission { reply, .. } => *turn.permission.lock().unwrap() = Some(reply),
-                Event::Dialog { reply, .. } => { let _ = reply.send(json!({"cancelled": true})); },
+                Event::Dialog { reply, .. } => *turn.dialog.lock().unwrap() = Some(reply),
                 _ => {}
             }
             if done { *turn.done.lock().unwrap() = true; }
@@ -89,6 +187,7 @@ fn start(state: &Arc<State>, meta: Meta, text: String) -> Result<(), &'static st
         }
         // The agent can exit without `Event::Done` (crash, channel closed): never leave the turn "running".
         finish_turn(&turn, "agent exited before finishing the turn");
+        turn.cancel.lock().unwrap().take();
     });
     Ok(())
 }
@@ -101,6 +200,60 @@ fn finish_turn(turn: &Turn, text: &str) {
     let mut events = turn.events.lock().unwrap();
     events.push(json!({"type":"error","text":text}));
     turn.changed.send_replace(events.len());
+}
+
+fn send_prompt(state: &Arc<State>, id: &str, text: String) -> (&'static str, Value) {
+    let Ok((meta, _)) = Session::load(id) else { return ("404 Not Found", json!({"error":"thread not found"})) };
+    match start(state, meta, text) {
+        Ok(()) => ("202 Accepted", json!({"ok":true})),
+        Err(e) => (if e == "turn already running" { "409 Conflict" } else { "400 Bad Request" }, json!({"error":e})),
+    }
+}
+
+/// Streams a turn's events until it is done. Guests never see approval or question prompts.
+async fn stream_events(stream: &mut TcpStream, turn: &Turn, guest: bool) -> Result<()> {
+    stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n\r\n").await?;
+    let mut changed = turn.changed.subscribe();
+    let mut index = 0;
+    loop {
+        let events = { let events = turn.events.lock().unwrap(); events[index..].to_vec() };
+        for event in events {
+            index += 1;
+            if guest && event["type"] == "permission" { continue; }
+            stream.write_all(format!("data: {event}\n\n").as_bytes()).await?;
+            if event["type"] == "done" { return Ok(()); }
+        }
+        if changed.changed().await.is_err() { return Ok(()); }
+    }
+}
+
+async fn guest(stream: &mut TcpStream, state: &Arc<State>, method: &str, rest: &str, body: &[u8]) -> Result<()> {
+    let (token, tail) = rest.split_once('/').unwrap_or((rest, ""));
+    let thread = state.guests.lock().unwrap().iter().find(|g| g.token == token && g.expires > now()).map(|g| g.thread.clone());
+    let Some(thread) = thread else { return reply(stream, "404 Not Found", json!({"error":"link expired or revoked"})).await };
+    match (method, tail) {
+        ("GET", "") => response(stream, "200 OK", "text/html; charset=utf-8", include_bytes!("guest.html")).await,
+        ("GET", "thread") => match Session::load(&thread) {
+            Ok((meta, messages)) => reply(stream, "200 OK", json!({"title":meta.title,"model":meta.model,"messages":messages})).await,
+            Err(_) => reply(stream, "404 Not Found", json!({"error":"thread not found"})).await,
+        },
+        ("GET", "events") => {
+            let turn = state.turns.lock().unwrap().get(&thread).cloned();
+            match turn.filter(|t| !*t.done.lock().unwrap()) {
+                Some(turn) => stream_events(stream, &turn, true).await,
+                None => reply(stream, "404 Not Found", json!({"error":"no running turn"})).await,
+            }
+        }
+        ("POST", "request") => {
+            let Ok(Prompt { text }) = serde_json::from_slice(body) else { return reply(stream, "400 Bad Request", json!({"error":"invalid JSON"})).await };
+            let text = text.trim().to_string();
+            if text.is_empty() || text.len() > GUEST_TEXT { return reply(stream, "400 Bad Request", json!({"error":"empty or too long"})).await }
+            let id = random_hex()?[..8].to_string();
+            let added = with_guests(state, |guests| guests.iter_mut().find(|g| g.token == token).filter(|g| g.requests.len() < GUEST_REQUESTS).map(|g| g.requests.push(GuestRequest { id, text, at: now() })).is_some());
+            if added { reply(stream, "202 Accepted", json!({"ok":true})).await } else { reply(stream, "429 Too Many Requests", json!({"error":"too many pending requests"})).await }
+        }
+        _ => reply(stream, "404 Not Found", json!({"error":"not found"})).await,
+    }
 }
 
 async fn response(stream: &mut TcpStream, status: &str, content_type: &str, body: &[u8]) -> Result<()> {
@@ -149,6 +302,7 @@ async fn handle(mut stream: TcpStream, state: Arc<State>) -> Result<()> {
         });
         if !valid || origins.next().is_some() { return reply(&mut stream, "403 Forbidden", json!({"error":"invalid origin"})).await; }
     }
+    if let Some(rest) = path.strip_prefix("/guest/") { return guest(&mut stream, &state, method, rest, &data[header_end..header_end + len]).await; }
     let authenticated = url::form_urlencoded::parse(query.as_bytes()).any(|(k, v)| k == "token" && v == state.token)
         || lines.clone().filter_map(|line| line.split_once(':')).any(|(k, v)| k.eq_ignore_ascii_case("authorization") && v.trim().strip_prefix("Bearer ") == Some(state.token.as_str()));
     if !authenticated { return reply(&mut stream, "401 Unauthorized", json!({"error":"unauthorized"})).await; }
@@ -186,13 +340,40 @@ async fn handle(mut stream: TcpStream, state: Arc<State>) -> Result<()> {
         }
         if method == "POST" && parts.len() == 4 && parts[3] == "prompt" {
             let prompt: Prompt = match serde_json::from_slice(&data[header_end..header_end+len]) { Ok(v) => v, Err(_) => return reply(&mut stream, "400 Bad Request", json!({"error":"invalid JSON"})).await };
-            let running = state.turns.lock().unwrap().get(id).is_some_and(|t| !*t.done.lock().unwrap());
-            if running { return reply(&mut stream, "409 Conflict", json!({"error":"turn already running"})).await; }
-            let meta = match Session::load(id) { Ok((meta, _)) => meta, Err(_) => return reply(&mut stream, "404 Not Found", json!({"error":"thread not found"})).await };
-            return match start(&state, meta, prompt.text) {
-                Ok(()) => reply(&mut stream, "202 Accepted", json!({"ok":true})).await,
-                Err(e) => reply(&mut stream, if e == "turn already running" { "409 Conflict" } else { "400 Bad Request" }, json!({"error":e})).await,
+            let (status, value) = send_prompt(&state, id, prompt.text);
+            return reply(&mut stream, status, value).await;
+        }
+        if method == "POST" && parts.len() == 4 && parts[3] == "share" {
+            if Session::load(id).is_err() { return reply(&mut stream, "404 Not Found", json!({"error":"thread not found"})).await; }
+            let body = &data[header_end..header_end+len];
+            let share: Share = if body.is_empty() { Share::default() } else { match serde_json::from_slice(body) { Ok(v) => v, Err(_) => return reply(&mut stream, "400 Bad Request", json!({"error":"invalid JSON"})).await } };
+            let (token, expires) = (random_hex()?, now() + share.ttl_secs.unwrap_or(GUEST_TTL).min(GUEST_TTL));
+            with_guests(&state, |guests| {
+                guests.retain(|g| g.thread != id);
+                guests.push(Guest { token: token.clone(), thread: id.to_string(), expires, requests: Vec::new() });
+            });
+            let host = host.unwrap_or("127.0.0.1");
+            return reply(&mut stream, "201 Created", json!({"token":token,"url":format!("http://{host}/guest/{token}"),"expires":expires})).await;
+        }
+        if method == "POST" && parts.len() == 4 && parts[3] == "unshare" {
+            let revoked = with_guests(&state, |guests| { let n = guests.len(); guests.retain(|g| g.thread != id); n - guests.len() });
+            return reply(&mut stream, "200 OK", json!({"revoked":revoked})).await;
+        }
+        if method == "GET" && parts.len() == 4 && parts[3] == "requests" {
+            let requests: Vec<_> = state.guests.lock().unwrap().iter().filter(|g| g.thread == id && g.expires > now()).flat_map(|g| g.requests.clone()).collect();
+            return reply(&mut stream, "200 OK", json!(requests)).await;
+        }
+        if method == "POST" && parts.len() == 6 && parts[3] == "requests" {
+            let text = state.guests.lock().unwrap().iter().filter(|g| g.thread == id).flat_map(|g| &g.requests).find(|r| r.id == parts[4]).map(|r| r.text.clone());
+            let Some(text) = text else { return reply(&mut stream, "404 Not Found", json!({"error":"request not found"})).await };
+            let (status, value) = match parts[5] {
+                "send" => send_prompt(&state, id, text),
+                "dismiss" => ("200 OK", json!({"ok":true})),
+                _ => return reply(&mut stream, "404 Not Found", json!({"error":"not found"})).await,
             };
+            // A request that could not be sent stays pending.
+            if status.starts_with('2') { with_guests(&state, |guests| guests.iter_mut().for_each(|g| g.requests.retain(|r| r.id != parts[4]))); }
+            return reply(&mut stream, status, value).await;
         }
         if parts.len() == 4 {
             let turn = state.turns.lock().unwrap().get(id).cloned();
@@ -203,19 +384,25 @@ async fn handle(mut stream: TcpStream, state: Arc<State>) -> Result<()> {
                 let sender = turn.permission.lock().unwrap().take();
                 return if sender.is_some_and(|sender| sender.send(decision).is_ok()) { reply(&mut stream, "200 OK", json!({"ok":true})).await } else { reply(&mut stream, "409 Conflict", json!({"error":"no pending permission"})).await };
             }
+            if method == "POST" && parts[3] == "answer" {
+                let answer: Answer = match serde_json::from_slice(&data[header_end..header_end+len]) { Ok(v) => v, Err(_) => return reply(&mut stream, "400 Bad Request", json!({"error":"invalid JSON"})).await };
+                let sender = turn.dialog.lock().unwrap().take();
+                return if sender.is_some_and(|sender| sender.send(answer.reply).is_ok()) { reply(&mut stream, "200 OK", json!({"ok":true})).await } else { reply(&mut stream, "409 Conflict", json!({"error":"no pending question"})).await };
+            }
+            if method == "POST" && parts[3] == "cancel" {
+                // Pending prompts are answered first so the agent is not left waiting on a person.
+                if let Some(sender) = turn.permission.lock().unwrap().take() { let _ = sender.send(Decision::Deny); }
+                if let Some(sender) = turn.dialog.lock().unwrap().take() { let _ = sender.send(json!({"cancelled": true})); }
+                let sent = {
+                    let mut cancel = turn.cancel.lock().unwrap();
+                    let sent = cancel.as_ref().is_some_and(|cancel| cancel.send(Command::Cancel).is_ok());
+                    if sent { cancel.take(); }
+                    sent
+                };
+                return if sent { reply(&mut stream, "200 OK", json!({"ok":true})).await } else { reply(&mut stream, "409 Conflict", json!({"error":"no running turn"})).await };
+            }
             if method == "GET" && parts[3] == "events" {
-                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n\r\n").await?;
-                let mut changed = turn.changed.subscribe();
-                let mut index = 0;
-                loop {
-                    let events = { let events = turn.events.lock().unwrap(); events[index..].to_vec() };
-                    for event in events {
-                        index += 1;
-                        stream.write_all(format!("data: {event}\n\n").as_bytes()).await?;
-                        if event["type"] == "done" { return Ok(()); }
-                    }
-                    if changed.changed().await.is_err() { return Ok(()); }
-                }
+                return stream_events(&mut stream, &turn, false).await;
             }
         }
     }
@@ -229,7 +416,7 @@ mod tests {
     #[test]
     fn a_closed_channel_finishes_the_turn_once() {
         let (changed, _) = watch::channel(0);
-        let turn = Turn { events: Mutex::new(Vec::new()), changed, permission: Mutex::new(None), done: Mutex::new(false) };
+        let turn = Turn { events: Mutex::new(Vec::new()), changed, permission: Mutex::new(None), dialog: Mutex::new(None), cancel: Mutex::new(None), done: Mutex::new(false) };
         finish_turn(&turn, "agent exited before finishing the turn");
         finish_turn(&turn, "second");
         assert!(*turn.done.lock().unwrap());

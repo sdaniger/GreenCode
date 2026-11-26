@@ -1,5 +1,6 @@
 # make        list the targets
 # make run    build and start the GUI (debug build, backtraces on)
+# make bundle assemble target/GreenCode.app (registers greencode:// links) from target/release
 .DEFAULT_GOAL := help
 export RUST_BACKTRACE ?= 1
 ARGS ?=
@@ -27,7 +28,14 @@ release: ## optimized binaries in target/release (greencode, greencode-cli)
 	cargo build --release
 	@ls -lh target/release/greencode target/release/greencode-cli
 
+bundle: release ## assemble target/GreenCode.app so greencode:// links and `greencode-cli app` reach the GUI (macOS)
+	rm -rf target/GreenCode.app
+	mkdir -p target/GreenCode.app/Contents/MacOS
+	cp target/release/greencode target/release/greencode-cli target/GreenCode.app/Contents/MacOS/
+	sed "s/@VERSION@/$$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)/" packaging/macos/Info.plist > target/GreenCode.app/Contents/Info.plist
+	/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f target/GreenCode.app
+
 clean: ## delete build output
 	cargo clean
 
-.PHONY: help run cli debug test check release clean
+.PHONY: help run cli debug test check release bundle clean

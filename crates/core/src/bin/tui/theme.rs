@@ -80,11 +80,42 @@ impl Theme {
         let bytes = std::fs::read(path).with_context(|| format!("Cannot read theme {}", path.display()))?;
         serde_json::from_slice(&bytes).with_context(|| format!("Invalid theme {}", path.display()))
     }
+
+    /// `theme_light`/`theme_dark` for the terminal's reported background, then `theme`.
+    pub fn load_preferred(tui: &greencode_core::config::TuiCfg) -> Result<Self> {
+        let path = if light_background() { tui.theme_light.as_deref() } else { tui.theme_dark.as_deref() }
+            .or(tui.theme.as_deref());
+        Self::load(path.and_then(resolve_theme).as_deref())
+    }
+}
+
+/// `COLORFGBG` is `fg;bg`; 7 and 9–15 are light backgrounds.
+fn light_background() -> bool {
+    std::env::var("COLORFGBG").ok()
+        .and_then(|v| v.rsplit(';').next()?.trim().parse::<u8>().ok())
+        .is_some_and(|bg| bg == 7 || (9..=15).contains(&bg))
+}
+
+/// A bare name resolves to `~/.greencode/tui-themes/NAME.json` so OMP theme names import unchanged;
+/// an unavailable bare name keeps the built-in palette instead of breaking startup.
+fn resolve_theme(path: &Path) -> Option<std::path::PathBuf> {
+    let bare = !path.is_absolute() && path.extension().is_none()
+        && !path.to_string_lossy().contains(['/', '\\']);
+    if !bare { return Some(path.to_path_buf()); }
+    if path.is_file() { return Some(path.to_path_buf()); }
+    let named = greencode_core::home().join("tui-themes").join(format!("{}.json", path.display()));
+    named.is_file().then_some(named)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_bare_theme_names_keep_the_builtin_palette() {
+        assert!(resolve_theme(Path::new("greencode-missing-theme")).is_none());
+        assert_eq!(resolve_theme(Path::new("/no/such/theme.json")), Some(Path::new("/no/such/theme.json").into()));
+    }
 
     #[test]
     fn imports_omp_colors_without_interpreting_unrendered_tokens() {

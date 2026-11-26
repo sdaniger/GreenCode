@@ -1,27 +1,46 @@
-//! GitHub Releases updater for the native binaries.
+//! GitHub updater for tagged releases and builds from main.
 
 use anyhow::{bail, Context, Result};
 use reqwest::Client;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::{fs, path::{Component, Path, PathBuf}, process::Command};
+use std::{fs, path::Path, process::{Command, Stdio}, time::Duration};
 
-pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
-const MAX_ASSET_BYTES: u64 = 128 * 1024 * 1024;
+const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+const DEFAULT_REPO: &str = "sdaniger/GreenCode";
+const MAX_ASSET_BYTES: usize = 128 * 1024 * 1024;
 
-#[derive(Clone, Debug)]
-pub struct Release {
-    pub tag: String,
-    pub version: String,
-    pub url: String,
-    asset: Asset,
-    checksum: Option<Asset>,
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Channel {
+    Stable,
+    Main,
+}
+
+impl Default for Channel {
+    fn default() -> Self {
+        if main_commit().is_some() { Self::Main } else { Self::Stable }
+    }
+}
+
+impl std::str::FromStr for Channel {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "stable" => Ok(Self::Stable),
+            "main" => Ok(Self::Main),
+            _ => bail!("update channel must be stable or main"),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct UpdateResult {
     pub current: String,
     pub latest: String,
+    pub url: String,
+    pub available: bool,
     pub installed: bool,
 }
 
@@ -29,31 +48,30 @@ pub struct UpdateResult {
 struct ApiRelease {
     tag_name: String,
     html_url: String,
+    prerelease: bool,
     assets: Vec<ApiAsset>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 struct ApiAsset {
     name: String,
+    label: Option<String>,
     browser_download_url: String,
     #[serde(default)]
     digest: Option<String>,
 }
 
-#[derive(Clone, Debug)]
-struct Asset {
-    name: String,
-    url: String,
-    digest: Option<String>,
+fn valid_commit(sha: &str) -> bool {
+    sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn main_commit() -> Option<&'static str> {
+    option_env!("GREENCODE_MAIN_COMMIT").filter(|sha| valid_commit(sha))
 }
 
 pub fn repository(configured: Option<&str>, override_repo: Option<&str>) -> Result<String> {
-    let raw = override_repo
-        .map(str::to_owned)
-        .or_else(|| std::env::var("GREENCODE_UPDATE_REPO").ok())
-        .or_else(|| configured.map(str::to_owned))
-        .ok_or_else(|| anyhow::anyhow!("update repository is not configured; set update_repo = \"OWNER/REPO\", GREENCODE_UPDATE_REPO, or pass --repo OWNER/REPO"))?;
-    normalize_repository(&raw)
+    let env_repo = std::env::var("GREENCODE_UPDATE_REPO").ok();
+    normalize_repository(override_repo.or(env_repo.as_deref()).or(configured).unwrap_or(DEFAULT_REPO))
 }
 
 fn normalize_repository(raw: &str) -> Result<String> {
@@ -66,7 +84,8 @@ fn normalize_repository(raw: &str) -> Result<String> {
     let (Some(owner), Some(repo), None) = (parts.next(), parts.next(), parts.next()) else {
         bail!("GitHub repository must be OWNER/REPO")
     };
-    if owner.is_empty() || repo.is_empty() || !owner.bytes().all(valid_repo_byte) || !repo.bytes().all(valid_repo_byte) {
+    let valid = |part: &str| !matches!(part, "" | "." | "..") && part.bytes().all(valid_repo_byte);
+    if !valid(owner) || !valid(repo) {
         bail!("GitHub repository must be OWNER/REPO")
     }
     Ok(format!("{owner}/{repo}"))
@@ -76,36 +95,62 @@ fn valid_repo_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
 }
 
-pub async fn check(repo: &str) -> Result<Release> {
+pub async fn run(repo: &str, channel: Channel, executable: Option<&Path>) -> Result<UpdateResult> {
     let repo = normalize_repository(repo)?;
-    let client = Client::builder().user_agent(format!("greencode/{CURRENT_VERSION}")).build()?;
+    let client = Client::builder()
+        .user_agent(concat!("greencode/", env!("CARGO_PKG_VERSION")))
+        .https_only(true)
+        .timeout(Duration::from_secs(120))
+        .build()?;
+    update_from(&client, "https://api.github.com", &repo, channel, main_commit(), executable).await
+}
+
+async fn update_from(
+    client: &Client,
+    api_base: &str,
+    repo: &str,
+    channel: Channel,
+    commit: Option<&str>,
+    executable: Option<&Path>,
+) -> Result<UpdateResult> {
+    let endpoint = match channel {
+        Channel::Stable => "latest",
+        Channel::Main => "tags/main-build",
+    };
+    let asset_name = asset_name()?;
     let api: ApiRelease = client
-        .get(format!("https://api.github.com/repos/{repo}/releases/latest"))
+        .get(format!("{api_base}/repos/{repo}/releases/{endpoint}"))
         .header("accept", "application/vnd.github+json")
         .send()
         .await?
         .error_for_status()
-        .with_context(|| format!("could not read the latest GitHub release for {repo}"))?
+        .with_context(|| format!("could not read the GitHub update for {repo} ({channel:?})"))?
         .json()
         .await?;
-    let asset_name = asset_name()?;
-    let asset = api.assets.iter().find(|a| a.name == asset_name).ok_or_else(|| anyhow::anyhow!("latest release {} has no {asset_name} asset", api.tag_name))?;
-    let checksum = api.assets.iter().find(|a| a.name == "SHA256SUMS").map(to_asset);
-    Ok(Release {
-        tag: api.tag_name.clone(),
-        version: api.tag_name.trim_start_matches('v').to_string(),
-        url: api.html_url,
-        asset: to_asset(asset),
-        checksum,
-    })
-}
-
-fn to_asset(asset: &ApiAsset) -> Asset {
-    Asset { name: asset.name.clone(), url: asset.browser_download_url.clone(), digest: asset.digest.clone() }
-}
-
-pub fn is_newer(release: &Release) -> bool {
-    compare_versions(CURRENT_VERSION, &release.version).is_lt()
+    anyhow::ensure!(api.prerelease == (channel == Channel::Main), "unexpected release channel for {}", api.tag_name);
+    let asset = api.assets.iter().find(|a| a.name == asset_name)
+        .with_context(|| format!("release {} has no {asset_name} asset", api.tag_name))?;
+    let current = commit.map_or_else(|| CURRENT_VERSION.into(), |sha| format!("main@{}", &sha[..12]));
+    let (latest, url, available) = match channel {
+        Channel::Stable => {
+            let version = api.tag_name.trim_start_matches('v');
+            (version.to_owned(), api.html_url, commit.is_some() || compare_versions(CURRENT_VERSION, version).is_lt())
+        }
+        Channel::Main => {
+            let sha = asset.label.as_deref().filter(|sha| valid_commit(sha))
+                .context("main build has no valid commit SHA")?;
+            anyhow::ensure!(asset.digest.as_deref().and_then(parse_digest).is_some(), "main build has no SHA-256 digest");
+            (format!("main@{}", &sha[..12]), format!("https://github.com/{repo}/commit/{sha}"), commit != Some(sha))
+        }
+    };
+    let installed = if let Some(executable) = executable.filter(|_| available) {
+        let checksum = api.assets.iter().find(|a| a.name == "SHA256SUMS");
+        install(client, executable, asset, checksum).await?;
+        true
+    } else {
+        false
+    };
+    Ok(UpdateResult { current, latest, url, available, installed })
 }
 
 fn compare_versions(current: &str, latest: &str) -> std::cmp::Ordering {
@@ -121,34 +166,32 @@ fn compare_versions(current: &str, latest: &str) -> std::cmp::Ordering {
     }
 }
 
-pub async fn install(repo: &str, executable: &Path) -> Result<UpdateResult> {
-    let release = check(repo).await?;
-    if !is_newer(&release) {
-        return Ok(UpdateResult { current: CURRENT_VERSION.into(), latest: release.version, installed: false });
-    }
-    let client = Client::builder().user_agent(format!("greencode/{CURRENT_VERSION}")).build()?;
-    let response = client.get(&release.asset.url).header("accept", "application/octet-stream").send().await?.error_for_status()?;
-    if response.content_length().is_some_and(|n| n > MAX_ASSET_BYTES) { bail!("update asset is too large") }
-    let archive = response.bytes().await?;
-    if archive.len() as u64 > MAX_ASSET_BYTES { bail!("update asset is too large") }
-    verify_digest(&client, &release, &archive).await?;
-    replace_binary(executable, &archive, &release.asset.name)?;
-    Ok(UpdateResult { current: CURRENT_VERSION.into(), latest: release.version, installed: true })
-}
-
-async fn verify_digest(client: &Client, release: &Release, archive: &[u8]) -> Result<()> {
-    let expected = if let Some(digest) = release.asset.digest.as_deref().and_then(parse_digest) {
+async fn install(client: &Client, executable: &Path, asset: &ApiAsset, checksum: Option<&ApiAsset>) -> Result<()> {
+    let expected = if let Some(digest) = asset.digest.as_deref().and_then(parse_digest) {
         Some(digest)
-    } else if let Some(checksum) = &release.checksum {
-        let text = client.get(&checksum.url).header("accept", "text/plain").send().await?.error_for_status()?.text().await?;
-        checksum_for(&text, &release.asset.name)
+    } else if let Some(checksum) = checksum {
+        let text = download(client, &checksum.browser_download_url, 64 * 1024).await?;
+        checksum_for(std::str::from_utf8(&text)?, &asset.name)
     } else {
         None
     };
-    let Some(expected) = expected else { bail!("latest release has no checksum for {}", release.asset.name) };
-    let actual = Sha256::digest(archive).iter().map(|b| format!("{b:02x}")).collect::<String>();
-    anyhow::ensure!(actual == expected, "update checksum mismatch for {}", release.asset.name);
-    Ok(())
+    let expected = expected.with_context(|| format!("release has no checksum for {}", asset.name))?;
+    let archive = download(client, &asset.browser_download_url, MAX_ASSET_BYTES).await?;
+    let actual = format!("{:x}", Sha256::digest(&archive));
+    anyhow::ensure!(actual == expected, "update checksum mismatch for {}", asset.name);
+    replace_binary(executable, &archive)
+}
+
+async fn download(client: &Client, url: &str, limit: usize) -> Result<Vec<u8>> {
+    let mut response = client.get(url).send().await?.error_for_status()?;
+    let len = response.content_length().unwrap_or(0);
+    anyhow::ensure!(len <= limit as u64, "update asset is too large");
+    let mut bytes = Vec::with_capacity(len as usize);
+    while let Some(chunk) = response.chunk().await? {
+        anyhow::ensure!(chunk.len() <= limit - bytes.len(), "update asset is too large");
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }
 
 fn parse_digest(value: &str) -> Option<String> {
@@ -177,50 +220,23 @@ fn asset_name() -> Result<String> {
     }
 }
 
-fn replace_binary(executable: &Path, archive: &[u8], asset_name: &str) -> Result<()> {
+fn replace_binary(executable: &Path, archive: &[u8]) -> Result<()> {
     let executable = executable.canonicalize().with_context(|| format!("cannot locate {}", executable.display()))?;
-    let parent = executable.parent().ok_or_else(|| anyhow::anyhow!("installed executable has no parent directory"))?;
-    let staging = temporary_directory(parent)?;
-    let result = (|| {
-        let archive_path = staging.join(asset_name);
-        fs::write(&archive_path, archive)?;
-        let listing = Command::new("tar").args(["-tzf", archive_path.to_str().unwrap_or_default()]).output()?;
-        anyhow::ensure!(listing.status.success(), "cannot inspect update archive");
-        for entry in String::from_utf8_lossy(&listing.stdout).lines() {
-            let path = Path::new(entry);
-            anyhow::ensure!(!path.is_absolute() && !path.components().any(|c| matches!(c, Component::ParentDir)), "update archive contains an unsafe path");
-        }
-        let unpacked = staging.join("unpacked");
-        fs::create_dir(&unpacked)?;
-        let status = Command::new("tar").args(["-xzf", archive_path.to_str().unwrap_or_default(), "-C", unpacked.to_str().unwrap_or_default()]).status()?;
-        anyhow::ensure!(status.success(), "cannot unpack update archive");
-        let name = executable.file_name().and_then(|n| n.to_str()).ok_or_else(|| anyhow::anyhow!("installed executable has no file name"))?;
-        let candidate = unpacked.join(name);
-        anyhow::ensure!(candidate.is_file() && !candidate.symlink_metadata()?.file_type().is_symlink(), "update archive has no {name} binary");
-        let replacement = parent.join(format!(".{}.update-{}", name, std::process::id()));
-        fs::copy(&candidate, &replacement)?;
-        #[cfg(unix)] {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = executable.metadata()?.permissions().mode();
-            fs::set_permissions(&replacement, fs::Permissions::from_mode(mode))?;
-        }
-        fs::rename(&replacement, &executable).with_context(|| format!("cannot replace {}", executable.display()))?;
-        Ok::<(), anyhow::Error>(())
-    })();
-    let _ = fs::remove_dir_all(&staging);
-    result
-}
-
-fn temporary_directory(parent: &Path) -> Result<PathBuf> {
-    for attempt in 0..100u32 {
-        let path = parent.join(format!(".greencode-update-{}-{attempt}", std::process::id()));
-        match fs::create_dir(&path) {
-            Ok(()) => return Ok(path),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e).with_context(|| format!("cannot create update staging directory in {}", parent.display())),
-        }
-    }
-    bail!("cannot create a unique update staging directory")
+    let parent = executable.parent().context("installed executable has no parent directory")?;
+    let name = executable.file_name().context("installed executable has no file name")?;
+    let staging = tempfile::tempdir_in(parent)?;
+    let archive_path = staging.path().join("archive.tar.gz");
+    fs::write(&archive_path, archive)?;
+    let replacement = staging.path().join("binary");
+    // Extract only the selected binary to stdout; tar never creates archive paths on disk.
+    let status = Command::new("tar")
+        .arg("-xOzf").arg(&archive_path).arg("--").arg(name)
+        .stdout(Stdio::from(fs::File::create(&replacement)?))
+        .status()?;
+    anyhow::ensure!(status.success() && replacement.metadata()?.len() != 0, "update archive has no {} binary", name.to_string_lossy());
+    fs::set_permissions(&replacement, executable.metadata()?.permissions())?;
+    fs::rename(&replacement, &executable).with_context(|| format!("cannot replace {}", executable.display()))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -232,6 +248,7 @@ mod tests {
         assert_eq!(normalize_repository("https://github.com/acme/green.git").unwrap(), "acme/green");
         assert!(normalize_repository("acme/green/other").is_err());
         assert!(normalize_repository("acme/green?x").is_err());
+        assert!(normalize_repository("acme/..").is_err());
     }
 
     #[test]
@@ -245,5 +262,80 @@ mod tests {
     fn checksum_lines_match_archive_names() {
         let digest = "a".repeat(64);
         assert_eq!(checksum_for(&format!("{digest} *greencode-macos-arm64.tar.gz\n"), "greencode-macos-arm64.tar.gz"), Some(digest));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn main_update_checks_commit_and_verifies_download_before_replacement() {
+        use std::os::unix::fs::PermissionsExt;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("greencode-cli"), "#!/bin/sh\nprintf updated").unwrap();
+        let archive = temp.path().join("update.tar.gz");
+        assert!(Command::new("tar").arg("-czf").arg(&archive).arg("-C").arg(&source)
+            .arg("greencode-cli").status().unwrap().success());
+        let archive = fs::read(archive).unwrap();
+        let executable = temp.path().join("greencode-cli");
+        fs::write(&executable, "#!/bin/sh\nprintf original").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let output = || Command::new(&executable).output().unwrap().stdout;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let release = serde_json::to_vec(&serde_json::json!({
+            "tag_name": "main-build",
+            "html_url": "https://github.com/acme/green/releases/tag/main-build",
+            "prerelease": true,
+            "assets": [{
+                "name": asset_name().unwrap(), "label": sha,
+                "digest": format!("sha256:{:x}", Sha256::digest(&archive)),
+                "browser_download_url": format!("{base}/asset"),
+            }]
+        })).unwrap();
+        let server = tokio::spawn(async move {
+            let path = "/repos/acme/green/releases/tags/main-build";
+            for (path, body) in [
+                (path, release.as_slice()),
+                (path, release.as_slice()),
+                (path, release.as_slice()),
+                ("/asset", b"incomplete upload"),
+                (path, release.as_slice()),
+                ("/asset", archive.as_slice()),
+            ] {
+                let (mut conn, _) = listener.accept().await.unwrap();
+                let mut reader = BufReader::new(&mut conn);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                assert_eq!(line.trim_end(), format!("GET {path} HTTP/1.1"));
+                loop {
+                    line.clear();
+                    if reader.read_line(&mut line).await.unwrap() == 0 || line == "\r\n" { break; }
+                }
+                let header = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                conn.write_all(header.as_bytes()).await.unwrap();
+                conn.write_all(body).await.unwrap();
+            }
+        });
+
+        let client = Client::builder().no_proxy().timeout(Duration::from_secs(5)).build().unwrap();
+        let update = |commit, executable| update_from(&client, &base, "acme/green", Channel::Main, commit, executable);
+        let check = update(None, None).await.unwrap();
+        assert!(check.available && !check.installed);
+        assert_eq!(check.latest, "main@0123456789ab");
+        assert_eq!(check.url, format!("https://github.com/acme/green/commit/{sha}"));
+
+        let unchanged = update(Some(sha), Some(&executable)).await.unwrap();
+        assert!(!unchanged.available && !unchanged.installed);
+        let error = update(None, Some(&executable)).await.unwrap_err();
+        assert!(error.to_string().contains("checksum mismatch"));
+        assert_eq!(output(), b"original");
+
+        assert!(update(None, Some(&executable)).await.unwrap().installed);
+        assert_eq!(output(), b"updated");
+        server.await.unwrap();
     }
 }

@@ -12,6 +12,8 @@ fn multi_select(question: &Value) -> bool {
 
 impl Dialog {
     pub fn new(request: Value) -> Option<Self> {
+        // Scheduled tasks live in the desktop app; refusing tells the agent so.
+        if request["method"] == "schedule" { return None; }
         let prompts = if request["method"] == "ask" {
             let questions = request["questions"].as_array()?;
             if questions.is_empty() || questions.iter().any(|q| !q["id"].is_string()) { return None; }
@@ -40,7 +42,7 @@ impl Dialog {
         Some(Self { request, prompts, answers: Vec::new() })
     }
 
-    pub fn secret(&self) -> bool { self.request["secret"] == true }
+    pub fn secret(&self) -> bool { self.request["secret"] == true || self.request["method"] == "secret" }
 
     pub fn finish(self) -> Value {
         if self.prompts.len() != self.answers.len() { return json!({"cancelled": true}); }

@@ -8,6 +8,16 @@ use std::{io::{BufRead, IsTerminal, Write}, path::PathBuf, sync::Arc};
 mod dialog;
 #[path = "cli/html.rs"]
 mod html;
+#[path = "cli/service.rs"]
+mod service;
+#[path = "cli/share.rs"]
+mod share;
+#[path = "cli/thread.rs"]
+mod thread;
+#[path = "cli/triage.rs"]
+mod triage;
+#[path = "cli/workflow.rs"]
+mod workflow;
 mod tui;
 
 fn read_line(prompt: &str) -> anyhow::Result<String> {
@@ -15,6 +25,57 @@ fn read_line(prompt: &str) -> anyhow::Result<String> {
     let mut line = String::new();
     anyhow::ensure!(std::io::stdin().read_line(&mut line)? != 0, "no input");
     Ok(line.trim().to_string())
+}
+
+/// `worktree.onStart`: a fresh interactive session may start in a new linked worktree.
+fn start_session_worktree(
+    cfg: &Config,
+    meta: &mut Meta,
+) -> anyhow::Result<Option<greencode_core::worktree::SessionWorktree>> {
+    use greencode_core::worktree::{self, OnStart};
+    let create = match cfg.worktree.on_start {
+        OnStart::Off => false,
+        OnStart::Create => true,
+        OnStart::Ask => matches!(
+            read_line("Start this session in a new worktree? [y/N] ")?.to_ascii_lowercase().as_str(),
+            "y" | "yes"
+        ),
+    };
+    if !create {
+        return Ok(None);
+    }
+    let repo = std::env::current_dir()?;
+    anyhow::ensure!(worktree::is_repo(&repo), "worktree.onStart needs a git repository ({})", repo.display());
+    let tree = worktree::create_session(&repo, &cfg.worktree, &meta.id, cfg.isolation_opts.isolation.backend)?;
+    std::env::set_current_dir(&tree.path)?;
+    meta.cwd = tree.path.clone();
+    eprintln!("Session worktree: {} (branch {})", tree.path.display(), tree.branch);
+    Ok(Some(tree))
+}
+
+/// `worktree.onExit`: keep, ask, or remove the worktree this launch created.
+fn finish_session_worktree(
+    tree: Option<greencode_core::worktree::SessionWorktree>,
+    policy: greencode_core::worktree::OnExit,
+) {
+    use greencode_core::worktree::ExitAction;
+    let Some(tree) = tree else { return };
+    let remove = match tree.exit_action(policy) {
+        ExitAction::Keep => false,
+        ExitAction::Remove => true,
+        ExitAction::Prompt => matches!(
+            read_line("Remove this session's worktree? [y/N] ").map(|a| a.to_ascii_lowercase()),
+            Ok(a) if a == "y" || a == "yes"
+        ),
+    };
+    if !remove {
+        eprintln!("Worktree kept at {} (branch {})", tree.path.display(), tree.branch);
+        return;
+    }
+    match tree.remove_if_pristine() {
+        Ok(()) => eprintln!("Removed worktree {}", tree.path.display()),
+        Err(e) => eprintln!("Kept worktree {}: {e:#}", tree.path.display()),
+    }
 }
 
 fn auth(cfg: &mut Config, args: &[String]) -> anyhow::Result<()> {
@@ -288,6 +349,30 @@ fn auth(cfg: &mut Config, args: &[String]) -> anyhow::Result<()> {
 
 fn main() -> anyhow::Result<()> {
     let policy_args: Vec<String> = std::env::args().skip(1).collect();
+    // Started by ACP agents without HTTP MCP; must not read config or touch the terminal.
+    if policy_args.first().is_some_and(|s| s == "mcp-relay") {
+        return tokio::runtime::Runtime::new()?.block_on(greencode_core::delegate::relay());
+    }
+    // `lsp.shared`: the per-project language-server broker another instance started.
+    if policy_args.first().is_some_and(|s| s == "lsp-broker") {
+        let socket = policy_args.get(1).ok_or_else(|| anyhow::anyhow!("usage: greencode-cli lsp-broker <socket>"))?;
+        return tokio::runtime::Runtime::new()?.block_on(greencode_core::tools::lsp::serve_broker(std::path::Path::new(socket)));
+    }
+    if policy_args.first().is_some_and(|s| s == "service") {
+        return service::run(&policy_args[1..]);
+    }
+    if policy_args.first().is_some_and(|s| s == "thread") {
+        return thread::run(&policy_args[1..]);
+    }
+    if policy_args.first().is_some_and(|s| s == "triage") {
+        return triage::run(&policy_args[1..]);
+    }
+    if policy_args.first().is_some_and(|s| s == "workflow") {
+        return workflow::cli(&policy_args[1..]);
+    }
+    if policy_args.first().is_some_and(|s| matches!(s.as_str(), "collab" | "share" | "stream" | "skill")) {
+        return share::run(&policy_args);
+    }
     if policy_args.first().is_some_and(|s| s == "config") {
         return greencode_core::config::settings::cli(&policy_args[1..]);
     }
@@ -298,8 +383,10 @@ fn main() -> anyhow::Result<()> {
         return tokio::runtime::Runtime::new()?.block_on(greencode_core::mcp_server::stdio());
     }
     if policy_args.first().is_some_and(|s| s == "serve") {
-        let mut host = "127.0.0.1".to_string();
-        let mut port = 47322u16;
+        greencode_core::service::load_env()?;
+        let lan = greencode_core::service::lan();
+        let mut host = std::env::var("GREENCODE_HOST").unwrap_or_else(|_| if lan { "0.0.0.0".into() } else { "127.0.0.1".into() });
+        let mut port = std::env::var("GREENCODE_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(47322u16);
         let mut rotate = false;
         let mut args = policy_args[1..].iter();
         while let Some(arg) = args.next() {
@@ -321,6 +408,18 @@ fn main() -> anyhow::Result<()> {
             let token = greencode_core::remote::token(rotate)?;
             let addr = listener.local_addr()?;
             println!("http://{addr}/?token={token}");
+            if greencode_core::workflow::enabled() {
+                let workdir = std::env::current_dir()?;
+                let workflow_cfg = std::sync::Arc::new(cfg.clone());
+                tokio::spawn(async move {
+                    greencode_core::workflow::orchestrate(
+                        workflow_cfg,
+                        workdir,
+                        Some(greencode_core::workflow::WEBHOOK_PORT),
+                    )
+                    .await
+                });
+            }
             greencode_core::remote::serve(listener, token, cfg).await
         });
     }
@@ -332,30 +431,119 @@ fn main() -> anyhow::Result<()> {
         }
         return Ok(());
     }
+    if policy_args.first().is_some_and(|s| s == "app" || s == "open-link") {
+        let (app, arg) = (policy_args[0] == "app", policy_args.get(1));
+        anyhow::ensure!(policy_args.len() <= 2 && (app || arg.is_some()), "usage: greencode-cli app [PATH] | open-link greencode://URL");
+        let link = if app {
+            let path = std::path::Path::new(arg.map_or(".", String::as_str)).canonicalize()?;
+            anyhow::ensure!(path.is_dir(), "{} is not a directory", path.display());
+            greencode_core::links::open_link(&path)
+        } else {
+            let link = arg.expect("checked above");
+            greencode_core::links::parse(link)?;
+            link.clone()
+        };
+        return greencode_core::links::deliver(&link);
+    }
+    if policy_args.first().is_some_and(|s| s == "say") {
+        let usage = "usage: greencode-cli say TEXT | say --voice VOICE --speed RATE TEXT";
+        let (mut voice, mut speed, mut words) = (None, None, Vec::new());
+        let mut args = policy_args[1..].iter();
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--voice" | "-v" => voice = Some(args.next().ok_or_else(|| anyhow::anyhow!("--voice needs a value"))?.clone()),
+                "--speed" | "-s" => speed = Some(args.next().ok_or_else(|| anyhow::anyhow!("--speed needs a number"))?.parse::<f64>()?),
+                "--help" | "-h" => { println!("{usage}"); return Ok(()); }
+                _ => words.push(arg.clone()),
+            }
+        }
+        anyhow::ensure!(!words.is_empty(), "{usage}");
+        let cfg = Config::load()?;
+        let speech = &cfg.services_opts.speech;
+        let text = greencode_core::speech::plain(&words.join(" "));
+        return greencode_core::speech::speak_blocking(
+            voice.as_deref().unwrap_or(&speech.voice),
+            speed.unwrap_or(speech.speed),
+            &text,
+        );
+    }
+    if policy_args.first().is_some_and(|s| s == "live") {
+        let usage = "usage: greencode-cli live [TEXT] [--out FILE]";
+        let (mut out, mut words) = (None, Vec::new());
+        let mut args = policy_args[1..].iter();
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--out" | "-o" => out = Some(std::path::PathBuf::from(args.next().ok_or_else(|| anyhow::anyhow!("--out needs a path"))?)),
+                "--help" | "-h" => { println!("{usage}"); return Ok(()); }
+                _ => words.push(arg.clone()),
+            }
+        }
+        let cfg = Config::load()?;
+        return tokio::runtime::Runtime::new()?.block_on(async move {
+            async fn exchange(
+                session: &mut greencode_core::live::LiveSession,
+                out: Option<&std::path::Path>,
+                text: String,
+            ) -> anyhow::Result<String> {
+                let mut audio = Vec::new();
+                let reply = session.ask(&text, out.map(|_| &mut audio)).await?;
+                if let Some(path) = out {
+                    greencode_core::live::write_wav(path, &audio)?;
+                }
+                Ok(reply.transcript)
+            }
+            let mut session = greencode_core::live::LiveSession::connect(&cfg).await?;
+            if !words.is_empty() {
+                println!("{}", exchange(&mut session, out.as_deref(), words.join(" ")).await?);
+            } else {
+                use std::io::Write as _;
+                println!("live voice session ({}) · Enter sends, Ctrl-D quits", session.model());
+                print!("> ");
+                let _ = std::io::stdout().flush();
+                for line in std::io::stdin().lines() {
+                    let line = line?;
+                    if line.trim().is_empty() { continue; }
+                    println!("{}", exchange(&mut session, out.as_deref(), line).await?);
+                    print!("> ");
+                    let _ = std::io::stdout().flush();
+                }
+            }
+            session.close().await;
+            Ok(())
+        });
+    }
     if policy_args.first().is_some_and(|s| s == "update") {
+        use greencode_core::update;
+        const USAGE: &str = "greencode-cli update [--check] [--channel stable|main] [--repo OWNER/REPO]";
         let mut check = false;
         let mut repo = None;
+        let mut channel = None;
         let mut args = policy_args[1..].iter();
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--check" => check = true,
-                "--repo" => repo = Some(args.next().ok_or_else(|| anyhow::anyhow!("--repo needs OWNER/REPO"))?.clone()),
-                _ => anyhow::bail!("usage: greencode-cli update [--check] [--repo OWNER/REPO]"),
+                "--channel" => channel = Some(args.next().ok_or_else(|| anyhow::anyhow!("--channel needs stable or main"))?.parse()?),
+                "--repo" => repo = Some(args.next().ok_or_else(|| anyhow::anyhow!("--repo needs OWNER/REPO"))?.as_str()),
+                "--help" | "-h" => { println!("{USAGE}"); return Ok(()); }
+                _ => anyhow::bail!("usage: {USAGE}"),
             }
         }
         let cfg = Config::load()?;
-        let repo = greencode_core::update::repository(cfg.update_repo.as_deref(), repo.as_deref())?;
+        let channel = channel.unwrap_or(cfg.tui.update.channel);
+        let repo = update::repository(cfg.update_repo.as_deref(), repo)?;
+        let executable = (!check).then(std::env::current_exe).transpose()?;
         let rt = tokio::runtime::Runtime::new()?;
-        if check {
-            let release = rt.block_on(greencode_core::update::check(&repo))?;
-            println!("current {} · latest {} · {}", greencode_core::update::CURRENT_VERSION, release.version, release.url);
+        let result = rt.block_on(update::run(&repo, channel, executable.as_deref()))?;
+        if result.installed {
+            println!("Updated GreenCode {} → {}; restart GreenCode to use it.", result.current, result.latest);
         } else {
-            let executable = std::env::current_exe()?;
-            let result = rt.block_on(greencode_core::update::install(&repo, &executable))?;
-            if result.installed { println!("Updated GreenCode {} → {}; restart GreenCode to use it.", result.current, result.latest); }
-            else { println!("GreenCode {} is already current (latest {}).", result.current, result.latest); }
+            let status = if result.available { "update available" } else { "no update available" };
+            println!("current {} · latest {} · {status} · {}", result.current, result.latest, result.url);
         }
         return Ok(());
+    }
+    if policy_args.first().is_some_and(|s| s == "theme") {
+        return greencode_core::theme::cli(&policy_args[1..]);
     }
     if policy_args.first().is_some_and(|s| s == "agents") {
         use greencode_core::registry;
@@ -396,6 +584,7 @@ fn main() -> anyhow::Result<()> {
     let (run_args, overlays) = config_args(policy_args)?;
     let mut cfg = Config::load_with_overlays(&overlays)?;
     greencode_core::tools::SANDBOX.store(cfg.sandbox, std::sync::atomic::Ordering::Relaxed);
+    let native_model = cfg.model.clone();
     let (mut prompt, mut backend, mut resume) = (None, "native".to_string(), None);
     let (mut rpc, mut json_output, mut model_override, mut backend_override) = (None, false, false, false);
     let (mut subagent_override, mut scheduled, mut mode_override) = (false, None::<String>, false);
@@ -433,6 +622,8 @@ fn main() -> anyhow::Result<()> {
             "--hide-thinking" => { cfg.tui.hide_thinking = true; native_controls = true; }
             "--system-prompt" => { cfg.system_prompt = Some(val()?); native_controls = true; }
             "--append-system-prompt" => { cfg.append_system_prompt = Some(val()?); native_controls = true; }
+            "--prewalk" => { cfg.assist_opts.prewalk.enabled = true; native_controls = true; }
+            "--no-prewalk" => { cfg.assist_opts.prewalk.enabled = false; native_controls = true; }
             "--subagent-model" => {
                 let model = val()?;
                 cfg.subagent_model = if model == "parent" { None } else { Some(model) };
@@ -525,10 +716,15 @@ fn main() -> anyhow::Result<()> {
                 println!("--no-resume bypasses [tui] auto_resume for this launch");
                 println!("greencode-cli config path | list | get KEY | set KEY VALUE | reset KEY");
                 println!("greencode-cli config import-omp FILE [FILE...] | --profile NAME   print supported settings as a TOML overlay");
-                println!("Native controls: --plan --thinking LEVEL --tools NAME,... --no-tools --no-skills --no-rules --no-extensions --no-context-files --hide-thinking --system-prompt TEXT --append-system-prompt TEXT");
+                println!("Native controls: --plan --thinking LEVEL --tools NAME,... --no-tools --no-skills --no-rules --no-extensions --no-context-files --hide-thinking --system-prompt TEXT --append-system-prompt TEXT --prewalk --no-prewalk");
+                println!("greencode-cli serve [--host HOST] [--port PORT] [--rotate]   token-protected remote UI; reads ~/.greencode/service.env");
                 println!("greencode-cli --scheduled LABEL --resume ID -p PROMPT   run a launchd-scheduled turn (approvals are denied), then remove its job");
+                println!("greencode-cli thread list|show ID|start PROMPT|send ID PROMPT [--project DIR] [--backend NAME] [--model MODEL] [--wait] [--json]   script threads; `-` reads the prompt from stdin");
+                println!("greencode-cli service install [--lan] | status | restart | uninstall   run `greencode-cli serve` as a login service (service.env is read by serve)");
+                println!("greencode-cli triage [--backend NAME] [--model MODEL] [SYMPTOM]   investigate a GreenCode problem with the app's triage playbook");
                 println!("greencode-cli --hermes-profiles | --import-hermes NAME_OR_DIRECTORY");
                 println!("greencode-cli agents list | agents install ID | agents remove ID   manage ACP registry agents");
+                println!("greencode-cli workflow list|start NAME [--payload JSON] [--key K]|show RUN|resume RUN|cancel RUN|answer RUN STEP VALUE   durable workflows (Labs)");
                 println!("greencode-cli --import-session SESSION.jsonl   import a Claude/Codex transcript or a GreenCode export");
                 println!("greencode-cli --import-session EXPORT.json   import `opencode session export` output");
                 println!("greencode-cli --export-session ID [FILE]   write a portable copy of a thread");
@@ -539,7 +735,10 @@ fn main() -> anyhow::Result<()> {
                 println!("greencode-cli auth import   borrow the existing Claude Code / Codex CLI sign-in without copying its refresh token");
                 println!("greencode-cli --opencode-login [OPENCODE_ARGS...]    sign in using OpenCode's own login flow");
                 println!("Native sub-agents: --subagent-model provider/model (or parent to follow the parent model)");
-                println!("greencode-cli update [--check] [--repo OWNER/REPO]   check or install the latest GitHub Release asset");
+                println!("greencode-cli app [PATH] | open-link greencode://URL   open a folder or prompt link in the running GreenCode app");
+                println!("greencode-cli update [--check] [--channel stable|main] [--repo OWNER/REPO]   check or install a GitHub build");
+                println!("greencode-cli theme set FILE|NAME | theme clear | theme show   set, clear or list the default custom theme (GreenCode or VS Code theme JSON)");
+                println!("greencode-cli collab relay|list | share [THREAD] | share serve|open LINK | stream [THREAD] [--follow] | stream serve | skill search|install|publish   collab relay, encrypted shares, live streams and the skill registry");
                 return Ok(());
             }
             _ => anyhow::bail!("unknown option {a}; use --help"),
@@ -569,12 +768,15 @@ fn main() -> anyhow::Result<()> {
         anyhow::ensure!(!use_latest || resume.is_some(), "no saved {backend} session in {}", meta.cwd.display());
     }
     meta.subagent_model = cfg.subagent_model.clone();
+    let fresh = resume.is_none();
     if let Some(id) = resume {
         meta = Session::load(&id)?.0;
         if backend_override && meta.backend != backend { anyhow::bail!("cannot change a resumed thread's backend"); }
         if model_override { meta.model = cfg.model.clone(); }
         if subagent_override { meta.subagent_model = cfg.subagent_model.clone(); }
     }
+    // `--model` names an external backend's model there; native children still default to the configured one.
+    if meta.backend != "native" { cfg.model = native_model; }
     anyhow::ensure!(!native_controls || meta.backend == "native", "native controls do not change external agents; use that backend's configuration");
     if let Some(level) = cfg.effort.as_deref().filter(|_| thinking_override) {
         anyhow::ensure!(greencode_core::provider::effort_levels(&cfg, &meta.model).contains(&level), "model {} does not support thinking level {level}", meta.model);
@@ -598,9 +800,18 @@ fn main() -> anyhow::Result<()> {
             Session::save_view(&view)?;
         }
     }
-    if interactive { return tui::run(rt.handle(), cfg, meta, overlays.is_empty()); }
+    if interactive {
+        let on_exit = cfg.worktree.on_exit;
+        let tree = if fresh { start_session_worktree(&cfg, &mut meta)? } else { None };
+        let result = tui::run(rt.handle(), cfg, meta, overlays.is_empty());
+        finish_session_worktree(tree, on_exit);
+        return result;
+    }
     eprintln!("session {}", meta.id);
+    let thread_id = meta.id.clone();
     let perms = Arc::new(Perms::new(cfg.mode));
+    let show_images = cfg.tui.terminal.show_images;
+    let modes = cfg.modes.clone();
     let (tx, mut rx) = greencode_core::spawn(rt.handle(), Arc::new(cfg), meta, perms);
     let stdin = std::io::stdin();
     let mut turn = |command: Command| -> bool {
@@ -614,7 +825,21 @@ fn main() -> anyhow::Result<()> {
                     if !json_output { print!("{t}"); }
                     let _ = std::io::stdout().flush();
                 }
-                Event::Thinking(_) | Event::Image(_) => {}
+                Event::Thinking(_) => {}
+                // Print mode is scrollback: the escape lands where the text cursor stands.
+                Event::Image(image) if !json_output && show_images => {
+                    if let (Some(protocol), Some((media, bytes))) =
+                        (greencode_core::image::protocol(), greencode_core::context::image_bytes(&image))
+                    {
+                        if let Some((escape, _)) = greencode_core::image::inline_escape(protocol, media, &bytes, 40) {
+                            let mut out = std::io::stdout().lock();
+                            use std::io::Write;
+                            let _ = out.write_all(&escape);
+                            let _ = out.flush();
+                        }
+                    }
+                }
+                Event::Image(_) => {}
                 Event::ToolStart { name, input, .. } => eprintln!("\n> {name} {input}"),
                 Event::ToolEnd { output, is_error, .. } => {
                     let first = output.lines().next().unwrap_or("");
@@ -640,7 +865,7 @@ fn main() -> anyhow::Result<()> {
                     if !json_output && rpc.as_ref().is_some_and(|r| r["type"] == command) {
                         println!("{}", serde_json::to_string_pretty(&data).unwrap_or_default());
                     }
-                    if !json_output && matches!(command.as_str(), "notify" | "command_output") {
+                    if !json_output && matches!(command.as_str(), "notify" | "command_output" | "delegate_wake" | "injected_prompt") {
                         if let Some(text) = data["message"].as_str().or_else(|| data["text"].as_str()).filter(|s| !s.is_empty()) {
                             eprintln!("\n[{text}]");
                         }
@@ -655,6 +880,8 @@ fn main() -> anyhow::Result<()> {
                     eprintln!("\nerror: {e}");
                     ok = false;
                 }
+                // Async delegated tasks wake this thread for another turn; exiting now would kill them.
+                Event::Done if greencode_core::delegate::outstanding(&thread_id) => eprintln!("\n[waiting for delegated tasks]"),
                 Event::Done => { done = true; break; }
             }
         }
@@ -662,7 +889,17 @@ fn main() -> anyhow::Result<()> {
         ok && done
     };
     if let Some(command) = rpc.clone().map(Command::Remote).or_else(|| prompt.map(Command::Prompt)) {
-        let ok = turn(command);
+        let mut command = Some(command);
+        let mut ok = true;
+        // `goal.continuation_modes`: one-shot/rpc runs keep going while the goal stays open, bounded
+        // by the goal's own budget or `complete`.
+        while let Some(next) = command.take() {
+            ok = turn(next);
+            if !ok { break; }
+            let goal = greencode_core::goal::Goal::load(&thread_id);
+            command = goal.and_then(|goal| goal.continues(&modes, greencode_core::config::modes::RunMode::Rpc))
+                .map(Command::Prompt);
+        }
         if !ok { anyhow::bail!("turn failed or ended without completion"); }
         if let Some(claim) = claim.take() {
             claim.complete()?;
@@ -705,6 +942,7 @@ fn config_args(args: Vec<String>) -> anyhow::Result<(Vec<String>, Vec<PathBuf>)>
                 rest.push(arg);
                 rest.extend(argv.next());
             }
+            "--prewalk" | "--no-prewalk" => rest.push(arg),
             _ => rest.push(arg),
         }
     }

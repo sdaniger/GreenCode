@@ -46,9 +46,15 @@ pub(super) fn windows_pty(
     let pty = portable_pty::native_pty_system().openpty(size).map_err(io::Error::other)?;
     let stdout = pty.master.try_clone_reader().map_err(io::Error::other)?;
     let mut stdin = pty.master.take_writer().map_err(io::Error::other)?;
-    let mut cmd = portable_pty::CommandBuilder::new(std::env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into()));
+    let shell = resolve_shell(
+        std::env::var("GREENCODE_TERMINAL_SHELL").ok().as_deref(),
+        std::env::var("COMSPEC").ok().as_deref(),
+    );
+    let mut cmd = portable_pty::CommandBuilder::new(&shell);
     cmd.cwd(cwd);
-    cmd.arg("/D");
+    if Path::new(&shell).file_stem().is_some_and(|s| s.eq_ignore_ascii_case("cmd")) {
+        cmd.arg("/D");
+    }
     let child = pty.slave.spawn_command(cmd).map_err(io::Error::other)?;
     let (mut from_ui, to_pty) = tokio::io::simplex(8192);
     let handle = rt.handle().clone();
@@ -95,11 +101,13 @@ impl Term {
         master: Option<Master>,
         cwd: &Path,
     ) -> Self {
-        let previous = std::fs::read_to_string(log_path(cwd, number))
+        let mut previous: Vec<SharedString> = std::fs::read_to_string(log_path(cwd, number))
             .unwrap_or_default()
             .lines()
             .map(|s| s.to_string().into())
             .collect();
+        // Old log files may predate the limits; restored history obeys them too.
+        trim_scrollback(&mut previous);
         let scroll = ScrollHandle::default();
         scroll.scroll_to_bottom();
         let mut screen = super::new_screen();
@@ -239,8 +247,48 @@ impl Term {
         let end = incomplete.unwrap_or(text.len());
         self.pending_escape.push_str(&text[end..]);
         super::term_feed(&mut self.lines, &mut self.open, &text[..end]);
-        self.scroll.scroll_to_bottom();
+        if !self.scrolled_up() {
+            self.scroll.scroll_to_bottom();
+        }
         reply
+    }
+
+    /// Whether the user has scrolled away from the latest output.
+    pub fn scrolled_up(&self) -> bool {
+        self.scroll.offset().y > -self.scroll.max_offset().y + gpui_kit::px(1.)
+            && self.scroll.max_offset().y > gpui_kit::px(0.)
+    }
+
+    /// Shift+PageUp/PageDown: scrolls one viewport, clamped to the retained output.
+    pub fn scroll_by_page(&self, down: bool) {
+        let o = self.scroll.offset();
+        let page = self.scroll.bounds().size.height * 0.9;
+        let y = if down { o.y - page } else { o.y + page };
+        let max = -self.scroll.max_offset().y;
+        self.scroll
+            .set_offset(gpui_kit::point(o.x, y.min(gpui_kit::px(0.)).max(max)));
+    }
+
+    pub fn scroll_to_top(&self) {
+        self.scroll.set_offset(gpui_kit::point(gpui_kit::px(0.), gpui_kit::px(0.)));
+    }
+
+    /// The selected lines, or all retained output (saved log included), as plain text.
+    pub fn copy_text(&self) -> String {
+        let selection = self
+            .selection
+            .filter(|(a, b)| (*a).max(*b) < self.lines.len())
+            .map(|(a, b)| (a.min(b), a.max(b)));
+        let mut out: Vec<String> = Vec::new();
+        if selection.is_none_or(|s| s == (0, self.lines.len().saturating_sub(1))) {
+            out.extend(self.previous.iter().map(|l| plain(l)));
+        }
+        let current = match selection {
+            Some((a, b)) => &self.lines[a..=b],
+            None => &self.lines[..],
+        };
+        out.extend(current.iter().map(|l| plain(l)));
+        out.join("\n")
     }
 
     pub fn save(&self, cwd: &Path) -> std::io::Result<()> {
@@ -249,18 +297,14 @@ impl Term {
         }
         let path = log_path(cwd, self.number);
         std::fs::create_dir_all(path.parent().expect("log directory"))?;
-        let text = self
+        let mut text = self
             .previous
             .iter()
             .chain(&self.lines)
-            .rev()
-            .take(500)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .map(|s| s.as_ref())
-            .collect::<Vec<_>>()
-            .join("\n");
+            .cloned()
+            .collect::<Vec<_>>();
+        trim_scrollback(&mut text);
+        let text = text.iter().map(|s| s.as_ref()).collect::<Vec<_>>().join("\n");
         std::fs::write(path, text)
     }
 }
@@ -745,7 +789,9 @@ pub(super) fn parse_sgr_line(line: &str) -> Vec<Run> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // No glob import: it would bring in gpui-kit's `test` macro, which shadows `#[test]`.
+    use super::{color, parse_sgr_line};
+    use gpui_kit::rgb;
 
     #[test]
     fn terminal_sgr_colors_and_resets() {
@@ -793,5 +839,129 @@ mod tests {
         let wide = super::wrap_runs(vec![("日本語です".into(), None, None, false)], 6);
         assert_eq!(wide.len(), 2);
         assert_eq!(super::wrap_runs(vec![], 10).len(), 1);
+    }
+}
+
+const SCROLLBACK_LINES: usize = 5000;
+const SCROLLBACK_BYTES: usize = 8 << 20;
+
+/// Keeps the newest 5,000 lines and 8 MiB; a single line bigger than the budget loses its start.
+pub(super) fn trim_scrollback(lines: &mut Vec<SharedString>) {
+    trim_to(lines, SCROLLBACK_LINES, SCROLLBACK_BYTES);
+}
+
+fn trim_to(lines: &mut Vec<SharedString>, max_lines: usize, max_bytes: usize) {
+    let extra = lines.len().saturating_sub(max_lines);
+    lines.drain(..extra);
+    let mut total = 0;
+    let mut keep = lines.len();
+    while keep > 0 && (keep == lines.len() || total + lines[keep - 1].len() <= max_bytes) {
+        keep -= 1;
+        total += lines[keep].len();
+    }
+    lines.drain(..keep);
+    if lines.is_empty() {
+        return;
+    }
+    // Only the newest line can still be over budget.
+    if let Some(first) = lines.first_mut().filter(|l| l.len() > max_bytes) {
+        let mut at = first.len() - max_bytes;
+        while !first.is_char_boundary(at) {
+            at += 1;
+        }
+        *first = first[at..].to_string().into();
+    }
+}
+
+/// The shell for new terminals: `GREENCODE_TERMINAL_SHELL` if it can start, else the platform default.
+pub(super) fn resolve_shell(configured: Option<&str>, default: Option<&str>) -> String {
+    let clean = |s: Option<&str>| s.map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+    let last = if cfg!(windows) { "cmd.exe" } else { "/bin/sh" };
+    [configured, default]
+        .into_iter()
+        .filter_map(clean)
+        .find(|s| can_exec(s))
+        .unwrap_or_else(|| last.into())
+}
+
+/// Whether `shell` is an executable file, or a bare name found on `PATH`.
+#[cfg(unix)]
+fn can_exec(shell: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let path = Path::new(shell);
+    let files: Vec<PathBuf> = if path.components().count() > 1 {
+        vec![path.to_path_buf()]
+    } else {
+        std::env::var_os("PATH")
+            .map(|dirs| std::env::split_paths(&dirs).map(|d| d.join(shell)).collect())
+            .unwrap_or_default()
+    };
+    files.iter().any(|f| {
+        std::fs::metadata(f).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    })
+}
+
+#[cfg(not(unix))]
+fn can_exec(_: &str) -> bool {
+    true
+}
+
+/// `fish_features` with `no-query-term` added so fish does not wait for terminal replies at startup.
+/// An existing `query-term` choice wins.
+pub(super) fn fish_features(shell: &str, current: Option<&str>) -> Option<String> {
+    if !Path::new(shell)
+        .file_stem()
+        .is_some_and(|n| n.eq_ignore_ascii_case("fish"))
+    {
+        return None;
+    }
+    let current = current.unwrap_or("").trim();
+    if current.contains("query-term") {
+        return None;
+    }
+    Some(if current.is_empty() {
+        "no-query-term".into()
+    } else {
+        format!("{current},no-query-term")
+    })
+}
+
+#[cfg(test)]
+mod scrollback_tests {
+    use super::{fish_features, resolve_shell, trim_to};
+    use gpui_kit::SharedString;
+
+    #[test]
+    fn byte_cap_drops_oldest_and_shortens_long_lines() {
+        let mut v: Vec<SharedString> = vec!["aaaa".into(), "bbbb".into(), "cc".into()];
+        trim_to(&mut v, 10, 7);
+        assert_eq!(v.iter().map(|s| s.as_ref()).collect::<Vec<_>>(), ["bbbb", "cc"]);
+        let mut v: Vec<SharedString> = vec!["x".into(), "あいうえお".into()];
+        trim_to(&mut v, 10, 7);
+        assert_eq!(v.iter().map(|s| s.as_ref()).collect::<Vec<_>>(), ["えお"]);
+        let mut v: Vec<SharedString> = (0..6).map(|i| i.to_string().into()).collect();
+        trim_to(&mut v, 3, 100);
+        assert_eq!(v.iter().map(|s| s.as_ref()).collect::<Vec<_>>(), ["3", "4", "5"]);
+    }
+
+    #[test]
+    fn shell_override_and_fish() {
+        assert_eq!(resolve_shell(Some(" /bin/sh "), Some("/bin/zsh")), "/bin/sh");
+        assert_eq!(resolve_shell(Some("  "), Some("/bin/sh")), "/bin/sh");
+        if cfg!(unix) {
+            assert_eq!(resolve_shell(Some("/definitely/missing"), Some("/bin/sh")), "/bin/sh");
+        }
+        assert_eq!(resolve_shell(None, None), if cfg!(windows) { "cmd.exe" } else { "/bin/sh" });
+        assert_eq!(
+            fish_features("/usr/bin/fish", None).as_deref(),
+            Some("no-query-term")
+        );
+        assert_eq!(
+            fish_features("/usr/bin/fish", Some("qmark-noglob")).as_deref(),
+            Some("qmark-noglob,no-query-term")
+        );
+        assert_eq!(fish_features("/usr/bin/fish", Some("qmark-noglob,query-term")), None);
+        assert_eq!(fish_features("/usr/bin/fish", Some("no-query-term")), None);
+        assert_eq!(fish_features("/bin/zsh", None), None);
     }
 }

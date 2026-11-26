@@ -40,6 +40,8 @@ fn read(path: &Path, first_only: bool) -> Result<(Option<PathBuf>, Vec<Message>)
         let message = match v["type"].as_str() {
             Some("user" | "assistant") if v["isSidechain"] != true && v["isMeta"] != true => &v["message"],
             Some("response_item") if codex["type"] == "message" => codex,
+            // Pi session lines: `{"type":"message","message":{"role":..,"content":[..]}}`.
+            Some("message") => &v["message"],
             _ => continue,
         };
         let role = match message["role"].as_str() {
@@ -141,6 +143,87 @@ pub fn discover(project: &Path) -> Vec<Found> {
     }
     found.extend(opencode_sessions(project));
     found
+}
+
+/// A directory with recent conversations from Claude Code, Codex or Pi.
+pub struct Project {
+    pub dir: PathBuf,
+    /// Newest first, at most three.
+    pub sessions: Vec<Found>,
+    pub newest: std::time::SystemTime,
+}
+
+/// Directories used by Claude Code, Codex and Pi in the last 30 days, newest first.
+pub fn scan_projects() -> Vec<Project> {
+    let pi = std::env::var_os("PI_CODING_AGENT_SESSION_DIR")
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| env_dir("PI_CODING_AGENT_DIR", ".pi/agent").join("sessions"));
+    scan_in(
+        &env_dir("CLAUDE_CONFIG_DIR", ".claude").join("projects"),
+        &env_dir("CODEX_HOME", ".codex").join("sessions"),
+        &pi,
+    )
+}
+
+// shortcut: at most 300 newest files per source are read and non-git folders are not separated; upgrade if histories exceed that.
+fn scan_in(claude: &Path, codex: &Path, pi: &Path) -> Vec<Project> {
+    let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 86400);
+    let mut by_dir = std::collections::BTreeMap::<PathBuf, Project>::new();
+    for (source, root, depth) in [("Claude Code", claude, 1), ("Codex", codex, 3), ("Pi", pi, 1)] {
+        let mut files = vec![];
+        jsonl_under(root, depth, &mut files);
+        let mut files: Vec<_> = files.into_iter().filter_map(|p| Some((p.metadata().ok()?.modified().ok().filter(|t| *t >= cutoff)?, p))).collect();
+        files.sort_by(|a, b| b.0.cmp(&a.0));
+        files.truncate(300);
+        for (time, path) in files {
+            let Ok((Some(dir), messages)) = read(&path, true) else { continue };
+            let skipped = dir.components().any(|c| c.as_os_str() == "Downloads") || dir.ends_with("Documents/Codex") || dir.to_string_lossy().contains("Documents/Codex/");
+            if messages.is_empty() || skipped || !dir.is_dir() { continue; }
+            let project = by_dir.entry(dir.clone()).or_insert(Project { dir, sessions: vec![], newest: time });
+            project.newest = project.newest.max(time);
+            project.sessions.push(Found { source, title: title(&messages), origin: Origin::File(path) });
+        }
+    }
+    let mut projects: Vec<_> = by_dir.into_values().collect();
+    for p in &mut projects {
+        let mtime = |f: &Found| match &f.origin { Origin::File(path) => path.metadata().and_then(|m| m.modified()).ok(), Origin::OpenCode(_) => None };
+        p.sessions.sort_by_key(|f| std::cmp::Reverse(mtime(f)));
+        p.sessions.truncate(3);
+    }
+    projects.sort_by(|a, b| b.dir.join(".git").exists().cmp(&a.dir.join(".git").exists()).then(b.newest.cmp(&a.newest)));
+    projects
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scans_recent_projects_from_all_three_tools() {
+        let home = tempfile::tempdir().unwrap();
+        let (a, b, c, old) = (home.path().join("a"), home.path().join("b"), home.path().join("Downloads/c"), home.path().join("old"));
+        for d in [&a, &b, &c, &old] { std::fs::create_dir_all(d).unwrap(); }
+        std::fs::create_dir(b.join(".git")).unwrap();
+        let write = |path: PathBuf, line: String| { std::fs::create_dir_all(path.parent().unwrap()).unwrap(); std::fs::write(path, line + "\n").unwrap(); };
+        let claude = |d: &Path| format!(r#"{{"type":"user","cwd":"{}","message":{{"role":"user","content":"hi"}}}}"#, d.display());
+        let codex = |d: &Path| format!(r#"{{"type":"response_item","payload":{{"type":"message","role":"user","cwd":"{}","content":[{{"type":"input_text","text":"hi"}}]}}}}"#, d.display());
+        let pi = |d: &Path| format!(r#"{{"type":"message","cwd":"{}","message":{{"role":"user","content":[{{"type":"text","text":"hi"}}]}}}}"#, d.display());
+        for i in 0..4 { write(home.path().join(format!("claude/p/{i}.jsonl")), claude(&a)); }
+        write(home.path().join("codex/2026/01/01/r.jsonl"), codex(&b));
+        write(home.path().join("pi/p/s.jsonl"), pi(&a));
+        write(home.path().join("claude/q/x.jsonl"), claude(&c));
+        write(home.path().join("claude/o/x.jsonl"), claude(&old));
+        let f = std::fs::File::options().write(true).open(home.path().join("claude/o/x.jsonl")).unwrap();
+        f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 86400)).unwrap();
+        let projects = scan_in(&home.path().join("claude"), &home.path().join("codex"), &home.path().join("pi"));
+        let dirs: Vec<_> = projects.iter().map(|p| p.dir.clone()).collect();
+        assert_eq!(dirs.len(), 2, "{dirs:?}");
+        assert_eq!(projects[0].dir, b, "git repositories sort first");
+        let pa = projects.iter().find(|p| p.dir == a).unwrap();
+        assert_eq!(pa.sessions.len(), 3);
+        assert!(projects.iter().any(|p| p.dir == b && p.sessions[0].source == "Codex"));
+    }
 }
 
 /// `opencode session list` is already scoped to its working directory. OpenCode may not be installed.

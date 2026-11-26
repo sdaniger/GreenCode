@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 
 /// Name and catalog blurb of every ext tool, in catalog order.
-pub const CATALOG: [(&str, &str); 16] = [
+pub const CATALOG: [(&str, &str); 24] = [
     ("hread", "line-anchored read"),
     ("hedit", "line-anchored edit"),
     ("ast", "structural search/replace"),
@@ -18,6 +18,7 @@ pub const CATALOG: [(&str, &str); 16] = [
     ("advisor", "second opinion"),
     ("learn", "durable project lessons"),
     ("ask", "ask the user"),
+    ("secret", "ask the user privately for a credential"),
     ("checkpoint", "mark context"),
     ("rewind", "drop exploration since checkpoint, keep a report"),
     ("new_context", "restart from a handoff"),
@@ -26,10 +27,17 @@ pub const CATALOG: [(&str, &str); 16] = [
     ("manage_skill", "save skills"),
     ("find", "files for a described behavior"),
     ("github", "read issues/PRs/CI via gh"),
+    ("dsm", "disassemble binaries"),
+    ("tts", "speech text to an audio file"),
+    ("ratchet", "eval flow against a baseline"),
+    ("archive", "prompt/session history"),
+    ("vault", "Obsidian vault notes"),
+    ("security", "scan planning and runs"),
+    ("report_issue", "report a wrong or broken tool result"),
 ];
 
-pub const NAMES: [&str; 16] = {
-    let mut names = [""; 16];
+pub const NAMES: [&str; 24] = {
+    let mut names = [""; 24];
     let mut i = 0;
     while i < CATALOG.len() {
         names[i] = CATALOG[i].0;
@@ -41,9 +49,10 @@ pub const NAMES: [&str; 16] = {
 /// `None` when every ext tool is turned off in settings.
 pub fn def(off: &[String]) -> Option<ToolDef> {
     let s = json!({"type": "string"});
+    let autoqa = super::config().discovery.dev.autoqa;
     let on: Vec<String> = CATALOG
         .iter()
-        .filter(|(name, _)| !off.iter().any(|o| o == name))
+        .filter(|(name, _)| !off.iter().any(|o| o == name) && (*name != "report_issue" || autoqa))
         .map(|(name, about)| format!("{name} ({about})"))
         .collect();
     if on.is_empty() {
@@ -79,7 +88,7 @@ pub fn help(tool: &str) -> Result<String> {
             json!({"pattern": s, "lang": s, "path": s, "rewrite": s}), &["pattern"],
         ),
         "eval" => (
-            "Run code in a kernel that keeps its variables between calls. The last expression is printed.",
+            "Run code in a kernel that keeps its variables between calls. The last expression is printed. A cell may define tools (`@tool` in Python, `tool(fn)` in JS) that you and your subagents then call directly, and may run subagents with `agent(prompt)` or `workpool(items)`. A cell still running after eval.auto_background.thresholdMs moves to a background job.",
             json!({"lang": {"enum": ["py", "js"]}, "code": s, "reset": {"type": "boolean"}}), &["lang", "code"],
         ),
         "debug" => (
@@ -100,6 +109,10 @@ pub fn help(tool: &str) -> Result<String> {
             "Ask the user one or more questions and wait for the answers. Each answer lists the chosen option labels and any free text.",
             json!({"questions": {"type": "array", "items": {"type": "object", "properties": {"question": s, "options": {"type": "array", "items": s}, "multi": {"type": "boolean"}}, "required": ["question"]}}}),
             &["questions"],
+        ),
+        "secret" => (
+            "Ask the user for a credential in a private dialog; the value never enters the conversation. It is saved as env var NAME (available in later `bash` calls) and in ~/.greencode/secrets/NAME. Never print or echo it.",
+            json!({"name": s, "reason": s}), &["name", "reason"],
         ),
         "checkpoint" => (
             "Mark the current point before a long read-only exploration. `rewind` replaces the exploration with a report and keeps user instructions and background results.",
@@ -133,6 +146,39 @@ pub fn help(tool: &str) -> Result<String> {
             "Read GitHub through `gh` (read-only). repo_view; issue_view/pr_view/pr_diff/pr_checks need `number`; search_issues/search_prs need `query`; run_list; run_view needs `run` (failed job logs). `repo` (owner/repo) defaults to the current checkout.",
             json!({"op": {"enum": ["repo_view", "issue_view", "pr_view", "pr_diff", "pr_checks", "search_issues", "search_prs", "run_list", "run_view"]}, "number": n, "query": s, "run": n, "repo": s}),
             &["op"],
+        ),
+        "dsm" => (
+            "Binary analysis. `open` (path) analyses an executable or database and returns `handle`; `list`, `get`, `view` (overview, imports, exports, strings, <func>, <func>:asm, xrefs:<func>), `exec` (Python in the worker), `rename`, `comment`, `set_type`, `make_function`, `save`, `retain`, `close`, and `metadata` (header facts only). Backend from `disassembler.backend`. Pass `handle` to every action except open/list/metadata.",
+            json!({"action": {"enum": ["open", "list", "get", "view", "exec", "rename", "comment", "set_type", "make_function", "save", "retain", "close", "metadata"]},
+                   "path": s, "handle": s, "id": s, "arch": s, "view": s, "code": s, "target": s,
+                   "name": s, "text": s, "decl": s, "save": {"type": "boolean"}}),
+            &["action"],
+        ),
+        "tts" => (
+            "Synthesize speech into an audio file. `text` is spoken; `output_path` (relative to the working directory) defaults to a timestamped .wav; .wav/.aiff/.m4a/.caf go through the on-device voice (`tts.local_voice`/`tts.local_speed`), other formats through xAI Grok Voice with `voice_id` (default eve) and `language` (default auto).",
+            json!({"text": s, "output_path": s, "voice_id": s, "language": s}), &["text"],
+        ),
+        "ratchet" => (
+            "Eval flow with a baseline for a hill climb. `init` needs `cases` (name, command, expect substring); `run` executes them and reports the score against the baseline; `status` shows history; `accept` makes the last run the baseline. Runs kebab-case `flow` (default `default`) under .greencode/ratchet.",
+            json!({"action": {"enum": ["init", "run", "status", "accept"]}, "flow": s,
+                   "cases": {"type": "array", "items": {"type": "object", "properties": {"name": s, "command": s, "expect": s, "timeout": n}, "required": ["command"]}}}),
+            &["action"],
+        ),
+        "archive" => (
+            "Read-only history of GreenCode sessions. `prompts` lists user prompts (newest first, optional `query`); `projects` groups sessions by folder; `sessions` lists threads; `search` finds a matching line; `recap` needs `session` and returns its last `turns` messages.",
+            json!({"action": {"enum": ["prompts", "projects", "sessions", "search", "recap"]}, "query": s, "session": s, "turns": n, "limit": n}), &["action"],
+        ),
+        "vault" => (
+            "Obsidian vault notes. `list` lists the vault; `read`/`write` take `path` (if omitted, `vault://`); `edit` swaps `old` for `new`; `open` launches the note in Obsidian through its CLI (needs one installed).",
+            json!({"action": {"enum": ["list", "read", "write", "edit", "open"]}, "path": s, "content": s, "old": s, "new": s, "replace_all": {"type": "boolean"}}), &["action"],
+        ),
+        "report_issue" => (
+            "Report a wrong, broken or misleading tool result to GreenCode's maintainers. `tool` is the tool that misbehaved, `summary` what went wrong; `details` adds the exact result.",
+            json!({"tool": s, "summary": s, "details": s}), &["tool", "summary"],
+        ),
+        "security" => (
+            "Security scans. `plan` writes the checks for this project; `run` executes them and stores the report; `list` shows past scans; `show` needs `id` and returns its findings. Reports are readable as security://<id>.",
+            json!({"action": {"enum": ["plan", "run", "list", "show"]}, "id": s, "limit": n}), &["action"],
         ),
         other => bail!("unknown ext tool `{other}`; available: {}", NAMES.join(", ")),
     };
@@ -184,23 +230,96 @@ pub fn effective(name: &str, input: &Value) -> (String, Value) {
         (Some("call"), Some("github")) => {
             ("web_fetch".into(), json!({"url": "https://github.com"}))
         }
+        // Opening and viewing analyse a file; the editing actions write to its database.
+        (Some("call"), Some("dsm")) if matches!(args["action"].as_str(), Some("rename" | "comment" | "set_type" | "make_function" | "save" | "close")) => (
+            "edit".into(),
+            json!({"path": if path.is_string() { path } else { json!(".") }}),
+        ),
+        (Some("call"), Some("vault")) if matches!(args["action"].as_str(), Some("write" | "edit")) => (
+            "edit".into(),
+            json!({"path": if path.is_string() { path } else { json!(".") }}),
+        ),
+        (Some("call"), Some("ratchet")) => (
+            "bash".into(),
+            json!({"command": args["cases"].as_array().and_then(|c| c.first()).and_then(|c| c["command"].as_str()).unwrap_or("true")}),
+        ),
+        // Synthesizing writes the audio file.
+        (Some("call"), Some("tts")) => (
+            "write".into(),
+            json!({"path": if path.is_string() { path } else { json!(".") }}),
+        ),
+        (Some("call"), Some("dsm")) => (
+            "read".into(),
+            json!({"path": if path.is_string() { path } else { json!(".") }}),
+        ),
         _ => ("read".into(), json!({"path": "."})),
     }
 }
 
 /// Runs every ext tool except `advisor`, which needs the agent's provider.
 pub async fn run(tool: &str, args: &Value, cwd: &Path) -> Result<String> {
+    run_with(None, tool, args, cwd).await
+}
+
+pub async fn run_with(cfg: Option<&crate::config::Config>, tool: &str, args: &Value, cwd: &Path) -> Result<String> {
     match tool {
         "hread" => hread(args, cwd),
         "hedit" => hedit(args, cwd),
         "ast" => ast(args, cwd).await,
-        "eval" => super::eval::run(args, cwd).await,
+        "eval" => match cfg {
+            Some(cfg) => super::eval::run_with(cfg, args, cwd).await,
+            None => super::eval::run(args, cwd).await,
+        },
         "debug" => super::dap::run(args, cwd).await,
         "recall" => recall(str_arg(args, "query")?),
         "wait" => wait(args).await,
         "manage_skill" => manage_skill(args),
-        "find" => find(args, cwd).await,
-        "github" => github(args, cwd).await,
+        "find" => find(cfg, args, cwd).await,
+        "github" => github(cfg, args, cwd).await,
+        "dsm" => match cfg {
+            Some(cfg) => crate::disasm::tool(cfg, args, cwd).await,
+            None => bail!("dsm needs the loaded config; call it from the agent"),
+        },
+        "tts" => match cfg {
+            Some(cfg) => crate::speech::tts(cfg, args, cwd).await,
+            None => bail!("tts needs the loaded config; call it from the agent"),
+        },
+        "ratchet" => {
+            let cfg = cfg.context("ratchet needs the loaded config; call it from the agent")?;
+            anyhow::ensure!(cfg.extra_tools_opts.ratchet.enabled, "ratchet is disabled by ratchet.enabled");
+            super::ratchet::run(cwd, args)
+        }
+        "archive" => {
+            let cfg = cfg.context("archive needs the loaded config; call it from the agent")?;
+            anyhow::ensure!(cfg.extra_tools_opts.archive.enabled, "archive is disabled by archive.enabled");
+            super::archive::run(&crate::home(), args)
+        }
+        "vault" => {
+            let cfg = cfg.context("vault needs the loaded config; call it from the agent")?;
+            super::vault::command(cfg, args)
+        }
+        "report_issue" => {
+            let cfg = cfg.context("report_issue needs the loaded config; call it from the agent")?;
+            let payload = crate::discovery::report_payload(
+                str_arg(args, "tool")?,
+                &args["details"].clone(),
+                str_arg(args, "summary")?,
+                false,
+                &cfg.model,
+            );
+            let path = crate::discovery::store(&crate::home().join("autoqa"), &payload)
+                .map_err(|e| anyhow!("cannot store the report: {e}"))?;
+            match crate::discovery::push(&cfg.discovery.dev.autoqa_push.endpoint, &payload).await {
+                Ok(()) if !cfg.discovery.dev.autoqa_push.endpoint.trim().is_empty() => Ok(format!("reported to {} ({})", cfg.discovery.dev.autoqa_push.endpoint, path.display())),
+                Ok(()) => Ok(format!("report saved to {}; set dev.autoqa_push.endpoint to send it", path.display())),
+                Err(e) => Ok(format!("report saved to {}; push failed: {e:#}", path.display())),
+            }
+        }
+        "security" => {
+            let cfg = cfg.context("security needs the loaded config; call it from the agent")?;
+            anyhow::ensure!(cfg.extra_tools_opts.security.enabled, "security is disabled by security.enabled");
+            super::security::tool(&crate::home(), cwd, args)
+        }
         other => bail!(
             "unknown ext tool `{other}`; available: {}",
             NAMES.join(", ")
@@ -224,8 +343,9 @@ fn find_terms(query: &str) -> Vec<String> {
     terms
 }
 
-async fn find(args: &Value, cwd: &Path) -> Result<String> {
-    let terms = find_terms(str_arg(args, "query")?);
+async fn find(cfg: Option<&crate::config::Config>, args: &Value, cwd: &Path) -> Result<String> {
+    let query = str_arg(args, "query")?;
+    let terms = find_terms(query);
     if terms.is_empty() {
         bail!("find needs a `query` with words of 3+ characters")
     }
@@ -333,12 +453,22 @@ async fn find(args: &Value, cwd: &Path) -> Result<String> {
         })
         .collect();
     ranked.sort_by(|x, y| y.0.total_cmp(&x.0).then(y.1.cmp(&x.1)).then(x.2.cmp(&y.2)));
-    Ok(ranked
+    let rows = ranked
         .iter()
         .take(10)
         .map(|(score, _, f, a, b, best)| format!("{f}:{a}-{b} {score:.2} {best}"))
         .collect::<Vec<_>>()
-        .join("\n"))
+        .join("\n");
+    // Verification only runs with a loaded config; without one the judged ranking stands.
+    let Some(cfg) = cfg else { return Ok(rows) };
+    // `spotlight.experiment.enabled`: rare query words outweigh common ones when ranking files.
+    let rows = if cfg.discovery.spotlight.experiment.enabled {
+        let hits: Vec<(String, String)> = ranked.iter().map(|(_, _, f, .., best)| (f.clone(), best.clone())).collect();
+        crate::discovery::rank(query, hits).into_iter().map(|(f, best)| format!("{f} 1.00 {best}")).collect::<Vec<_>>().join("\n")
+    } else {
+        rows
+    };
+    Ok(crate::tools::find_verify::verify(cfg, query, &rows).await)
 }
 
 /// The `gh` arguments for one read-only github op.
@@ -383,13 +513,29 @@ fn github_args(args: &Value) -> Result<Vec<String>> {
     Ok(a)
 }
 
-async fn github(args: &Value, cwd: &Path) -> Result<String> {
+async fn github(cfg: Option<&crate::config::Config>, args: &Value, cwd: &Path) -> Result<String> {
+    let argv = github_args(args)?;
+    // Only rendered views are cached; a diff or log is large and changes with every push.
+    let view = matches!(args["op"].as_str(), Some("issue_view" | "pr_view" | "repo_view"));
+    let key = super::github_cache::key(&argv, cwd);
+    let fetch = {
+        let argv = argv.clone();
+        let cwd = cwd.to_path_buf();
+        move || async move { gh(&argv, &cwd).await }
+    };
+    match cfg.filter(|_| view) {
+        Some(cfg) => super::github_cache::serve(cfg, &key, fetch).await,
+        None => fetch().await,
+    }
+}
+
+async fn gh(argv: &[String], cwd: &Path) -> Result<String> {
     let gh = crate::config::executable("gh")
         .ok_or_else(|| anyhow!("gh is not installed (brew install gh, then gh auth login)"))?;
     let out = tokio::time::timeout(
         std::time::Duration::from_secs(60),
         tokio::process::Command::new(gh)
-            .args(github_args(args)?)
+            .args(argv)
             .current_dir(cwd)
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true)
@@ -469,7 +615,18 @@ async fn wait(args: &Value) -> Result<String> {
             return Ok(format!("process {pid} has exited"));
         }
         if start.elapsed().as_secs() >= seconds {
-            return Ok(format!("process {pid} is still running after {seconds}s"));
+            // `async.widgets`: the wait card carries the job's live widget.
+            let card = crate::tools::running_job_list()
+                .into_iter()
+                .find(|(job, ..)| job.to_string() == pid)
+                .map(|(.., log)| crate::tools::jobwidget::wait_card(&log))
+                .filter(|card| !card.is_empty());
+            let mut text = format!("process {pid} is still running after {seconds}s");
+            if let Some(card) = card {
+                text.push('\n');
+                text.push_str(&card);
+            }
+            return Ok(text);
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }

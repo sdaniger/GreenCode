@@ -527,7 +527,7 @@ mod tests {
         });
         let meta = Meta {
             id: id.into(), cwd: home.clone(), title: String::new(), model: String::new(),
-            subagent_model: None, backend: "pi".into(), created: 0, repo: None,
+            subagent_model: None, backend: "pi".into(), created: 0, repo: None, parent: None,
         };
         let state_bytes = serde_json::to_vec(&State { backend: "pi".into(), session_file: Some(file.clone()) }).unwrap();
         std::fs::write(&state, &state_bytes).unwrap();

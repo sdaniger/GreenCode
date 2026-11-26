@@ -38,14 +38,34 @@ impl std::error::Error for RpcError {}
 
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value>>>>>;
 
+/// Routes `notifications/resources/updated` into `notices`; every other message is dropped.
+/// `mcp.notifications` only needs those, so no server-to-client request handling is lost.
+pub fn drain_updates(mut rx: mpsc::UnboundedReceiver<Incoming>, notices: std::sync::Arc<crate::discovery::Notifier>) {
+    tokio::spawn(async move {
+        while let Some(message) = rx.recv().await {
+            let Incoming::Notification { method, params } = message else { continue };
+            if method == "notifications/resources/updated" {
+                let uri = params["uri"].as_str().unwrap_or("?").to_string();
+                notices.record(&uri, params);
+            }
+        }
+    });
+}
+
 pub struct Rpc {
     stdin: tokio::sync::Mutex<ChildStdin>,
     pending: Pending,
     next: AtomicU64,
-    _child: Child,
+    _child: Mutex<Option<Child>>,
 }
 
 impl Rpc {
+    /// Kills the child; its stdio readers then see EOF and release their references.
+    pub fn shutdown(&self) {
+        if let Some(mut child) = self._child.lock().unwrap().take() {
+            let _ = child.start_kill();
+        }
+    }
     pub fn spawn(
         command: &[String],
         env: &[(String, String)],
@@ -61,12 +81,13 @@ impl Rpc {
         cwd: &Path,
     ) -> Result<(Arc<Rpc>, mpsc::UnboundedReceiver<Incoming>, mpsc::UnboundedReceiver<String>)> {
         let (prog, args) = command.split_first().ok_or_else(|| anyhow!("empty command"))?;
+        let env = env.iter().map(|(k, v)| Ok((k.clone(), crate::secrets::resolve(v, &format!("env {k}"))?))).collect::<Result<Vec<_>>>()?;
         let mut child = Command::new(prog)
             .args(args)
             .env_remove("ELECTRON_RUN_AS_NODE")
             .env_remove("CHROME_CRASHPAD_PIPE_NAME")
             .env("PATH", crate::config::agent_path()?)
-            .envs(env.iter().cloned())
+            .envs(env)
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -116,7 +137,7 @@ impl Rpc {
             // Process exited: fail everything still waiting.
             p.lock().unwrap().clear();
         });
-        Ok((Arc::new(Rpc { stdin: tokio::sync::Mutex::new(stdin), pending, next: AtomicU64::new(1), _child: child }), rx, out_rx))
+        Ok((Arc::new(Rpc { stdin: tokio::sync::Mutex::new(stdin), pending, next: AtomicU64::new(1), _child: Mutex::new(Some(child)) }), rx, out_rx))
     }
 
     async fn write(&self, v: Value) -> Result<()> {

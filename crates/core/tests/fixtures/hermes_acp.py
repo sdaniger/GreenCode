@@ -24,12 +24,15 @@ for line in sys.stdin:
         if method == "session/load":
             assert params["sessionId"] == "hermes-fixture"
         else:
-            assert params["mcpServers"] == []
+            # Only GreenCode's own delegation server, never the project's or imported ones.
+            assert [s["name"] for s in params["mcpServers"]] in ([], ["greencode"]), params["mcpServers"]
         result = {"sessionId": "hermes-fixture", "models": {"currentModelId": "openai-codex:gpt-6-luna"}}
     elif method == "session/prompt":
         assert params["sessionId"] == "hermes-fixture"
-        assert len(params["prompt"]) == 1  # no replay or additional instructions
-        prompt = params["prompt"][0]["text"]
+        # No replay of the imported transcript: at most GreenCode's delegation guide before the prompt.
+        blocks = [b for b in params["prompt"] if not b["text"].startswith("## GreenCode delegation")]
+        assert len(blocks) == 1, params["prompt"]
+        prompt = blocks[0]["text"]
         send({"jsonrpc": "2.0", "method": "session/update", "params": {
             "sessionId": "hermes-fixture", "update": {"sessionUpdate": "agent_message_chunk",
                 "content": {"type": "text", "text": "coder:" + prompt}}}})

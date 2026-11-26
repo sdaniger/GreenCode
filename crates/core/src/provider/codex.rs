@@ -1,7 +1,7 @@
 //! ChatGPT (Codex) subscription: device-flow sign-in and the Responses API it serves.
 
 use super::{send, sse, Provider, Reply, Request};
-use crate::{Block, BoxFut, Role, Usage};
+use crate::BoxFut;
 use anyhow::{anyhow, bail, Result};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -248,6 +248,7 @@ pub struct Codex {
     pub path: PathBuf,
     pub effort: Option<String>,
     session: String,
+    wire: super::Wire,
 }
 
 impl Codex {
@@ -255,59 +256,79 @@ impl Codex {
         let mut bytes = [0u8; 16];
         let _ = getrandom::fill(&mut bytes);
         let session = bytes.iter().map(|b| format!("{b:02x}")).collect();
-        Codex { http: reqwest::Client::new(), base, path, effort, session }
+        Codex { http: reqwest::Client::new(), base, path, effort, session, wire: super::Wire::default() }
+    }
+
+    /// Applies the provider request settings resolved from `config.toml`.
+    pub fn with_wire(mut self, wire: super::Wire) -> Codex {
+        self.wire = wire;
+        self
     }
 
     pub fn body(&self, req: &Request) -> Value {
-        let mut input = Vec::new();
-        for m in req.messages {
-            let mut content = Vec::new();
-            for b in &m.content {
-                match (b, &m.role) {
-                    (Block::Text { text }, Role::User) => content.push(json!({"type": "input_text", "text": text})),
-                    (Block::Text { text }, Role::Assistant) => input.push(json!({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}]})),
-                    (Block::ToolUse { id, name, input: args }, _) => input.push(json!({"type": "function_call", "call_id": id, "name": name, "arguments": args.to_string()})),
-                    (Block::ToolResult { tool_use_id, content, .. }, _) => input.push(json!({"type": "function_call_output", "call_id": tool_use_id, "output": content})),
-                    (Block::Other(v), _) if v["type"] == "codex_reasoning" => {
-                        let mut item = v["item"].clone();
-                        if let Some(o) = item.as_object_mut() { o.remove("id"); }
-                        input.push(item);
-                    }
-                    (Block::Other(v), Role::User) if v["type"] == "image" && v["source"]["type"] == "base64" => content.push(json!({"type": "input_image",
-                        "image_url": format!("data:{};base64,{}", v["source"]["media_type"].as_str().unwrap_or("image/jpeg"), v["source"]["data"].as_str().unwrap_or(""))})),
-                    _ => {}
-                }
-            }
-            if !content.is_empty() { input.push(json!({"type": "message", "role": "user", "content": content})); }
+        super::responses::body(
+            &super::responses::Shape {
+                model: req.model,
+                system: req.system,
+                messages: req.messages,
+                tools: req.tools,
+                effort: self.effort.as_deref(),
+                codex: true,
+            },
+            &self.wire,
+        )
+    }
+
+    /// ChatGPT backend headers; `state` is the rotating session id.
+    fn headers(&self, token: &str, account: Option<&str>, residency: Option<&str>, session: &str) -> Vec<(&'static str, String)> {
+        let mut headers = vec![
+            ("authorization", format!("Bearer {token}")),
+            ("originator", "greencode".into()),
+            ("User-Agent", concat!("GreenCode/", env!("CARGO_PKG_VERSION")).into()),
+            ("session_id", session.to_string()),
+        ];
+        if let Some(account) = account {
+            headers.push(("ChatGPT-Account-ID", account.to_string()));
         }
-        let tools: Vec<Value> = req.tools.iter()
-            .map(|t| json!({"type": "function", "name": t.name, "description": t.description, "parameters": t.schema, "strict": false}))
-            .collect();
-        json!({
-            "model": req.model,
-            "instructions": req.system,
-            "input": input,
-            "tools": tools,
-            "tool_choice": "auto",
-            "parallel_tool_calls": true,
-            "store": false,
-            "stream": true,
-            // Stable key so the backend reuses the shared instructions and tool schemas (Pi sends one too).
-            "prompt_cache_key": "greencode",
-            "text": {"verbosity": "low"},
-            "include": ["reasoning.encrypted_content"],
-            "reasoning": {"effort": self.effort.as_deref().unwrap_or("medium"), "summary": "auto"},
-        })
+        if let Some(residency) = residency {
+            headers.push(("x-openai-internal-codex-residency", residency.to_string()));
+        }
+        headers
     }
 }
 
 impl Provider for Codex {
+    fn append_only(&self) -> bool {
+        self.wire.append_only
+    }
+
+    fn live_steering(&self, model: &str) -> bool {
+        // Steering is a GPT-6 Responses feature and needs the socket it rides on.
+        self.wire.websockets == crate::config::provider::Websockets::On
+            && model.to_ascii_lowercase().starts_with("gpt-6")
+    }
+
     fn complete<'a>(&'a self, req: Request<'a>, on_text: &'a (dyn Fn(&str) + Send + Sync)) -> BoxFut<'a, Result<Reply>> {
         Box::pin(async move {
             let body = self.body(&req);
             let token = access_token(&self.path).await?;
             let (account, residency) = account(&token);
-            let resp = send(|| {
+            let headers = self.headers(&token, account.as_deref(), residency.as_deref(), &self.session);
+            // The socket carries steering and skips the per-turn HTTP handshake; SSE stays the fallback.
+            if self.wire.websockets == crate::config::provider::Websockets::On {
+                let shown = std::sync::atomic::AtomicBool::new(false);
+                let guarded = |t: &str| {
+                    shown.store(true, std::sync::atomic::Ordering::Relaxed);
+                    on_text(t);
+                };
+                match super::responses::complete(&self.base, "responses", &headers, &body, &self.wire, req.live, &guarded).await {
+                    Ok(reply) => return Ok(reply),
+                    // A partial answer was already shown; retrying would duplicate it.
+                    Err(error) if shown.load(std::sync::atomic::Ordering::Relaxed) => return Err(error),
+                    Err(_) => {}
+                }
+            }
+            let resp = send(&self.wire.retry, || {
                 let mut r = self.http.post(format!("{}/responses", self.base))
                     .bearer_auth(&token)
                     .header("originator", "greencode")
@@ -319,8 +340,8 @@ impl Provider for Codex {
                 if let Some(v) = &residency { r = r.header("x-openai-internal-codex-residency", v); }
                 r
             }).await?;
-            let mut acc = Acc::default();
-            sse(resp, |data| {
+            let mut acc = super::responses::Acc::default();
+            sse(resp, self.wire.timeouts, |data| {
                 if let Ok(ev) = serde_json::from_str::<Value>(data) {
                     if let Some(t) = acc.feed(&ev)? { on_text(&t); }
                 }
@@ -328,70 +349,6 @@ impl Provider for Codex {
             }).await?;
             Ok(acc.finish())
         })
-    }
-}
-
-#[derive(Default)]
-struct Acc {
-    text: String,
-    item_text: String,
-    reasoning: Vec<Block>,
-    calls: Vec<Block>,
-    usage: Usage,
-    max_tokens: bool,
-}
-
-impl Acc {
-    fn feed(&mut self, ev: &Value) -> Result<Option<String>> {
-        match ev["type"].as_str().unwrap_or("") {
-            "response.output_text.delta" => {
-                let d = ev["delta"].as_str().unwrap_or("");
-                self.text.push_str(d);
-                return Ok((!d.is_empty()).then(|| d.to_string()));
-            }
-            "response.output_item.done" => {
-                let item = &ev["item"];
-                match item["type"].as_str() {
-                    Some("function_call") => self.calls.push(Block::ToolUse {
-                        id: item["call_id"].as_str().unwrap_or("").into(),
-                        name: item["name"].as_str().unwrap_or("").into(),
-                        input: item["arguments"].as_str().and_then(|a| serde_json::from_str(a).ok()).unwrap_or_else(|| json!({})),
-                    }),
-                    Some("reasoning") => self.reasoning.push(Block::Other(json!({"type": "codex_reasoning", "item": item}))),
-                    Some("message") => {
-                        for part in item["content"].as_array().into_iter().flatten() {
-                            if let Some(t) = part["text"].as_str() { self.item_text.push_str(t); }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            "response.completed" | "response.incomplete" => {
-                let r = &ev["response"];
-                let u = &r["usage"];
-                let cached = u["input_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0);
-                self.usage = Usage {
-                    input: u["input_tokens"].as_u64().unwrap_or(0).saturating_sub(cached),
-                    output: u["output_tokens"].as_u64().unwrap_or(0),
-                    cache_read: cached,
-                    cache_write: 0,
-                };
-                self.max_tokens = r["incomplete_details"]["reason"] == "max_output_tokens";
-            }
-            "response.failed" => bail!("{}", ev["response"]["error"]["message"].as_str().unwrap_or("response failed")),
-            "error" => bail!("{}", ev["message"].as_str().or_else(|| ev["error"]["message"].as_str()).unwrap_or("stream error")),
-            _ => {}
-        }
-        Ok(None)
-    }
-
-    fn finish(self) -> Reply {
-        let mut blocks = self.reasoning;
-        let text = if self.text.is_empty() { self.item_text } else { self.text };
-        if !text.is_empty() { blocks.push(Block::Text { text }); }
-        let stop = if !self.calls.is_empty() { "tool_use" } else if self.max_tokens { "max_tokens" } else { "end_turn" };
-        blocks.extend(self.calls);
-        Reply { blocks, usage: self.usage, stop: stop.into() }
     }
 }
 
@@ -419,5 +376,34 @@ mod tests {
         assert_eq!(serde_json::from_slice::<Tokens>(&std::fs::read(&target).unwrap()).unwrap().access, "real");
         assert!(import_codex_cli_at(&dir.join("missing.json")).unwrap().is_none());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn codex_request_pins_a_stable_prefix_key_and_no_cache_options() {
+        use crate::config::provider::{AppendOnly, CacheRetention};
+        let client = |retention, append_only| Codex::new(BASE.into(), path(), None).with_wire(super::super::Wire {
+            cache_retention: retention,
+            append_only,
+            ..Default::default()
+        });
+        fn req<'a>(messages: &'a [crate::Message], system: &'a str) -> Request<'a> {
+            Request { model: "gpt-6-sol", system, messages, tools: &[], max_tokens: 300, live: None }
+        }
+        let messages = [crate::Message::user("hi")];
+        let body = client(CacheRetention::Long, false).body(&req(&messages, "sys"));
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["store"], false);
+        // The Codex backend takes no cache options; the prefix key alone pins the cache lane.
+        assert!(body.get("prompt_cache_options").is_none());
+        assert_eq!(body["prompt_cache_key"], "greencode");
+        // Append-only pins the key to the shared prefix, so a growing transcript keeps the same cache lane.
+        let a = client(CacheRetention::Auto, true).body(&req(&messages, "sys"));
+        let b = client(CacheRetention::Auto, true).body(&req(&[crate::Message::user("different")], "sys"));
+        assert_eq!(a["prompt_cache_key"], b["prompt_cache_key"]);
+        // `none` sends no cache markers at all.
+        let none = client(CacheRetention::None, false).body(&req(&messages, "sys"));
+        assert!(none.get("prompt_cache_options").is_none());
+        assert!(none.get("prompt_cache_key").is_none(), "no cache marker at all: {none}");
+        assert!(AppendOnly::Auto.enabled("codex", "gpt-6-sol"));
     }
 }

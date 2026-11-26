@@ -95,15 +95,17 @@ pub fn matches(filters: &[(String, Vec<String>)], req: &Request) -> bool {
 }
 
 const LIMIT: usize = 1024 * 1024;
-async fn connection(mut stream: TcpStream, hooks: Arc<Mutex<Vec<Hook>>>, on_hit: Arc<impl Fn(String, String) + Send + Sync + 'static>) -> Result<()> {
+
+/// Reads one HTTP request; writes 400/413 and returns `None` when it is malformed or too large.
+async fn read_request(stream: &mut TcpStream) -> Result<Option<Request>> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 8192];
     let header_end = loop {
         let n = stream.read(&mut chunk).await?;
-        if n == 0 { return Ok(()) }
+        if n == 0 { return Ok(None) }
         buf.extend_from_slice(&chunk[..n]);
         if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") { break i + 4 }
-        if buf.len() > 65536 { respond(&mut stream, 413).await?; return Ok(()) }
+        if buf.len() > 65536 { respond(stream, 413).await?; return Ok(None) }
     };
     let header = std::str::from_utf8(&buf[..header_end])?;
     let mut lines = header.split("\r\n");
@@ -112,19 +114,31 @@ async fn connection(mut stream: TcpStream, hooks: Arc<Mutex<Vec<Hook>>>, on_hit:
     let target = parts.next().unwrap_or("").to_string();
     let mut headers = BTreeMap::new();
     for line in lines.filter(|l| !l.is_empty()) { if let Some((k, v)) = line.split_once(':') { headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string()); } }
-    if headers.contains_key("transfer-encoding") { respond(&mut stream, 400).await?; return Ok(()) }
-    let len = match headers.get("content-length") { Some(v) => match v.parse::<usize>() { Ok(n) => n, Err(_) => { respond(&mut stream, 400).await?; return Ok(()) } }, None => 0 };
-    if len > LIMIT { respond(&mut stream, 413).await?; return Ok(()) }
+    if headers.contains_key("transfer-encoding") { respond(stream, 400).await?; return Ok(None) }
+    let len = match headers.get("content-length") { Some(v) => match v.parse::<usize>() { Ok(n) => n, Err(_) => { respond(stream, 400).await?; return Ok(None) } }, None => 0 };
+    if len > LIMIT { respond(stream, 413).await?; return Ok(None) }
     while buf.len() - header_end < len {
         let n = stream.read(&mut chunk).await?;
         if n == 0 { bail!("incomplete request") }
         buf.extend_from_slice(&chunk[..n]);
     }
     let (path, query) = target.split_once('?').unwrap_or((&target, ""));
-    let id = path.strip_prefix("/hooks/").unwrap_or("");
-    let hook = if method == "POST" { hooks.lock().unwrap().iter().find(|h| h.id == id).cloned() } else { None };
+    Ok(Some(Request {
+        id: path.strip_prefix("/hooks/").unwrap_or("").to_string(),
+        method,
+        path: path.into(),
+        headers,
+        query: url::form_urlencoded::parse(query.as_bytes()).into_owned().collect(),
+        body: buf[header_end..header_end + len].to_vec(),
+    }))
+}
+
+async fn connection(mut stream: TcpStream, hooks: Arc<Mutex<Vec<Hook>>>, on_hit: Arc<impl Fn(String, String) + Send + Sync + 'static>) -> Result<()> {
+    let Some(req) = read_request(&mut stream).await? else { return Ok(()) };
+    let hook = if req.method == "POST" { hooks.lock().unwrap().iter().find(|h| h.id == req.id).cloned() } else { None };
     let Some(hook) = hook else { respond(&mut stream, 404).await?; return Ok(()) };
-    let req = Request { id: hook.id.clone(), method, path: path.into(), headers, query: url::form_urlencoded::parse(query.as_bytes()).into_owned().collect(), body: buf[header_end..header_end + len].to_vec() };
+    let mut req = req;
+    req.id = hook.id.clone();
     if hook.secret.as_ref().is_some_and(|s| !verify(s, &req.body, req.headers.get("x-hub-signature-256").map(String::as_str).unwrap_or(""))) { respond(&mut stream, 401).await?; }
     else if !matches(&hook.filters, &req) { respond(&mut stream, 204).await?; }
     else { on_hit(hook.id.clone(), render(&hook.prompt, &req)); respond(&mut stream, 202).await?; }
@@ -147,6 +161,33 @@ async fn serve_listener(listener: TcpListener, on_hit: impl Fn(String, String) +
     loop {
         let (stream, _) = listener.accept().await?;
         tokio::spawn(connection(stream, hooks.clone(), on_hit.clone()));
+    }
+}
+
+/// Serves requests to a caller-owned handler (workflow webhooks); the callback returns the HTTP status.
+/// The 1 MiB body limit and malformed-request handling are shared with `serve`.
+pub async fn serve_raw(
+    port: u16,
+    on_request: impl Fn(Request) -> u16 + Send + Sync + 'static,
+) -> Result<()> {
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?;
+    serve_raw_listener(listener, on_request).await
+}
+
+pub async fn serve_raw_listener(
+    listener: TcpListener,
+    on_request: impl Fn(Request) -> u16 + Send + Sync + 'static,
+) -> Result<()> {
+    let on_request = Arc::new(on_request);
+    loop {
+        let (mut stream, _) = listener.accept().await?;
+        let on_request = on_request.clone();
+        tokio::spawn(async move {
+            if let Ok(Some(req)) = read_request(&mut stream).await {
+                let status = on_request(req);
+                let _ = respond(&mut stream, status).await;
+            }
+        });
     }
 }
 

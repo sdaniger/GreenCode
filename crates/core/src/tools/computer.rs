@@ -46,17 +46,17 @@ struct Helper {
 /// One helper per process: it holds the element indexes of the last state.
 static HELPER: Mutex<Option<Helper>> = Mutex::const_new(None);
 
-// shortcut: the helper is compiled with swiftc on first use (needs the Xcode command line tools);
-// ship a prebuilt binary in the app bundle when distributing to machines without them.
-async fn start() -> Result<Helper> {
+// shortcut: helpers are compiled with swiftc on first use (needs the Xcode command line tools);
+// ship prebuilt binaries in the app bundle when distributing to machines without them.
+async fn build(name: &str, source: &str) -> Result<std::path::PathBuf> {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    SOURCE.hash(&mut hasher);
+    source.hash(&mut hasher);
     let dir = crate::home().join("bin");
-    let bin = dir.join(format!("computer-use-{:x}", hasher.finish()));
+    let bin = dir.join(format!("{name}-{:x}", hasher.finish()));
     if !bin.exists() {
         std::fs::create_dir_all(&dir)?;
-        let src = dir.join("computer-use.swift");
-        std::fs::write(&src, SOURCE)?;
+        let src = dir.join(format!("{name}.swift"));
+        std::fs::write(&src, source)?;
         let tmp = bin.with_extension("tmp");
         let out = Command::new("swiftc")
             .arg("-O")
@@ -65,15 +65,25 @@ async fn start() -> Result<Helper> {
             .arg(&src)
             .output()
             .await
-            .context("computer use needs `swiftc`; install it with `xcode-select --install`")?;
+            .context("Swift helpers need `swiftc`; install it with `xcode-select --install`")?;
         if !out.status.success() {
             bail!(
-                "cannot build the computer-use helper: {}",
+                "cannot build the {name} helper: {}",
                 String::from_utf8_lossy(&out.stderr)
             );
         }
         std::fs::rename(tmp, &bin)?;
     }
+    Ok(bin)
+}
+
+/// The SnapShot capture helper (see `snapshot.swift` for its commands).
+pub async fn snapshot_helper() -> Result<std::path::PathBuf> {
+    build("snapshot", include_str!("snapshot.swift")).await
+}
+
+async fn start() -> Result<Helper> {
+    let bin = build("computer-use", SOURCE).await?;
     let mut child = Command::new(&bin)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -92,7 +102,7 @@ async fn start() -> Result<Helper> {
 }
 
 /// Returns the text result and, when there is one, a base64 JPEG screenshot.
-pub async fn run(input: &Value) -> Result<(String, Option<String>)> {
+pub async fn run(cfg: &crate::config::Config, input: &Value) -> Result<(String, Option<String>)> {
     if !cfg!(target_os = "macos") {
         bail!("computer use is only available on macOS");
     }
@@ -101,10 +111,18 @@ pub async fn run(input: &Value) -> Result<(String, Option<String>)> {
         *guard = Some(start().await?);
     }
     let helper = guard.as_mut().unwrap();
+    let mut payload = input.clone();
+    if let Value::Object(map) = &mut payload {
+        let computer = &cfg.integration_opts.computer;
+        map.insert("max_width".into(), json!(computer.max_width));
+        map.insert("max_height".into(), json!(computer.max_height));
+        map.insert("display".into(), json!(computer.display));
+        map.insert("takeover".into(), json!(computer.takeover));
+    }
     let exchange = async {
         helper
             .stdin
-            .write_all(format!("{input}\n").as_bytes())
+            .write_all(format!("{payload}\n").as_bytes())
             .await?;
         let mut line = String::new();
         helper.stdout.read_line(&mut line).await?;

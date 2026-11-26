@@ -547,6 +547,40 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Merges with `gh`, optionally turning auto-merge on; strips agent credits when the setting is on.
+    pub(super) fn merge_pr(&mut self, number: u64, auto: bool, cx: &mut Context<Self>) {
+        let dir = self.thread().project();
+        let strip = self.ui["pr_strip_credits"] == true;
+        if let Some(o) = self.pr_panel.as_mut().and_then(|p| p.open.as_mut()) {
+            o.merge_confirm = false;
+        }
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { greencode_core::git::merge_pr(&dir, number, auto, strip) })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(out) => {
+                        this.notice(format!(
+                            "PR #{number} を{}: {}",
+                            if auto { "自動マージに設定しました" } else { "マージしました" },
+                            out.trim()
+                        ));
+                        if let Some(panel) = this.pr_panel.as_mut() {
+                            panel.open = None;
+                        }
+                        this.load_prs(cx);
+                    }
+                    Err(e) => this.fail(format!("マージできません: {e:#}")),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn edit_pr_comment(
         &mut self,
         path: String,
@@ -1119,8 +1153,9 @@ impl Workspace {
                 this.run(Act::Ask(format!("PR #{n} のレビューガイドを書いてください。gh pr diff {n} と gh pr view {n} を読み、読む順に立ち寄り先（ファイル:行と理由）を並べ、注意して見るべき箇所に「要確認」を付け、機械的な変更は最後にまとめてください。ファイルは変更しないでください。")), window, cx);
             })))
             .child(chip("pr-merge", "マージ（squash）", pal).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.request_pr_merge(cx))))
+            .child(chip("pr-auto-merge", "自動マージを有効化", pal).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.run(Act::MergePr(n, true), window, cx))))
             .when(open.merge_confirm, |d| d.child("マージしますか？")
-                .child(chip("pr-merge-yes", "はい", pal).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| { if let Some(o) = this.pr_panel.as_mut().and_then(|p| p.open.as_mut()) { o.merge_confirm = false; } this.run(Act::Shell(format!("gh pr merge {n} --squash")), window, cx); })))
+                .child(chip("pr-merge-yes", "はい", pal).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.run(Act::MergePr(n, false), window, cx))))
                 .child(chip("pr-merge-no", "いいえ", pal).on_click(cx.listener(|this, _: &ClickEvent, _, cx| { if let Some(o) = this.pr_panel.as_mut().and_then(|p| p.open.as_mut()) { o.merge_confirm = false; } cx.notify(); }))));
         Some(
             frame

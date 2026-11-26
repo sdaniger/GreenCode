@@ -31,7 +31,7 @@ pub async fn suggest_next(cfg: &Config, model: &str, messages: &[Message]) -> Re
         return Ok(String::new());
     }
     let (provider, model) = provider::make(cfg, model)?;
-    let req = Request { model: &model, system: SYSTEM, messages: &messages, tools: &[], max_tokens: 200 };
+    let req = Request { model: &model, system: SYSTEM, messages: &messages, tools: &[], max_tokens: 200, live: None };
     let reply = provider.complete(req, &|_| {}).await?;
     let text: String = reply.blocks.iter().filter_map(|b| if let Block::Text { text } = b { Some(text.as_str()) } else { None }).collect();
     Ok(text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").to_string())

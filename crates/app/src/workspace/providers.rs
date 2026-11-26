@@ -155,7 +155,143 @@ impl Workspace {
         if let Some((field, _)) = &self.connection_name {
             field.update(cx, |s, cx| s.set_value(display, window, cx));
         }
+        self.fill_connection_fields(window, cx);
         cx.notify();
+    }
+
+    pub(super) fn fill_connection_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((fields, _)) = &self.connection_fields else { return };
+        let key = self.connection_selection();
+        let (kind, name) = key.split_once(':').unwrap_or((key.as_str(), ""));
+        let over = (kind == "backend").then(|| self.cfg.backend_overrides.get(name)).flatten();
+        let values = [
+            over.and_then(|o| o.executable.clone()).unwrap_or_default(),
+            over.map(|o| o.args.join(" ")).unwrap_or_default(),
+            over.map(|o| o.env.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ")).unwrap_or_default(),
+            String::new(),
+            String::new(),
+        ];
+        for (field, value) in fields.iter().zip(values) {
+            field.update(cx, |s, cx| s.set_value(value, window, cx));
+        }
+    }
+
+    fn connection_field_value(&self, index: usize, cx: &Context<Self>) -> Option<String> {
+        Some(self.connection_fields.as_ref()?.0.get(index)?.read(cx).value().trim().to_string())
+    }
+
+    /// Enter or 保存 on one of the connections-tab inputs.
+    pub(super) fn save_connection_field(&mut self, index: usize, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some((kind, name)) = self.connection_selection().split_once(':').map(|(k, n)| (k.to_string(), n.to_string())) else { return };
+        let Some(value) = self.connection_field_value(index, cx) else { return };
+        match (kind.as_str(), index) {
+            ("backend", 0..=2) => {
+                let field = ["executable", "args", "env"][index];
+                let values: Vec<String> = if index == 0 {
+                    (!value.is_empty()).then_some(value).into_iter().collect()
+                } else {
+                    value.split_whitespace().map(String::from).collect()
+                };
+                match greencode_core::config::set_backend_override(&name, field, &values) {
+                    Ok(()) => {
+                        self.reload_config();
+                        self.notice(format!("バックエンド「{name}」の起動設定を保存しました"));
+                    }
+                    Err(e) => self.fail(format!("保存できません: {e:#}")),
+                }
+            }
+            ("backend", 3) => self.change_backend_model(&name, &value, true),
+            ("provider", 4) => self.change_provider_model(&name, &value, true),
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    /// − on a connections-tab model row.
+    pub(super) fn remove_connection_field(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some((kind, name)) = self.connection_selection().split_once(':').map(|(k, n)| (k.to_string(), n.to_string())) else { return };
+        let Some(value) = self.connection_field_value(index, cx) else { return };
+        match (kind.as_str(), index) {
+            ("backend", 3) => self.change_backend_model(&name, &value, false),
+            ("provider", 4) => self.change_provider_model(&name, &value, false),
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    pub(super) fn reload_config(&mut self) {
+        let mode = self.cfg.mode;
+        match greencode_core::config::Config::load() {
+            Ok(mut cfg) => {
+                cfg.mode = mode;
+                super::advanced::apply_ui(&mut cfg, &self.ui);
+                self.cfg = Arc::new(cfg);
+                self.cfg_error = None;
+                self.push_config();
+            }
+            Err(e) => self.fail(format!("設定を読み込めません: {e:#}")),
+        }
+    }
+
+    fn change_backend_model(&mut self, name: &str, model: &str, add: bool) {
+        if model.is_empty() {
+            self.notice("モデルIDを入力してください");
+            return;
+        }
+        let mut models = self.cfg.backend_overrides.get(name).map(|o| o.models.clone()).unwrap_or_default();
+        if add {
+            if models.iter().any(|m| m == model) {
+                self.notice("そのモデルは追加済みです");
+                return;
+            }
+            models.push(model.into());
+        } else if let Some(i) = models.iter().position(|m| m == model) {
+            models.remove(i);
+        } else {
+            self.notice(format!("`{model}` は追加されていません"));
+            return;
+        }
+        match greencode_core::config::set_backend_override(name, "models", &models) {
+            Ok(()) => {
+                self.reload_config();
+                self.notice(if add { format!("モデルを追加しました: {model}") } else { format!("モデルを削除しました: {model}") });
+            }
+            Err(e) => self.fail(format!("保存できません: {e:#}")),
+        }
+    }
+
+    fn change_provider_model(&mut self, name: &str, model: &str, add: bool) {
+        if model.is_empty() {
+            self.notice("モデルIDを入力してください");
+            return;
+        }
+        let Some(p) = self.cfg.providers.get(name) else { return };
+        let mut models = p.models.clone();
+        if add {
+            if models.iter().any(|m| m == model) {
+                self.notice("そのモデルは追加済みです");
+                return;
+            }
+            models.push(model.into());
+        } else if let Some(i) = models.iter().position(|m| m == model) {
+            models.remove(i);
+        } else {
+            self.notice(format!("`{model}` は追加されていません"));
+            return;
+        }
+        let result = if models.is_empty() {
+            greencode_core::config::settings::edit_global(&format!("providers.{name}.models"), None).map(|_| ())
+        } else {
+            greencode_core::config::set_provider_models(name, &models)
+        };
+        match result {
+            Ok(()) => {
+                Arc::make_mut(&mut self.cfg).providers.get_mut(name).unwrap().models = models;
+                self.push_config();
+                self.notice(if add { format!("モデルを追加しました: {model}") } else { format!("モデルを削除しました: {model}") });
+            }
+            Err(e) => self.fail(format!("保存できません: {e:#}")),
+        }
     }
 
     pub(super) fn save_connection_name(&mut self, cx: &mut Context<Self>) {
@@ -494,7 +630,28 @@ impl Workspace {
                 detail = detail
                     .child(format!("ベースURL: {}", p.base_url))
                     .child(format!("APIキー: {api}"))
-                    .child(format!("モデル: {}", p.models.len()));
+                    .child(format!(
+                        "モデル: {}{}",
+                        p.models.len(),
+                        if p.models.is_empty() { String::new() } else { format!("（{}）", p.models.join(", ")) }
+                    ));
+                if let Some((fields, _)) = &self.connection_fields {
+                    detail = detail
+                        .child(div().text_xs().text_color(pal.muted).child("カスタムモデル（config.toml の providers に保存）"))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(div().flex_1().min_w_0().child(Input::new(&fields[4])))
+                                .child(chip("connection-model-add", "＋", pal).on_click(cx.listener(
+                                    |this, _: &ClickEvent, window, cx| this.save_connection_field(4, window, cx),
+                                )))
+                                .child(chip("connection-model-remove", "−", pal).on_click(cx.listener(
+                                    |this, _: &ClickEvent, _, cx| this.remove_connection_field(4, cx),
+                                ))),
+                        );
+                }
                 if matches!(
                     greencode_core::auth::status(name, p),
                     greencode_core::auth::Method::StoredKey
@@ -529,6 +686,39 @@ impl Workspace {
                         "環境変数: {}",
                         b.env.keys().cloned().collect::<Vec<_>>().join(", ")
                     ));
+                if let Some((fields, _)) = &self.connection_fields {
+                    let field_row = |label: &'static str, i: usize, save: Option<&'static str>, remove: bool| {
+                        let mut row = div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(div().w(px(96.)).text_xs().text_color(pal.muted).child(label))
+                            .child(div().flex_1().min_w_0().child(Input::new(&fields[i])));
+                        if let Some(save) = save {
+                            row = row.child(
+                                chip(("connection-save", i), save, pal).on_click(cx.listener(
+                                    move |this, _: &ClickEvent, window, cx| this.save_connection_field(i, window, cx),
+                                )),
+                            );
+                        }
+                        if remove {
+                            row = row.child(
+                                chip(("connection-remove", i), "−", pal).on_click(cx.listener(
+                                    move |this, _: &ClickEvent, _, cx| this.remove_connection_field(i, cx),
+                                )),
+                            );
+                        }
+                        row
+                    };
+                    detail = detail
+                        .child(div().text_xs().text_color(pal.muted).child(
+                            "起動設定（config.toml の [backend_overrides] に保存。~ はホームに展開）",
+                        ))
+                        .child(field_row("実行ファイル", 0, Some("保存"), false))
+                        .child(field_row("追加の引数", 1, Some("保存"), false))
+                        .child(field_row("環境変数", 2, Some("保存"), false))
+                        .child(field_row("追加モデル", 3, Some("＋"), true));
+                }
             } else if kind == "agent" {
                 if let Some(agent) = greencode_core::agents::AGENTS
                     .iter()

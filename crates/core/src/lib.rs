@@ -4,33 +4,76 @@ pub mod acp;
 pub mod agent;
 pub mod agents;
 pub mod antigravity;
+pub mod assist;
 pub mod auth;
+pub mod branch;
 pub mod checkpoint;
+pub mod btw;
+pub mod collab;
 pub mod config;
+pub mod delegate;
 pub mod context;
+pub mod dialect;
+pub mod discovery;
+pub mod disasm;
 pub mod handoff;
 pub mod hermes;
+pub mod image;
 pub mod import;
+pub mod instance;
 pub mod jsonrpc;
 pub mod launchd;
+pub mod links;
+pub mod live;
+pub mod localserver;
 pub mod lua;
+pub mod magic_keywords;
 pub mod mcp_server;
+pub mod memory;
+pub mod notebook;
+pub mod mermaid;
 pub mod permission;
 pub mod pi;
 pub mod policy;
+pub mod git;
+pub mod goal;
+pub mod graph;
+pub mod figure;
 pub mod provider;
 pub mod remote;
 pub mod update;
 pub mod registry;
+pub mod workers;
+pub mod reactions;
+pub mod redact;
+pub mod repos;
+pub mod resets;
 pub mod rules;
+pub mod secrets;
+pub mod service;
 pub mod session;
+pub mod share;
+pub mod skillshare;
+pub mod status_line;
+pub mod stream;
 pub mod snap;
+pub mod speech;
+pub mod spelling;
 pub mod subagents;
 pub mod suggest;
+pub mod telemetry;
+pub mod textgen;
 pub mod skills;
+pub mod theme;
+pub mod tiny;
+pub mod title_icons;
+pub mod todos;
 pub mod tools;
+pub mod triage;
 pub mod usage;
+pub mod usage_history;
 pub mod webhook;
+pub mod workflow;
 pub mod voice;
 pub mod worktree;
 
@@ -192,9 +235,25 @@ pub trait Backend: Send {
 
 /// `~/.greencode`, or `$GREENCODE_HOME`.
 pub fn home() -> PathBuf {
+    #[cfg(test)]
+    if let Some(home) = TEST_HOME.with(|h| h.borrow().clone()) {
+        return home;
+    }
     std::env::var_os("GREENCODE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| user_home().join(".greencode"))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Per-test home: setting `GREENCODE_HOME` would move every parallel test's files mid-run.
+    static TEST_HOME: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Points `home()` at `dir` for the current thread only; `None` restores the default.
+#[cfg(test)]
+pub(crate) fn set_test_home(dir: Option<&std::path::Path>) {
+    TEST_HOME.with(|h| *h.borrow_mut() = dir.map(PathBuf::from));
 }
 
 pub fn user_home() -> PathBuf {
@@ -263,7 +322,9 @@ async fn make_backend(
                 opencode_permission_env(with_effort.as_deref())
             }).flatten();
             let mut env = if bname == antigravity::BACKEND {
-                antigravity::runtime_env(&b.env, true)
+                let mut env = antigravity::runtime_env(&b.env, true);
+                antigravity::endpoint_env(cfg.services_extra_opts.antigravity_endpoint, &mut env);
+                env
             } else {
                 b.env.clone()
             };
@@ -517,46 +578,59 @@ pub fn spawn(
 ) -> (mpsc::UnboundedSender<Command>, mpsc::UnboundedReceiver<Event>) {
     let (ctx, mut crx) = mpsc::unbounded_channel();
     let (tx, erx) = mpsc::unbounded_channel();
+    // Before the loop, so orchestration tools see this thread at once.
+    let host = delegate::register(&meta, &tx, &ctx, cfg.clone(), perms.clone());
     rt.spawn(async move {
         let mut backend: Option<Box<dyn Backend>> = None;
         let mut queue = std::collections::VecDeque::new();
         let mut handed_off = false;
+        let wake = host.wake;
         loop {
-            let cmd = match queue.pop_front() {
-                Some(c) => c,
-                None => {
-                    if let Some(b) = backend.as_mut() {
-                        enum Wait { Command(Option<Command>), Event(anyhow::Result<()>) }
-                        let next = tokio::select! {
-                            c = crx.recv() => Wait::Command(c),
-                            result = b.idle() => Wait::Event(result),
-                        };
-                        match next {
-                            Wait::Command(Some(c)) => c,
-                            Wait::Command(None) => break,
-                            Wait::Event(Ok(())) => {
-                                if let Err(e) = b.handle_idle(&tx).await {
-                                    let _ = tx.send(Event::Error(format!("{e:#}")));
-                                    backend = None;
-                                }
-                                continue;
-                            }
-                            Wait::Event(Err(e)) => {
-                                let _ = tx.send(Event::Error(format!("{e:#}")));
-                                backend = None;
-                                continue;
-                            }
-                        }
-                    } else {
-                        match crx.recv().await { Some(c) => c, None => break }
+            enum Wait { Command(Option<Command>), Event(anyhow::Result<()>), Wake }
+            let next = match queue.pop_front() {
+                Some(c) => Wait::Command(Some(c)),
+                None => match backend.as_mut() {
+                    Some(b) => tokio::select! {
+                        c = crx.recv() => Wait::Command(c),
+                        result = b.idle() => Wait::Event(result),
+                        _ = wake.notified() => Wait::Wake,
+                    },
+                    None => tokio::select! {
+                        c = crx.recv() => Wait::Command(c),
+                        _ = wake.notified() => Wait::Wake,
+                    },
+                },
+            };
+            let cmd = match next {
+                Wait::Command(Some(c)) => c,
+                Wait::Command(None) => break,
+                Wait::Event(Ok(())) => {
+                    if let Err(e) = backend.as_mut().unwrap().handle_idle(&tx).await {
+                        let _ = tx.send(Event::Error(format!("{e:#}")));
+                        backend = None;
                     }
+                    continue;
                 }
+                Wait::Event(Err(e)) => {
+                    let _ = tx.send(Event::Error(format!("{e:#}")));
+                    backend = None;
+                    continue;
+                }
+                // Finished async children wake their idle parent with their results, as a turn of its own.
+                Wait::Wake => match delegate::take_wake(&meta.id) {
+                    Some(text) => {
+                        let _ = tx.send(Event::Remote { command: "delegate_wake".into(), data: json!({"text": text}) });
+                        Command::Prompt(text)
+                    }
+                    None => continue,
+                },
             };
             match cmd {
                 Command::Cancel => {}
                 Command::Config(new) => {
                     let opencode_effort = cfg.opencode_effort.clone();
                     cfg = new;
+                    delegate::update(&meta.id, Some(cfg.clone()), None);
                     if opencode_effort.is_some() { Arc::make_mut(&mut cfg).opencode_effort = opencode_effort; }
                     // Rebuilt from the session file on the next prompt, like a model switch.
                     if meta.backend == "native" { backend = None; }
@@ -589,10 +663,11 @@ pub fn spawn(
                     if let Some(b) = backend.as_mut().filter(|_| meta.backend != "native") {
                         let result = b.control(serde_json::json!({"type":"select_model","model":m}), &tx).await;
                         match result {
-                            Ok(()) => meta.model = m,
+                            Ok(()) => { delegate::update(&meta.id, None, Some(&m)); meta.model = m }
                             Err(e) => { let _ = tx.send(Event::Error(format!("{e:#}"))); }
                         }
                     } else {
+                        delegate::update(&meta.id, None, Some(&m));
                         meta.model = m;
                         backend = None;
                     }
@@ -643,6 +718,7 @@ pub fn spawn(
                             continue;
                         }
                     }
+                    host.busy.send_replace(true);
                     let live = if matches!(&cmd,Command::Prompt(_) | Command::PromptWithOptions(_, _) | Command::Steer(_)) { b.live() } else { None };
                     let (cancelled, failed) = {
                         let fut = match cmd {
@@ -656,7 +732,13 @@ pub fn spawn(
                                 r = &mut fut => {
                                     match r {
                                         Ok(()) => break (false,false),
-                                        Err(e) => { let _ = tx.send(Event::Error(format!("{e:#}"))); break (false,true); }
+                                        Err(e) => {
+                                            if let Some(limit) = e.downcast_ref::<provider::limit::LimitError>() {
+                                                let _ = tx.send(Event::Remote { command: "rate_limit".into(), data: json!({"reset_at": limit.reset_at}) });
+                                            }
+                                            let _ = tx.send(Event::Error(format!("{e:#}")));
+                                            break (false, true);
+                                        }
                                     }
                                 }
                                 c = crx.recv() => match c {
@@ -680,10 +762,12 @@ pub fn spawn(
                         }
                     }
                     if failed { backend = None; }
+                    host.busy.send_replace(false);
                     let _ = tx.send(Event::Done);
                 }
             }
         }
+        delegate::unregister(&meta.id);
     });
     (ctx, erx)
 }

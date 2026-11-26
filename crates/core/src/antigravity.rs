@@ -285,6 +285,28 @@ pub async fn ensure_installed(cfg: &Config) -> Result<(Vec<String>, BTreeMap<Str
     Ok((installed.command, installed.env))
 }
 
+/// Endpoint the Antigravity runtime talks to, from `providers.antigravityEndpoint`.
+/// `auto` starts on production; the caller may retry against `SAND_BOX`.
+pub fn endpoint_hosts(mode: crate::config::services_extra::AntigravityEndpoint) -> [&'static str; 2] {
+    use crate::config::services_extra::AntigravityEndpoint::*;
+    const PROD: &str = "https://daily-cloudcode-pa.googleapis.com";
+    const SAND: &str = "https://daily-cloudcode-pa.sandbox.googleapis.com";
+    match mode {
+        Production => [PROD, PROD],
+        Sandbox => [SAND, SAND],
+        Auto => [PROD, SAND],
+    }
+}
+
+/// Environment that routes the runtime's chat, search, image and discovery calls.
+pub fn endpoint_env(mode: crate::config::services_extra::AntigravityEndpoint, base: &mut BTreeMap<String, String>) {
+    let [first, second] = endpoint_hosts(mode);
+    base.entry("CODE_ASSIST_ENDPOINT".into()).or_insert_with(|| first.into());
+    if first != second {
+        base.entry("CODE_ASSIST_ENDPOINT_FALLBACK".into()).or_insert_with(|| second.into());
+    }
+}
+
 pub fn runtime_env(base: &BTreeMap<String, String>, no_browser: bool) -> BTreeMap<String, String> {
     let mut env = base.clone();
     if no_browser {
@@ -481,7 +503,9 @@ pub async fn start_login(
         bail!("GEMINI_API_KEY が未設定です。/login google で API キーを保存するか環境変数を設定してください");
     }
     let (command, env) = ensure_installed(cfg).await?;
-    let env_vec: Vec<(String, String)> = runtime_env(&env, true).into_iter().collect();
+    let mut env = runtime_env(&env, true);
+    endpoint_env(cfg.services_extra_opts.antigravity_endpoint, &mut env);
+    let env_vec: Vec<(String, String)> = env.into_iter().collect();
     let (rpc, mut incoming, mut out_rx) = Rpc::spawn_with_output(&command, &env_vec, &cwd)?;
     let init = rpc
         .request(

@@ -3,6 +3,43 @@ use std::{borrow::Cow, ops::Range};
 use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
 use unicode_width::UnicodeWidthStr;
 
+/// `:name:` shortcodes for `emojiAutocomplete`.
+const EMOJIS: &[(&str, &str)] = &[
+    ("smile", "😄"), ("laughing", "😆"), ("joy", "😂"), ("wink", "😉"), ("heart", "❤️"),
+    ("fire", "🔥"), ("rocket", "🚀"), ("tada", "🎉"), ("thumbsup", "👍"), ("+1", "👍"),
+    ("-1", "👎"), ("warning", "⚠️"), ("check", "✅"), ("x", "❌"), ("eyes", "👀"),
+    ("thinking", "🤔"), ("ok", "👌"), ("wave", "👋"), ("bug", "🐛"), ("sparkles", "✨"),
+];
+
+/// Text emoticons, longest first so `:-)` wins over `:)`.
+const EMOTICONS: &[(&str, &str)] = &[
+    (":-)", "🙂"), (":-(", "🙁"), (":-D", "😄"), (":-P", "😛"), (":D", "😄"), (":P", "😛"),
+    (":)", "🙂"), (":(", "🙁"), (";-)", "😉"), (";)", "😉"), ("<3", "❤️"),
+];
+
+/// Expand `:name:` shortcodes and common text emoticons; unknown shortcodes are left alone.
+pub(super) fn emoji(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(colon) = rest.find(':') {
+        out.push_str(&rest[..colon]);
+        let after = &rest[colon + 1..];
+        match after.find(':').and_then(|end| EMOJIS.iter().find(|(name, _)| *name == &after[..end]).map(|(_, emoji)| (end, *emoji))) {
+            Some((end, emoji)) => {
+                out.push_str(emoji);
+                rest = &after[end + 1..];
+            }
+            None => {
+                out.push(':');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    for (from, to) in EMOTICONS { out = out.replace(from, to); }
+    out
+}
+
 /// Never pass terminal controls from tool results, pasted text, or model output to the backend.
 pub(super) fn plain(text: &str) -> Cow<'_, str> {
     if !text.chars().any(|c| c.is_control() && c != '\n') {
@@ -20,6 +57,17 @@ pub(super) fn plain(text: &str) -> Cow<'_, str> {
         }
     }
     Cow::Owned(clean)
+}
+
+/// Previous grapheme boundary before `at` (`0` at the start).
+pub(super) fn prev_boundary(text: &str, at: usize) -> usize {
+    text[..at.min(text.len())].grapheme_indices(true).next_back().map_or(0, |(i, _)| i)
+}
+
+/// Next grapheme boundary after `at` (`text.len()` at the end).
+pub(super) fn next_boundary(text: &str, at: usize) -> usize {
+    let at = at.min(text.len());
+    at + text[at..].graphemes(true).next().map_or(0, str::len)
 }
 
 /// Byte ranges into display text, always aligned on grapheme boundaries.
@@ -60,6 +108,35 @@ pub(super) struct Editor {
 impl Editor {
     pub fn text(&self) -> &str { &self.text }
     pub fn cursor(&self) -> usize { self.cursor }
+
+    /// Replaces the buffer and puts the cursor at `at` (clamped to a cluster boundary).
+    pub fn set(&mut self, text: String, at: usize) {
+        self.text = text;
+        let at = at.min(self.text.len());
+        self.align_cursor(at);
+    }
+
+    /// Byte spans of every line, without the newline.
+    pub fn lines(text: &str) -> Vec<Range<usize>> {
+        let mut out = Vec::new();
+        let mut start = 0;
+        for (at, _) in text.match_indices('\n') {
+            out.push(start..at);
+            start = at + 1;
+        }
+        out.push(start..text.len());
+        out
+    }
+
+    /// Zero-based line holding `at`.
+    pub fn line_of(text: &str, at: usize) -> usize {
+        text[..at.min(text.len())].matches('\n').count()
+    }
+
+    pub fn line_span(text: &str, line: usize) -> Range<usize> {
+        let lines = Self::lines(text);
+        lines.get(line).cloned().unwrap_or(text.len()..text.len())
+    }
 
     pub fn replace(&mut self, text: String) {
         self.text = match plain(&text) { Cow::Borrowed(_) => text, Cow::Owned(clean) => clean };
@@ -173,6 +250,14 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn emoji_expansion_handles_shortcodes_and_emoticons() {
+        assert_eq!(emoji("ship it :rocket: :D"), "ship it 🚀 😄");
+        assert_eq!(emoji("ok :-) <3"), "ok 🙂 ❤️");
+        assert_eq!(emoji("http://example.com:8080/x"), "http://example.com:8080/x");
+        assert_eq!(emoji(":unknown:"), ":unknown:");
+    }
 
     #[test]
     fn paste_and_edit_keep_clusters_and_remove_terminal_controls() {

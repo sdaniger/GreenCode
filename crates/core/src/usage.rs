@@ -31,7 +31,7 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
 }
 
 /// `YYYY-MM-DD` or `YYYY-MM-DDTHH:MM:SS[.fff](Z|±HH:MM)` as unix seconds; fractions are ignored.
-fn parse_time(s: &str) -> Option<u64> {
+pub(crate) fn parse_time(s: &str) -> Option<u64> {
     let s = s.trim();
     let num = |r: std::ops::Range<usize>| s.get(r)?.parse::<i64>().ok();
     let days = days_from_civil(num(0..4)?, num(5..7)?, num(8..10)?);
@@ -113,7 +113,10 @@ pub async fn all(cfg: &Config) -> Vec<Result<Report, String>> {
     }
     if let Some(p) = cfg.providers.get("github-copilot") {
         if let (Method::Subscription, Some(token)) = (auth::status("github-copilot", p), &p.api_key) {
-            out.push(copilot("https://api.github.com", token).await.map_err(|e| format!("GitHub Copilot: {e:#}")));
+            out.push(match crate::secrets::resolve(token, "github-copilot") {
+                Ok(token) => copilot("https://api.github.com", &token).await,
+                Err(e) => Err(e),
+            }.map_err(|e| format!("GitHub Copilot: {e:#}")));
         }
     }
     out

@@ -162,8 +162,26 @@ func windowTarget(_ pid: pid_t, _ bounds: CGRect) -> WindowTarget? {
     return matches.count == 1 ? matches.first : nil
 }
 
-func screenshot(_ target: WindowTarget) -> String? {
+/// Scale from screenshot pixels to window points; below 1 when a capture hit `computer.maxWidth`/`maxHeight`.
+var captureScale = 1.0
+
+/// The display `computer.display` names: `active` the target window's, `all` the union, else a native id.
+func displayBounds(_ choice: String, _ window: CGRect) -> CGRect? {
+    if choice == "all" {
+        return NSScreen.screens.reduce(CGRect.null) { $0.union($1.frame) }
+    }
+    if choice.isEmpty || choice == "active" {
+        return NSScreen.screens.first(where: { $0.frame.intersects(window) })?.frame ?? window
+    }
+    guard let number = Int(choice) else { return nil }
+    return NSScreen.screens.first(where: { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.intValue == number })?.frame
+}
+
+func screenshot(_ target: WindowTarget, maxWidth: Int, maxHeight: Int, display choice: String = "active") -> String? {
     let (id, bounds) = (target.id, target.bounds)
+    let visible = displayBounds(choice, bounds)
+    // A window wholly on another display is not what `computer.display` asked for.
+    if let visible, bounds.intersection(visible).isEmpty { return nil }
     let path = NSTemporaryDirectory() + "greencode-computer-\(getpid()).png"
     defer { try? FileManager.default.removeItem(atPath: path) }
     let capture = Process()
@@ -173,16 +191,22 @@ func screenshot(_ target: WindowTarget) -> String? {
     guard (try? capture.run()) != nil else { return nil }
     capture.waitUntilExit()
     guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil), let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return nil }
-    // One pixel per point, so screenshot coordinates are window coordinates.
+    // One pixel per point, so screenshot coordinates are window coordinates unless the image is scaled down.
     let (w, h) = (Int(bounds.width), Int(bounds.height))
-    guard w > 0, h > 0, let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
+    guard w > 0, h > 0 else { return nil }
+    var scale = 1.0
+    if maxWidth > 0 { scale = min(scale, Double(maxWidth) / Double(w)) }
+    if maxHeight > 0 { scale = min(scale, Double(maxHeight) / Double(h)) }
+    let (ow, oh) = (max(1, Int(Double(w) * scale)), max(1, Int(Double(h) * scale)))
+    guard let ctx = CGContext(data: nil, width: ow, height: oh, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
     ctx.interpolationQuality = .high
-    ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+    ctx.draw(image, in: CGRect(x: 0, y: 0, width: CGFloat(ow), height: CGFloat(oh)))
     guard let scaled = ctx.makeImage() else { return nil }
+    captureScale = Double(ow) / Double(w)
     return NSBitmapImageRep(cgImage: scaled).representation(using: .jpeg, properties: [.compressionFactor: 0.6])?.base64EncodedString()
 }
 
-func state(_ app: NSRunningApplication, settle: Bool, full: Bool) throws -> [String: Any] {
+func state(_ app: NSRunningApplication, maxWidth: Int, maxHeight: Int, settle: Bool, full: Bool, display displayChoice: String = "active") throws -> [String: Any] {
     let pid = app.processIdentifier
     let ax = AXUIElementCreateApplication(pid)
     AXUIElementSetMessagingTimeout(ax, 3)
@@ -241,7 +265,7 @@ func state(_ app: NSRunningApplication, settle: Bool, full: Bool) throws -> [Str
     }
     if nodes.count >= 500 { text += "\n(truncated at 500 elements)" }
     var reply: [String: Any] = [:]
-    if let image = capturedWindow.flatMap(screenshot) { reply["image"] = image }
+    if let image = capturedWindow.flatMap({ screenshot($0, maxWidth: maxWidth, maxHeight: maxHeight, display: displayChoice) }) { reply["image"] = image }
     else if !CGPreflightScreenCaptureAccess() {
         CGRequestScreenCaptureAccess()
         text += "\n(no screenshot: Screen Recording permission is missing; the element list still works)"
@@ -274,7 +298,9 @@ func point(_ cmd: [String: Any], _ pid: pid_t, _ window: WindowTarget, _ x: Stri
         guard let px = cmd[x] as? Double, let py = cmd[y] as? Double else {
             throw Fail(message: "`element_index` or `\(x)`/`\(y)` is required")
         }
-        p = CGPoint(x: window.bounds.minX + px, y: window.bounds.minY + py)
+        // `x`/`y` are pixels of the last returned screenshot; undo any `computer.maxWidth`/`maxHeight` scaling.
+        let scale = captureScale > 0 ? captureScale : 1
+        p = CGPoint(x: window.bounds.minX + px / scale, y: window.bounds.minY + py / scale)
     }
     guard window.bounds.contains(p) else { throw Fail(message: "point is outside the target window") }
     return p
@@ -289,6 +315,17 @@ private let postWindowEvent = eventSymbol("SLEventPostToPid", (@convention(c) (p
 private let setWindowLocation = eventSymbol("CGEventSetWindowLocation", (@convention(c) (CGEvent, CGPoint) -> Void).self)
 private let setEventField = eventSymbol("SLEventSetIntegerValueField", (@convention(c) (CGEvent, UInt32, Int64) -> Void).self)
 
+/// `computer.takeover`: whether window input may take the real pointer and keyboard.
+enum Takeover: String { case fallback, foreground, always, refuse }
+
+var takeover = Takeover.fallback
+
+/// Makes the target app frontmost so posted input reaches it as real user input.
+func takeForeground(_ app: NSRunningApplication) {
+    if !app.isActive { app.activate(options: []) }
+    usleep(80_000)
+}
+
 func routePointer(_ event: CGEvent, _ at: CGPoint, _ window: WindowTarget, _ pid: pid_t) {
     event.location = at
     event.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(window.id))
@@ -299,6 +336,9 @@ func routePointer(_ event: CGEvent, _ at: CGPoint, _ window: WindowTarget, _ pid
         setWindowLocation(event, local)
         setEventField(event, 51, Int64(window.id)) // NSEvent windowNumber, also needed for wheel events.
         postWindowEvent(pid, event)
+    } else if takeover == .refuse {
+        // Without the SkyLight route only a foreground post reaches the handler; `refuse` says not to.
+        return
     } else { event.postToPid(pid) }
 }
 
@@ -504,6 +544,17 @@ func act(_ cmd: [String: Any]) throws -> [String: Any] {
     let pid = app.processIdentifier
     let hold = cmd["duration"] as? Double ?? 0
     guard (0...10).contains(hold) else { throw Fail(message: "`duration` must be 0–10 seconds") }
+    takeover = Takeover(rawValue: cmd["takeover"] as? String ?? "fallback") ?? .fallback
+    let displayChoice = cmd["display"] as? String ?? "active"
+    // A named display that does not exist is a config error, not a silent fallback.
+    if displayBounds(displayChoice, .zero) == nil {
+        throw Fail(message: "`computer.display` is `\(displayChoice)` but no display has that id (use `active`, `all`, or a native display id)")
+    }
+    // `always` (and `foreground`) take the real pointer and keyboard; `refuse` only runs in the background.
+    if takeover == .always && NSWorkspace.shared.frontmostApplication?.processIdentifier != pid {
+        guard AXIsProcessTrusted() else { throw Fail(message: "`computer.takeover = always` needs Accessibility permission") }
+        takeForeground(app)
+    }
     let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
     var note: String?
     switch action {
@@ -590,7 +641,7 @@ func act(_ cmd: [String: Any]) throws -> [String: Any] {
         try mouse(.leftMouseUp, to, .left, window, pid, number: number)
     default: throw Fail(message: "unknown action `\(action)`")
     }
-    var reply = try state(app, settle: action != "get_app_state", full: cmd["disable_diff"] as? Bool == true)
+    var reply = try state(app, maxWidth: cmd["max_width"] as? Int ?? 0, maxHeight: cmd["max_height"] as? Int ?? 0, settle: action != "get_app_state", full: cmd["disable_diff"] as? Bool == true, display: displayChoice)
     if frontmost != pid, NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
         let focus = "(the target app became frontmost during this action)"
         note = note.map { "\(focus)\n\($0)" } ?? focus

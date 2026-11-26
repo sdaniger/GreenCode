@@ -281,6 +281,12 @@ impl Pi {
             std::fs::write(&reload, PI_RELOAD_EXTENSION)?;
             cmd.arg("--extension").arg(reload);
         }
+        if let Some(source) = crate::delegate::pi_extension(meta).await {
+            // Holds this thread's bearer token, so owner-only.
+            let path = dir.join("greencode-delegate.ts");
+            crate::remote::write_private(&path, source.as_bytes())?;
+            cmd.arg("--extension").arg(path);
+        }
         if let Some(file) = saved["sessionFile"].as_str() {
             cmd.arg("--session").arg(file);
         } else if Session::open(&meta.id).is_some() {
@@ -641,24 +647,30 @@ impl Pi {
             let tool = call["tool"].as_str().context("missing approval tool")?;
             // Plan mode is read-only for every backend, whatever "always allow" says.
             let plan = self.perms.mode() == permission::Mode::Plan && !permission::read_only(tool, &call["input"]);
-            let key = if plan { None } else { self.perms.check(tool, &call["input"], &self.meta.cwd) };
-            let allowed = if plan { false } else if let Some(key) = key {
-                let (reply, rx) = oneshot::channel();
-                let _ = tx.send(Event::Permission {
-                    tool: tool.into(),
-                    summary: permission::summary(tool, &call["input"]),
-                    reply,
-                });
-                match rx.await.unwrap_or(Decision::Deny) {
-                    Decision::Allow => true,
-                    Decision::Always => {
-                        self.perms.always(key);
-                        true
-                    }
-                    Decision::Deny => false,
-                }
+            let allowed = if plan {
+                false
             } else {
-                true
+                match self.perms.verdict(tool, &call["input"], &self.meta.cwd) {
+                    permission::Verdict::Allow => true,
+                    permission::Verdict::Deny(_) => false,
+                    permission::Verdict::Ask(ask) => {
+                        let (reply, rx) = oneshot::channel();
+                        let _ = tx.send(Event::Permission {
+                            tool: tool.into(),
+                            summary: permission::summary(tool, &call["input"]),
+                            reply,
+                        });
+                        match rx.await.unwrap_or(Decision::Deny) {
+                            Decision::Allow => true,
+                            Decision::Always if ask.remember => {
+                                self.perms.always(ask.key);
+                                true
+                            }
+                            Decision::Always => true,
+                            Decision::Deny => false,
+                        }
+                    }
+                }
             };
             json!({"confirmed": allowed})
         } else if matches!(method, "select" | "confirm" | "input" | "editor" | "ask") {
@@ -976,7 +988,9 @@ impl Pi {
     async fn run(&mut self, text: String, tx: &EventTx) -> Result<()> {
         self.initialize(tx).await?;
         if Session::open(&self.meta.id).is_none() {
-            self.meta.title = text.chars().take(60).collect();
+            if self.meta.title.is_empty() {
+                self.meta.title = text.chars().take(60).collect();
+            }
             Session::create(&self.meta)?;
         }
         if let Some(rest) = text.strip_prefix('/').filter(|r| !self.advertised(r)) {

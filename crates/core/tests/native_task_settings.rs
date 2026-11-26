@@ -173,7 +173,7 @@ async fn forbidden_options_fail_before_any_subagent_runs() {
         (TaskConfig { per_call_model: PerCallModel::Off, ..Default::default() }, json!({"tasks":[{"prompt":"x","model":"mock/x"}]}), "per_call_model"),
         (TaskConfig { per_call_model: PerCallModel::Eval, ..Default::default() }, json!({"tasks":[{"prompt":"x","model":"mock/x"}]}), "per_call_model"),
         (TaskConfig { per_call_model_allow: vec!["mock/ok".into()], ..Default::default() }, json!({"tasks":[{"prompt":"x","model":"mock/other"}]}), "per_call_model_allow"),
-        (TaskConfig { isolation: greencode_core::subagents::TaskIsolation { enabled: false }, ..Default::default() }, json!({"tasks":[{"prompt":"x","isolated":true}]}), "task.isolation.enabled"),
+        (TaskConfig { isolation: greencode_core::subagents::TaskIsolation { enabled: false, ..Default::default() }, ..Default::default() }, json!({"tasks":[{"prompt":"x","isolated":true}]}), "task.isolation.enabled"),
         (TaskConfig { structured: false, ..Default::default() }, json!({"tasks":[{"prompt":"x","schema":{"type":"object"}}]}), "task.structured"),
         (TaskConfig { background: false, ..Default::default() }, json!({"background":true,"tasks":[{"prompt":"x"}]}), "task.background"),
         (TaskConfig { disabled_agents: vec!["scout".into()], ..Default::default() }, json!({"tasks":[{"prompt":"x","agent":"scout"}]}), "task.disabled_agents"),

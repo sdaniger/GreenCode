@@ -1,22 +1,36 @@
+mod advanced;
 mod agents;
 mod attach;
 mod checkpoint;
 mod cite;
 mod files;
+mod find;
+mod git;
+mod goal;
+mod links;
 mod login;
+mod mentions;
 mod models;
+mod nav;
 mod providers;
 mod prs;
 mod queue;
+mod repos;
 mod registry;
 mod schedule;
+mod secrets;
 mod settle;
+mod snapshot;
 mod storage;
 mod suggest;
 mod terminal;
+mod textgen;
+mod themes;
 mod usage;
 mod voice;
 mod webhooks;
+mod welcome;
+mod workflows;
 
 use crate::thread_view::{self, Item, Pal, ThemeId};
 use cite::CiteForm;
@@ -34,6 +48,7 @@ use greencode_core::{
     permission::{Mode, Perms},
     session::{AutoSettle, LinkedPr, Meta, Session, View},
     skills, worktree, Command, Decision, Event, Usage,
+    update::{self, Channel},
 };
 use login::{method_label, AccountForm, DeviceForm, DeviceKind, KeyForm};
 use models::ModelPicker;
@@ -46,6 +61,7 @@ use std::os::{
 };
 use std::{ops::Range, path::PathBuf, sync::Arc};
 use terminal::{Term, TerminalSet};
+use themes::Choice;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, oneshot};
 
@@ -62,6 +78,8 @@ struct SubRow {
     agent: String,
     state: String,
     detail: String,
+    /// A delegated child thread (another harness), which can be opened while it runs.
+    task: Option<String>,
 }
 
 /// An agent's command and event channels, as `greencode_core::spawn` returns them.
@@ -118,8 +136,12 @@ struct Thread {
     dialogs: VecDeque<(Value, oneshot::Sender<Value>)>,
     queue: VecDeque<String>,
     subs: Vec<SubRow>,
+    /// Background work the agent said it is waiting on (`background_wait`); the sidebar keeps showing it as working.
+    bg_wait: Option<String>,
     /// Last prompt sent, for the retry chip after a failed turn.
     last_prompt: Option<String>,
+    /// Unix time a provider's usage limit resets, from the failed turn; 0 when none.
+    reset_at: u64,
     queue_held: bool,
     draft: String,
     perms: Arc<Perms>,
@@ -133,6 +155,8 @@ struct Thread {
     last_user_at: u64,
     /// `/goal`: what "done" means, and how many automatic continuations it has used.
     goal: Option<(String, u8)>,
+    /// `/goal pause`: automatic continuations are off until `/goal resume`.
+    goal_paused: bool,
     /// "Suggest next prompt": the predicted next message, shown in the empty composer.
     suggestion: Option<String>,
     /// The agent was started only to learn its slash commands; no prompt was sent, so the thread still counts as unstarted.
@@ -153,6 +177,12 @@ fn now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+/// `HH:MM` in local time, for a limit reset shown to the user.
+fn clock_local(at: u64) -> String {
+    let t = (at as i64 + schedule::utc_offset()).rem_euclid(86400);
+    format!("{:02}:{:02}", t / 3600, t % 3600 / 60)
 }
 
 /// Project files of a directory that is not a git repo: hidden entries, `node_modules` and `target` skipped; at most 5,000 files, 8 levels deep.
@@ -263,9 +293,7 @@ fn term_feed(lines: &mut Vec<SharedString>, open: &mut bool, chunk: &str) {
         }
     }
     lines.push(line.into());
-    // Same retention as T3 Code's terminals.
-    let extra = lines.len().saturating_sub(5000);
-    lines.drain(..extra);
+    terminal::trim_scrollback(lines);
 }
 
 /// Size of the terminal drawer's PTY and screen, in character cells.
@@ -415,13 +443,24 @@ fn terminal_command(
             .env("PATH", &launch.path_env);
         command
     } else {
-        let mut command = if cfg!(target_os = "macos") {
-            let mut command = std::process::Command::new("/bin/zsh");
-            command.arg("-l");
-            command
+        let default = if cfg!(target_os = "macos") {
+            Some("/bin/zsh".to_string())
         } else {
-            std::process::Command::new(std::env::var_os("SHELL").unwrap_or_else(|| "/bin/sh".into()))
+            std::env::var("SHELL").ok()
         };
+        let shell = terminal::resolve_shell(
+            std::env::var("GREENCODE_TERMINAL_SHELL").ok().as_deref(),
+            default.as_deref(),
+        );
+        let mut command = std::process::Command::new(&shell);
+        if cfg!(target_os = "macos") {
+            command.arg("-l");
+        }
+        if let Some(features) =
+            terminal::fish_features(&shell, std::env::var("fish_features").ok().as_deref())
+        {
+            command.env("fish_features", features);
+        }
         command.arg("-i");
         command
     };
@@ -482,7 +521,9 @@ impl Thread {
             dialogs: VecDeque::new(),
             queue: view.queue.into(),
             subs: vec![],
+            bg_wait: None,
             last_prompt: None,
+            reset_at: 0,
             queue_held: true,
             draft: view.draft,
             perms: Arc::new(Perms::new(view.mode)),
@@ -494,6 +535,7 @@ impl Thread {
             linked_pr_manual: view.linked_pr_manual,
             last_user_at: view.last_user_at,
             goal: None,
+            goal_paused: false,
             suggestion: None,
             warm: false,
             warmups: 0,
@@ -599,6 +641,19 @@ fn parse_git_status(text: &str) -> Vec<GitEntry> {
 
 #[derive(Clone)]
 enum Act {
+    SecretAdd,
+    SecretRemove(usize),
+    SecretTest,
+    /// 詳細設定: edit the picked `config.toml` key, or reset it to the default.
+    SettingPick(String),
+    SettingSave,
+    SettingReset,
+    /// OMP 設定: show this `/settings` tab.
+    OmpTab(usize),
+    /// OMP 設定: turn a native tool on (`true`) or off.
+    OmpTool(&'static str, bool),
+    /// Sets a `config.toml` key to this text, or resets it with `None`.
+    SettingWrite(String, Option<String>),
     NewThread,
     NewWorktree,
     OpenProject,
@@ -633,6 +688,8 @@ enum Act {
     CopyMcp,
     Cite,
     Usage,
+    UsageHistory,
+    Workflows,
     AnthropicLogin,
     #[cfg(unix)]
     ImportLogins,
@@ -653,23 +710,46 @@ enum Act {
     Attach,
     Sandbox,
     Effort(Option<String>),
+    /// Moves to the next (true) or previous effort level, wrapping around.
+    EffortStep(bool),
     OpenCodeEffort(Option<String>),
     OpenFile(PathBuf),
     Revoke(String),
-    Theme(ThemeId),
+    Theme(Choice),
+    /// Sets the light (`false`) or dark (`true`) theme slot from Settings → 外観.
+    ThemeSlot(bool, Choice),
+    ThemeMode(themes::ThemeMode),
+    CycleThemeMode,
+    ImportTheme,
+    ExportTheme,
+    EditTheme,
+    PickBackground,
+    ClearBackground,
+    BackgroundOpacity(i16),
     /// A model of any backend; switches the thread's backend, or opens a new thread when it has already started.
     BackendModel(String, String),
     RefreshBackendModels,
-    Update(bool),
+    Update(bool, Channel),
     Shell(String),
     Terminal,
     Handoff,
     HandoffAdopt,
     InstallAgent(&'static str),
+    Welcome(welcome::WelcomeAct),
     Stage(String),
     Unstage(Vec<String>),
     GitReview,
     Stash,
+    /// Copies a `greencode://new` link for the draft, with the repository and model when true.
+    CopyPromptLink(bool),
+    CopyThreadLink,
+    CopyThreadId,
+    /// Copies one user or assistant message's text.
+    CopyMessage(usize),
+    /// Copies the last assistant reply as Markdown.
+    CopyLastReply,
+    /// Opens the `greencode://` link on the clipboard.
+    OpenPromptLink,
     Unstash(usize),
     Snooze(u64),
     WakeAll,
@@ -681,13 +761,55 @@ enum Act {
     SaveProjectDefault,
     /// Flips a boolean UI setting.
     Toggle(&'static str),
+    /// Enter sends (default) or ⌘Enter sends and Enter inserts a newline.
+    SendShortcut,
+    /// ⌘Q: direct, hold, or two presses.
+    CycleQuitMode,
+    /// Text generation model for titles, commits and PRs; `None` = off.
+    TextModel(Option<String>),
+    CycleTextModel,
+    RegenerateTitle,
+    GenerateCommit,
+    GeneratePr,
     CycleVoiceProvider,
+    /// Voice settings button: `language`, `mic` or `test`.
+    VoiceAction(&'static str),
+    /// SnapShot (macOS): turn the capture shortcut on or off, include app text, change the shortcut.
+    SnapshotToggle,
+    SnapshotText,
+    SnapshotShortcut,
     SetLearning(bool),
     /// Turns one native `ext` tool on or off.
     ToggleExt(&'static str),
     /// Automatic compaction: summary → snap → off.
     CycleCompaction,
     Prompt(&'static str),
+    AddRepo,
+    AddRepoPath(PathBuf),
+    RemoveRepo(PathBuf),
+    ToggleWorktreeRepo(PathBuf),
+    DiffRepo(Option<PathBuf>),
+    RepoCommit(PathBuf),
+    RepoPush(PathBuf),
+    CloneProject,
+    NewProject,
+    PublishProject,
+    /// Switches the diff panel between uncommitted, base-branch and single-commit sources.
+    DiffSource(greencode_core::git::DiffSource),
+    DiffCommit(String),
+    PickCommit,
+    PinProject(PathBuf),
+    ArchiveProject(PathBuf),
+    SetCloneRoot,
+    /// Asks for a text setting in the palette's search box, prefilled with its value.
+    EditText(git::TextPrompt),
+    CycleWorktreeSubmodules,
+    /// Fetches and fast-forwards the default branch now, even when the setting is off.
+    SyncDefaultBranch,
+    /// Runs the value the palette is asking for (clone URL, project name, branch prefix).
+    SubmitText,
+    /// Squash-merges a PR, or turns auto-merge on; `true` = auto.
+    MergePr(u64, bool),
     Quote,
     /// Rewinds to the prompt this many turns before the last one, for editing.
     Rewind(usize),
@@ -699,6 +821,8 @@ enum Act {
     Side(String),
     /// Quotes the side chat's last answer into its parent thread's composer.
     BringBack,
+    /// Steers the parent thread with the side answer's `<inject>` block (`btw.inject`).
+    InjectBtw,
     /// Shows what the turn this many turns before the last one changed, in the diff panel.
     TurnDiff(usize),
     BashDiff,
@@ -706,7 +830,11 @@ enum Act {
     ToggleDisabled(&'static str, String),
     ToolVisibility,
     Triage,
+    /// Copies a 24-hour read-only guest link for the active thread. Needs a running `serve`.
+    GuestLink,
     Retry,
+    /// Sends the last prompt again once the provider's usage limit resets.
+    ResumeAtReset,
     Skill(String),
     Speak,
     /// Default permission mode of new threads.
@@ -740,6 +868,30 @@ struct ProviderForm {
     _subs: Vec<Subscription>,
 }
 
+enum UpdateStatus {
+    Unchecked,
+    Checking,
+    Installing,
+    Checked(SharedString),
+    Installed(SharedString),
+    Failed(SharedString),
+}
+
+impl UpdateStatus {
+    fn message(&self) -> SharedString {
+        match self {
+            Self::Unchecked => "更新状況は未確認です。".into(),
+            Self::Checking => "更新を確認中…".into(),
+            Self::Installing => "更新を確認・適用中…".into(),
+            Self::Checked(message) | Self::Installed(message) | Self::Failed(message) => message.clone(),
+        }
+    }
+
+    fn locked(&self) -> bool {
+        matches!(self, Self::Checking | Self::Installing | Self::Installed(_))
+    }
+}
+
 pub struct Workspace {
     cfg: Arc<Config>,
     cfg_error: Option<String>,
@@ -748,6 +900,14 @@ pub struct Workspace {
     input: Entity<TextareaState>,
     list: ListState,
     focus: FocusHandle,
+    /// F6 targets: the thread sidebar, the conversation, and the diff panel.
+    sidebar_focus: FocusHandle,
+    conversation_focus: FocusHandle,
+    diff_focus: FocusHandle,
+    find: find::Find,
+    nav: nav::Nav,
+    undo: nav::Undo,
+    quit: nav::QuitGuard,
     show_diff: bool,
     /// (thread id, first item) of work groups the user expanded.
     expanded_groups: std::collections::HashSet<(String, usize)>,
@@ -755,6 +915,16 @@ pub struct Workspace {
     pr_panel: Option<prs::PrPanel>,
     diff: Vec<SharedString>,
     diff_generation: u64,
+    /// What the diff panel shows: uncommitted, against the base branch, or one commit.
+    diff_source: greencode_core::git::DiffSource,
+    /// Newest commits of the diff repository, for the commit picker.
+    diff_commits: Vec<(String, String)>,
+    /// The palette is listing commits for the diff panel.
+    picking_commit: bool,
+    /// The palette is asking for a text value.
+    text_prompt: Option<git::TextPrompt>,
+    /// When each repository's default branch was last synced.
+    synced: std::collections::HashMap<PathBuf, std::time::Instant>,
     palette: Option<(Entity<InputState>, Subscription)>,
     model_picker: Option<ModelPicker>,
     login_palette: bool,
@@ -768,6 +938,9 @@ pub struct Workspace {
     settings_focus: FocusHandle,
     /// Index into `SETTINGS_TABS`; opening settings starts at 一般.
     settings_tab: usize,
+    show_update_panel: bool,
+    update_channel: Channel,
+    update_status: UpdateStatus,
     /// Highlighted palette row; ↑/↓ move it, Enter runs it.
     palette_ix: usize,
     /// `provider/model` ids reported by the providers' `/models` endpoints.
@@ -780,15 +953,28 @@ pub struct Workspace {
     probed: std::collections::BTreeSet<(String, PathBuf)>,
     /// Persistent UI settings (`ui.json`): theme, follow-up behavior, keybindings, project defaults, stash.
     ui: Value,
+    /// Files in `~/.greencode/themes`, reloaded on import, save and CLI polling.
+    custom_themes: Vec<(String, greencode_core::theme::Theme)>,
+    theme_edit: Option<themes::ThemeEdit>,
     voice_recording: Option<voice::VoiceRecording>,
+    /// The SnapShot helper process; aborting it releases the shortcut.
+    snapshot: Option<tokio::task::AbortHandle>,
     webhooks: Arc<std::sync::Mutex<Vec<greencode_core::webhook::Hook>>>,
     webhook_server: Option<tokio::task::AbortHandle>,
+    /// Runs schedules, webhooks and due workflow runs while Labs → Workflows is on.
+    workflow_engine: Option<tokio::task::AbortHandle>,
     /// Settings screen: inputs for a new keybinding (key, command) while it is open.
     settings: Option<([Entity<InputState>; 2], Vec<Subscription>)>,
+    secrets: secrets::Secrets,
+    advanced: advanced::Advanced,
     connection_name: Option<(Entity<InputState>, Subscription)>,
+    /// Connections tab: executable, arguments, environment, backend model id and provider model id.
+    connection_fields: Option<([Entity<InputState>; 5], Vec<Subscription>)>,
     storage: storage::Storage,
+    repos: repos::RepoState,
     agent_versions: std::collections::BTreeMap<&'static str, Option<String>>,
     agent_versions_generation: u64,
+    welcome: Option<welcome::Welcome>,
     /// Position in the sent prompts while ↑/↓ recall walks them.
     recall: Option<usize>,
     terminals: TerminalSet,
@@ -825,6 +1011,7 @@ pub struct Workspace {
     /// Full selected text behind `cite_form`.
     cite_text: String,
     usage: Option<usage::UsageView>,
+    workflows: Option<workflows::Workflows>,
     device_form: Option<DeviceForm>,
     /// Slash commands of the active project.
     commands: Vec<String>,
@@ -836,6 +1023,8 @@ pub struct Workspace {
     agent_spawner: AgentSpawner,
     /// Tracked files of a project, for `@` completion.
     files: Option<(PathBuf, Vec<String>)>,
+    /// Skills of the project for `$`/`/` completion, re-read when stale.
+    mentions: mentions::Cache,
     hermes_profiles: Vec<hermes::Profile>,
     /// Claude Code and Codex sessions of the active project, refreshed when the palette opens.
     importable: Vec<import::Found>,
@@ -864,17 +1053,22 @@ fn extension_text(text: &str) -> String {
 }
 
 /// Sections of the settings screen, in sidebar order; icons must be among gpui-kit's bundled defaults.
-const SETTINGS_TABS: [(&str, Ic); 6] = [
+const SETTINGS_TABS: [(&str, Ic); 11] = [
     ("一般", Ic::Settings2),
+    ("外観", Ic::Palette),
     ("モデルと権限", Ic::Bot),
     ("接続", Ic::Network),
     ("ツール", Ic::SquareTerminal),
     ("プロジェクト", Ic::Folder),
+    ("シークレット", Ic::EyeOff),
     ("キーとファイル", Ic::FileText),
+    ("ラボ", Ic::Asterisk),
+    ("詳細設定", Ic::Settings),
+    ("エージェント", Ic::LayoutDashboard),
 ];
 
 /// Slash commands handled by the GUI in native threads, for completion.
-const BUILTINS: [&str; 46] = [
+const BUILTINS: [&str; 54] = [
     "skill",
     "webhook",
     "webhook-secret",
@@ -909,6 +1103,8 @@ const BUILTINS: [&str; 46] = [
     "commit",
     "learn",
     "usage",
+    "usage-limits",
+    "usage-history",
     "update",
     "goal",
     "terminal",
@@ -921,21 +1117,35 @@ const BUILTINS: [&str; 46] = [
     "pr",
     "scratch",
     "to",
+    "titleprompt",
+    "voice",
+    "clone",
+    "project",
+    "publish",
+    "sync",
 ];
 
+/// T3's composer limit; longer drafts stay in the composer.
+const MAX_MESSAGE_CHARS: usize = 120_000;
+
+fn over_limit(text: &str) -> bool {
+    text.chars().count() > MAX_MESSAGE_CHARS
+}
+
 const HELP: &str = "/model [provider/model], /models  モデルを選ぶ（引数なしで一覧）
-/new, /clear  新規スレッド
+/new  新規スレッド   /clear  同じスレッドで新しいセッション（履歴は表示したまま）
 /mode ask|auto-edit|full|plan  権限モード（/plan で読み取り専用のプランモードを切り替え）
 /undo  最後のターンを取り消し、write・edit で変えたファイルを戻す   /retry  直前のプロンプトを再送
 /fork  スレッドを複製   /export  Markdown に書き出し   /import  Claude Code / Codex セッションを開く
 /attach  ファイルを添付（画像は ⌘V で貼り付け可。ウィンドウへのドラッグ＆ドロップも可）
 /effort [low|medium|high]  思考の強さ   /sandbox  bash の書き込み制限
-/theme [名前]  テーマ切替（emerald / emerald-light / paper / sand / graphite / light / dark / system）
+/theme [名前|system|light|dark]  テーマ・外観の切替（⌘⌥A 一覧、⌘⌥⇧A 外観を切替）
 /settings  設定画面（⌘,）   !コマンド  シェルコマンドを直接実行
+/voice 音声入力（設定・言語・辞書・マイク）。⌘⇧D で録音、esc で破棄
 /compact [snap|summary]  会話を圧縮（snap は画像に退避、モデル呼び出しなし）
 /to NAME 指示  サブエージェントに指示
 /status  モデル・権限・トークン使用量
-/usage  サブスクリプションの利用上限
+/usage  サブスクリプションの利用上限   /usage-limits  上限をメッセージで表示   /usage-history  コスト・トークンの履歴
 /diff  差分パネル
 /login [プロバイダ名]  プロバイダにログイン（APIキー / Claude サブスクリプション / vibe で Mistral Vibe）
 /logout [プロバイダ名]  保存したキー・サブスクリプションを削除   /provider  プロバイダを追加
@@ -943,16 +1153,18 @@ const HELP: &str = "/model [provider/model], /models  モデルを選ぶ（引�
 /init  AGENTS.md を作成
 /review  未コミットの変更をレビュー   /commit  変更をコミット
 /branch 名前  ブランチ作成   /push  プッシュ   /pr  プルリクエスト作成（gh）
-/goal 完了条件  達成まで自動で続行（/goal clear で解除）
+/goal 完了条件  達成まで自動で続行（/goal pause・resume・clear）
 /terminal  ターミナル（⌘J）   /stash  下書きを退避・復元（⌘S）
 /side 質問（/btw も可）  スレッドを変えずに質問するサイドチャット。回答はパレットの「持ち帰る」で元のスレッドへ
 /schedule 30m プロンプト  定期実行（m・h・d、起動中のみ）。/schedule で一覧、/schedule clear で全削除
 /schedule HH:MM|+30m|+2h プロンプト  指定時刻に送信（アプリ起動中）。/schedule で予約を一覧・取り消し
-/update [check]  GitHub Releases の最新版を確認または適用
+/update [check] [stable|main]  GitHub の安定版または main のコミットビルドを確認・適用
 /webhook プロンプト  Webhook を作成（/webhook で一覧）   /webhook-secret ID SECRET 署名を設定   /webhook-rotate ID URL を更新
 /rename 名前  スレッド名変更   /snooze [時間]  スレッドを一時的に隠す   /scratch  プロジェクトなしで開始
+/titleprompt 指示  タイトル生成の追加指示（設定 → 一般のテキスト生成モデル使用時）
+/clone [owner/name|URL]  リポジトリをクローン（引数なしで入力欄）   /project [名前]  新規プロジェクト   /publish  GitHub に非公開で公開   /sync  既定ブランチを今すぐ同期
 ↑↓ 送信済みプロンプトの呼び出し · ⌥↑ キュー末尾を編集 · ⇧⌘A 権限切り替え · ⌘⏎ 送信して次の下書きへ
-⌘K パレット（? で始めると会話の全文検索）· （↑↓ で選択） · ⌘N 新規 · ⌘O プロジェクト · ⌘D 差分 · @ ファイル補完 · esc 停止";
+⌘K パレット（? で始めると会話の全文検索）· （↑↓ で選択） · ⌘N 新規 · ⌘O プロジェクト · ⌘D 差分 · / コマンド · $ スキル · @ ファイル・スレッド · # PR · esc 停止";
 
 const INIT_PROMPT: &str = "Explore this project and write AGENTS.md at its root: what it is, how to build, run and test it, the layout, and the conventions a coding agent must follow. Keep it short and specific to this repository. If AGENTS.md already exists, improve it instead of replacing it.";
 
@@ -998,6 +1210,37 @@ enum ToolVisibility {
     Zen,
 }
 
+/// What an extension tool does, for the settings screen; core's `CATALOG` text is the model's English.
+fn ext_hint(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "hread" => "行番号つきで読む",
+        "hedit" => "行番号を指定して編集",
+        "ast" => "構文単位で検索・置換",
+        "eval" => "Python / JS を続けて実行",
+        "debug" => "デバッガ",
+        "advisor" => "別のモデルに意見を聞く",
+        "learn" => "プロジェクトの学びを残す",
+        "ask" => "ユーザーに質問する",
+        "secret" => "認証情報を非公開で尋ねる",
+        "checkpoint" => "途中の地点を記録",
+        "rewind" => "記録した地点まで戻す",
+        "new_context" => "引き継ぎメモから再開",
+        "recall" => "過去のセッションを検索",
+        "wait" => "プロセスの終了を待つ",
+        "manage_skill" => "スキルを保存",
+        "find" => "説明から該当ファイルを探す",
+        "github" => "gh で Issue・PR・CI を読む",
+        "dsm" => "バイナリを逆アセンブル",
+        "tts" => "テキストを音声ファイルに",
+        "ratchet" => "基準と比べて改善を繰り返す",
+        "archive" => "プロンプトとセッションの履歴",
+        "vault" => "Obsidian のノート",
+        "security" => "セキュリティ診断の計画と実行",
+        "report_issue" => "ツールの不具合を報告",
+        _ => return None,
+    })
+}
+
 fn tool_visibility_label(v: ToolVisibility) -> &'static str {
     match v {
         ToolVisibility::Show => "すべて表示",
@@ -1016,29 +1259,9 @@ fn mode_label(m: Mode) -> &'static str {
     }
 }
 
-/// Runs a helper program; never from tests.
-/// Plain text for `say`: drops code blocks, link targets and markdown markers.
+/// Plain text for `say`, as the core's speech module builds it.
 fn speech_text(markdown: &str) -> String {
-    let mut out = String::new();
-    let mut fenced = false;
-    for line in markdown.lines() {
-        if line.trim_start().starts_with("```") {
-            fenced = !fenced;
-            continue;
-        }
-        if fenced {
-            continue;
-        }
-        let line = line
-            .trim_start_matches(['#', '>', '-', '*', ' '])
-            .replace(['*', '`'], "");
-        if !line.trim().is_empty() {
-            out.push_str(line.trim());
-            out.push(' ');
-        }
-    }
-    out.truncate(2_000);
-    out
+    greencode_core::speech::plain(markdown)
 }
 
 fn spawn_external(program: &str, args: &[&str]) {
@@ -1108,16 +1331,17 @@ fn command_list(cfg: &Config, t: &Thread) -> Vec<String> {
     if t.meta.backend == "native" {
         commands.extend(BUILTINS.map(String::from));
         commands.extend(
-            skills::commands(&t.meta.cwd)
+            skills::commands(&t.meta.cwd, cfg)
                 .into_iter()
                 .chain(t.commands.iter().cloned()),
         );
     } else {
         commands.extend(t.commands.iter().chain(&t.mapped).cloned());
         if t.meta.backend == "opencode" {
-            commands.extend(skills::opencode_commands(&t.meta.cwd));
+            commands.extend(skills::opencode_commands(&t.meta.cwd, cfg));
         }
         commands.push("models".into());
+        commands.push("clear".into());
     }
     if rpc_backend(cfg, &t.meta.backend) {
         commands
@@ -1139,6 +1363,24 @@ fn chip(id: impl Into<ElementId>, label: impl Into<SharedString>, pal: Pal) -> S
         .cursor_pointer()
         .hover(|s| s.bg(pal.hover).text_color(pal.fg))
         .child(label.into())
+}
+
+/// An on/off switch in the palette's colors; the caller supplies `on_change`.
+fn switch(id: impl Into<ElementId>, label: impl Into<SharedString>, on: bool, pal: Pal) -> gpui_kit::base::Switch {
+    gpui_kit::base::Switch::new(id)
+        .accessibility_label(label)
+        .checked(on)
+        .flex_shrink_0()
+        .w(px(32.))
+        .h(px(18.))
+        .p(px(2.))
+        .flex()
+        .items_center()
+        .when(on, |d| d.justify_end())
+        .rounded_full()
+        .cursor_pointer()
+        .bg(if on { pal.accent } else { pal.fg.opacity(0.2) })
+        .child(div().size(px(14.)).rounded_full().bg(hsla(0., 0., 1., 1.)))
 }
 
 /// Settings content laid out as in T3 Code: titled sections, each a bordered card of divided rows.
@@ -1235,27 +1477,27 @@ fn theme_preview(pal: Pal) -> Div {
         )
 }
 
-fn appearance_preview(theme: ThemeId) -> Div {
+fn appearance_preview(system: bool, light: Pal, dark: Pal) -> Div {
     let frame = div().w_full().h(px(112.)).flex().rounded_md().overflow_hidden();
-    if theme == ThemeId::System {
-        frame.children([(ThemeId::Light, false), (ThemeId::Dark, true)].map(|(t, right)| {
-            div().relative().w(relative(0.5)).h_full().overflow_hidden().child(
-                div().absolute().top_0().h_full().w(relative(2.))
-                    .when(right, |d| d.right_0())
-                    .when(!right, |d| d.left_0())
-                    .child(theme_preview(Pal::for_theme(t, false))),
-            )
-        }))
+    let half = |pal: Pal, right: bool| {
+        div().relative().w(relative(0.5)).h_full().overflow_hidden().child(
+            div().absolute().top_0().h_full().w(relative(2.))
+                .when(right, |d| d.right_0())
+                .when(!right, |d| d.left_0())
+                .child(theme_preview(pal)),
+        )
+    };
+    if system {
+        frame.child(half(light, false)).child(half(dark, true))
     } else {
-        frame.child(theme_preview(Pal::for_theme(theme, false)))
+        frame.child(theme_preview(light))
     }
 }
 
-fn theme_settings(current: ThemeId, pal: Pal, cx: &mut Context<Workspace>) -> Div {
-    let tile = |theme: ThemeId, cx: &mut Context<Workspace>| {
-        let selected = theme == current;
-        gpui_kit::base::Button::new((ElementId::from("theme"), theme.id()))
-            .accessibility_label(theme.label())
+fn theme_settings(ws: &Workspace, pal: Pal, cx: &mut Context<Workspace>) -> Div {
+    let tile = |id: String, label: String, selected: bool, act: Act, cx: &mut Context<Workspace>| {
+        gpui_kit::base::Button::new((ElementId::from("theme"), SharedString::from(id)))
+            .accessibility_label(SharedString::from(label.clone()))
             .aria_toggled(if selected { accesskit::Toggled::True } else { accesskit::Toggled::False })
             .min_w_0()
             .p_2()
@@ -1268,56 +1510,120 @@ fn theme_settings(current: ThemeId, pal: Pal, cx: &mut Context<Workspace>) -> Di
             .hover(|s| s.bg(pal.hover))
             .focus(|s| s.border_color(pal.fg))
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                this.run(Act::Theme(theme), window, cx)
+                this.run(act.clone(), window, cx)
             }))
     };
-    let label = |theme: ThemeId| {
+    let label = |text: String, selected: bool| {
         div().flex().items_center().gap_1p5().min_w_0().text_sm()
             .font_weight(FontWeight::MEDIUM)
-            .child(div().min_w_0().truncate().child(theme.label()))
-            .when(theme == current, |d| {
+            .child(div().min_w_0().truncate().child(text))
+            .when(selected, |d| {
                 d.child(div().flex_shrink_0().text_color(pal.accent).child(Ic::Check))
             })
     };
     let heading = |text| div().text_base().font_weight(FontWeight::SEMIBOLD).child(text);
+    let light_pal = ws.theme_pal(&ws.theme_slot(false), false);
+    let dark_pal = ws.theme_pal(&ws.theme_slot(true), true);
+    let mode = ws.theme_mode();
+    let modes = div().grid().grid_cols(3).gap_3().children(themes::ThemeMode::ALL.map(|m| {
+        tile(
+            format!("mode-{}", m.id()),
+            m.label().to_string(),
+            m == mode,
+            Act::ThemeMode(m),
+            cx,
+        )
+        .child(
+            div().w_full().flex().flex_col().items_center().gap_2()
+                .child(appearance_preview(
+                    m == themes::ThemeMode::System,
+                    if m == themes::ThemeMode::Dark { dark_pal } else { light_pal },
+                    dark_pal,
+                ))
+                .child(label(m.hint().to_string(), m == mode)),
+        )
+    }));
+    let choices = themes::choices(&ws.custom_themes);
+    let grid = |slot_dark: bool, choices: &[Choice], cx: &mut Context<Workspace>| {
+        let selected = ws.theme_slot(slot_dark);
+        div().grid().grid_cols(2).gap_2().children(choices.iter().map(|choice| {
+            let choice = choice.clone();
+            let is_selected = choice == selected;
+            let swatch = ws.theme_pal(&choice, slot_dark);
+            let name = choice.label(&ws.custom_themes);
+            tile(
+                format!("slot-{slot_dark}-{}", choice.id()),
+                name.clone(),
+                is_selected,
+                Act::ThemeSlot(slot_dark, choice),
+                cx,
+            )
+            .child(
+                div().w_full().min_w_0().flex().items_center().gap_2()
+                    .child(
+                        div().size_7().flex_shrink_0().flex().items_center()
+                            .justify_center().rounded_full().bg(swatch.sidebar)
+                            .border_1().border_color(swatch.muted)
+                            .child(
+                                div().size_5().flex().items_center().justify_center()
+                                    .rounded_full().bg(swatch.card)
+                                    .child(div().size_2p5().rounded_full().bg(swatch.accent)),
+                            ),
+                    )
+                    .child(label(name, is_selected)),
+            )
+        }))
+    };
+    let configured = ws.ui["background_image"].as_str().map(|p| p.to_string());
+    let opacity = (ws.background_opacity() * 100.).round() as u32;
     div()
         .flex().flex_col().gap_3().pb_6()
         .child(heading("外観モード"))
+        .child(modes)
+        .child(heading("ライトのテーマ").pt_2())
+        .child(grid(false, &choices, cx))
+        .child(heading("ダークのテーマ").pt_2())
+        .child(grid(true, &choices, cx))
+        .child(heading("カスタムテーマ").pt_2())
         .child(
-            div().grid().grid_cols(3).gap_3().children(
-                [ThemeId::System, ThemeId::Light, ThemeId::Dark].map(|t| {
-                    tile(t, cx).child(
-                        div().w_full().flex().flex_col().items_center().gap_2()
-                            .child(appearance_preview(t))
-                            .child(label(t)),
-                    )
+            div().flex().flex_wrap().items_center().gap_1p5()
+                .child(chip("theme-import", "読み込む…（VS Code / GreenCode JSON）", pal).on_click(
+                    cx.listener(|this, _: &ClickEvent, window, cx| this.run(Act::ImportTheme, window, cx)),
+                ))
+                .child(chip("theme-export", "書き出す…", pal).on_click(
+                    cx.listener(|this, _: &ClickEvent, window, cx| this.run(Act::ExportTheme, window, cx)),
+                ))
+                .child(chip("theme-edit", "編集…", pal).on_click(
+                    cx.listener(|this, _: &ClickEvent, window, cx| this.run(Act::EditTheme, window, cx)),
+                )),
+        )
+        .child(heading("背景画像").pt_2())
+        .child(
+            div().flex().items_center().gap_2()
+                .child(div().flex_1().min_w_0().truncate().text_color(if configured.is_some() { pal.fg } else { pal.muted }).child(
+                    configured.clone().unwrap_or_else(|| "未設定（JPEG / PNG / WebP、16 MB まで）".into()),
+                ))
+                .child(chip("bg-pick", "選択…", pal).on_click(
+                    cx.listener(|this, _: &ClickEvent, window, cx| this.run(Act::PickBackground, window, cx)),
+                ))
+                .when(configured.is_some(), |d| {
+                    d.child(chip("bg-clear", "クリア", pal).on_click(
+                        cx.listener(|this, _: &ClickEvent, window, cx| this.run(Act::ClearBackground, window, cx)),
+                    ))
                 }),
-            ),
         )
-        .child(heading("テーマ").pt_2())
-        .child(
-            div().grid().grid_cols(2).gap_2().children(
-                ThemeId::ALL.into_iter()
-                    .filter(|t| !matches!(t, ThemeId::System | ThemeId::Light | ThemeId::Dark))
-                    .map(|t| {
-                        let swatch = Pal::for_theme(t, false);
-                        tile(t, cx).child(
-                            div().w_full().min_w_0().flex().items_center().gap_2()
-                                .child(
-                                    div().size_7().flex_shrink_0().flex().items_center()
-                                        .justify_center().rounded_full().bg(swatch.sidebar)
-                                        .border_1().border_color(swatch.muted)
-                                        .child(
-                                            div().size_5().flex().items_center().justify_center()
-                                                .rounded_full().bg(swatch.card)
-                                                .child(div().size_2p5().rounded_full().bg(swatch.accent)),
-                                        ),
-                                )
-                                .child(label(t)),
-                        )
-                    }),
-            ),
-        )
+        .when(configured.is_some(), |d| {
+            d.child(
+                div().flex().items_center().gap_2()
+                    .child(div().flex_1().child(format!("背景の不透明度: {opacity}%")))
+                    .child(chip("bg-minus", "−10%", pal).on_click(
+                        cx.listener(|this, _: &ClickEvent, window, cx| this.run(Act::BackgroundOpacity(-10), window, cx)),
+                    ))
+                    .child(chip("bg-plus", "+10%", pal).on_click(
+                        cx.listener(|this, _: &ClickEvent, window, cx| this.run(Act::BackgroundOpacity(10), window, cx)),
+                    )),
+            )
+        })
 }
 
 type Ic = gpui_kit::assets::IconName;
@@ -1395,7 +1701,7 @@ impl Workspace {
     ) -> Self {
         Theme::sync_system_appearance(Some(window), cx);
         cx.observe_window_appearance(window, |this, window, cx| {
-            if this.theme_id() == ThemeId::System {
+            if this.theme_mode() == themes::ThemeMode::System {
                 this.apply_theme(window, cx);
             }
         })
@@ -1416,7 +1722,12 @@ impl Workspace {
                 &input,
                 window,
                 |this, _, ev: &InputEvent, window, cx| match ev {
-                    InputEvent::PressEnter { shift: false, .. } => this.send(window, cx),
+                    InputEvent::PressEnter { secondary, shift } => {
+                        // In ⌘Enter mode the textarea does not submit on Enter, so it inserted the newline already.
+                        if !*shift && !(this.ui["send_shortcut"] == "cmd+enter" && !*secondary) {
+                            this.send(window, cx);
+                        }
+                    }
                     InputEvent::Change => {
                         let t = &mut this.threads[this.active];
                         t.draft = this.queue_edit.as_ref().map_or_else(
@@ -1477,6 +1788,13 @@ impl Workspace {
             threads,
             active: 0,
             focus: cx.focus_handle(),
+            sidebar_focus: cx.focus_handle(),
+            conversation_focus: cx.focus_handle(),
+            diff_focus: cx.focus_handle(),
+            find: Default::default(),
+            nav: Default::default(),
+            undo: Default::default(),
+            quit: Default::default(),
             input,
             show_diff: false,
             expanded_groups: Default::default(),
@@ -1484,6 +1802,11 @@ impl Workspace {
             pr_panel: None,
             diff: vec![],
             diff_generation: 0,
+            diff_source: greencode_core::git::DiffSource::default(),
+            diff_commits: vec![],
+            picking_commit: false,
+            text_prompt: None,
+            synced: Default::default(),
             palette: None,
             model_picker: None,
             login_palette: false,
@@ -1496,6 +1819,9 @@ impl Workspace {
             settings_scroll: ScrollHandle::default(),
             settings_focus: cx.focus_handle(),
             settings_tab: 0,
+            show_update_panel: false,
+            update_channel: Channel::default(),
+            update_status: UpdateStatus::Unchecked,
             palette_ix: 0,
             fetched_models: vec![],
             found: vec![],
@@ -1509,11 +1835,19 @@ impl Workspace {
                 .ok()
                 .and_then(|b| serde_json::from_slice(&b).ok())
                 .unwrap_or_else(|| json!({})),
+            custom_themes: greencode_core::theme::load_all(),
+            theme_edit: None,
             voice_recording: None,
+            snapshot: None,
             webhooks: Arc::new(std::sync::Mutex::new(vec![])),
             webhook_server: None,
+            workflow_engine: None,
             settings: None,
+            secrets: secrets::Secrets::new(window, cx),
+            advanced: advanced::Advanced::new(window, cx),
             connection_name: None,
+            connection_fields: None,
+            repos: Default::default(),
             storage: storage::Storage {
                 field: cx
                     .new(|cx| InputState::new(window, cx).placeholder("絶対パス（空欄は既定）")),
@@ -1523,6 +1857,7 @@ impl Workspace {
             },
             agent_versions: Default::default(),
             agent_versions_generation: 0,
+            welcome: None,
             recall: None,
             terminals: TerminalSet::default(),
             handoffs: HashSet::new(),
@@ -1549,6 +1884,7 @@ impl Workspace {
             cite_form: None,
             cite_text: String::new(),
             usage: None,
+            workflows: None,
             device_form: None,
             commands: vec![],
             editor_text: None,
@@ -1556,6 +1892,7 @@ impl Workspace {
             defer_gen: 0,
             agent_spawner: spawn_agent,
             files: None,
+            mentions: Default::default(),
             hermes_profiles,
             importable: vec![],
             show_archived: false,
@@ -1618,7 +1955,11 @@ impl Workspace {
             }
         }
         // Settings chosen in earlier runs.
+        let submit_on_enter = this.ui["send_shortcut"] != "cmd+enter";
+        this.input
+            .update(cx, |s, cx| s.set_submit_on_enter(submit_on_enter, cx));
         this.apply_theme(window, cx);
+        this.watch_environment_theme(window, cx);
         // Scheduled prompts are checked twice a minute while the app runs. Not in UI tests, which drive time themselves.
         if !cfg!(test) {
             cx.spawn(async move |this, cx| loop {
@@ -1644,7 +1985,10 @@ impl Workspace {
                     .timer(std::time::Duration::from_secs(600))
                     .await;
                 if this
-                    .update(cx, |this, cx| this.refresh_thread_prs(cx))
+                    .update(cx, |this, cx| {
+                        this.refresh_thread_prs(cx);
+                        this.sync_default_branch(false, cx)
+                    })
                     .is_err()
                 {
                     break;
@@ -1660,9 +2004,10 @@ impl Workspace {
             .filter_map(Value::as_str)
             .collect();
         this.threads[1..].sort_by_key(|t| order.iter().position(|id| *id == t.meta.id));
-        if let Some(effort) = this.ui["effort"].as_str() {
-            Arc::make_mut(&mut this.cfg).effort = Some(effort.into());
+        if welcome::first_run(&this.ui, this.threads.len() - 1) {
+            this.open_welcome(cx);
         }
+        advanced::apply_ui(Arc::make_mut(&mut this.cfg), &this.ui);
         if let Some(mode) = serde_json::from_value::<Mode>(this.ui["mode"].clone())
             .ok()
             .filter(|m| {
@@ -1678,27 +2023,7 @@ impl Workspace {
             }
         }
         if let Some(model) = this.ui["model"].as_str() {
-            Arc::make_mut(&mut this.cfg).model = model.into();
             this.threads[0].meta.model = model.into();
-        }
-        if let Some(auto) = this.ui["learning_auto"].as_bool() {
-            Arc::make_mut(&mut this.cfg).learning.auto = auto;
-        }
-        if let Some(off) = this.ui["ext_off"].as_array() {
-            Arc::make_mut(&mut this.cfg).ext_off = off
-                .iter()
-                .filter_map(Value::as_str)
-                .map(String::from)
-                .collect();
-        }
-        match this.ui["compaction"].as_str() {
-            Some("off") => Arc::make_mut(&mut this.cfg).compaction_enabled = false,
-            Some(method @ ("summary" | "snap")) => {
-                let cfg = Arc::make_mut(&mut this.cfg);
-                cfg.compaction_enabled = true;
-                cfg.compaction = method.into();
-            }
-            _ => {}
         }
         if let Some(on) = this.ui["sandbox"].as_bool() {
             greencode_core::tools::SANDBOX.store(on, std::sync::atomic::Ordering::Relaxed);
@@ -1713,6 +2038,8 @@ impl Workspace {
         this.activate(0, window, cx);
         this.refresh_thread_prs(cx);
         this.start_webhooks(cx);
+        this.start_workflow_engine(cx);
+        this.snapshot_start(window, cx);
         this.refresh_models(cx);
         this
     }
@@ -1825,8 +2152,7 @@ impl Workspace {
                             term.open = false;
                             term.lines
                                 .extend(text.lines().map(|l| SharedString::from(l.to_string())));
-                            let extra = term.lines.len().saturating_sub(5000);
-                            term.lines.drain(..extra);
+                            terminal::trim_scrollback(&mut term.lines);
                         }
                     }
                 } else if let Some(ix) = this.threads.iter().position(|t| t.meta.id == id) {
@@ -1848,6 +2174,7 @@ impl Workspace {
 
     /// Current and local branches of the active project; empty outside a repository.
     fn refresh_git(&mut self, cx: &mut Context<Self>) {
+        self.refresh_repos(cx);
         let cwd = self.thread().meta.cwd.clone();
         self.git_generation = self.git_generation.wrapping_add(1);
         let generation = self.git_generation;
@@ -2320,6 +2647,14 @@ impl Workspace {
         if let Some(ids) = self.project_models.get(project) {
             models.insert("opencode".into(), ids.clone());
         }
+        for (name, over) in &self.cfg.backend_overrides {
+            let list = models.entry(name.clone()).or_default();
+            for model in &over.models {
+                if !list.contains(model) {
+                    list.push(model.clone());
+                }
+            }
+        }
         models
     }
 
@@ -2408,40 +2743,52 @@ impl Workspace {
         v
     }
 
-    fn update_app(&mut self, check_only: bool, cx: &mut Context<Self>) {
-        let configured = self.cfg.update_repo.clone();
-        cx.spawn(async move |this, cx| {
-            let result = async {
-                let repo = greencode_core::update::repository(configured.as_deref(), None)
-                    .map_err(|e| e.to_string())?;
-                if check_only {
-                    let release = greencode_core::update::check(&repo)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    Ok::<_, String>(format!(
-                        "最新版は {} です。{}",
-                        release.version, release.url
-                    ))
-                } else {
-                    let executable = std::env::current_exe().map_err(|e| e.to_string())?;
-                    let result = greencode_core::update::install(&repo, &executable)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    Ok(if result.installed {
-                        format!(
-                            "{} から {} に更新しました。再起動すると新しい版を使います。",
-                            result.current, result.latest
-                        )
-                    } else {
-                        format!("GreenCode {} は最新版です。", result.current)
-                    })
-                }
+    fn update_app(&mut self, check_only: bool, channel: Channel, cx: &mut Context<Self>) {
+        if self.update_status.locked() {
+            if !self.show_update_panel {
+                self.notice(self.update_status.message());
+                cx.notify();
             }
-            .await;
+            return;
+        }
+        self.update_channel = channel;
+        self.update_status = if check_only { UpdateStatus::Checking } else { UpdateStatus::Installing };
+        cx.notify();
+        let configured = self.cfg.update_repo.clone();
+        let task = self.rt.spawn(async move {
+            let repo = update::repository(configured.as_deref(), None).map_err(|e| e.to_string())?;
+            let executable = (!check_only).then(std::env::current_exe).transpose().map_err(|e| e.to_string())?;
+            update::run(&repo, channel, executable.as_deref()).await.map_err(|e| format!("{e:#}"))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await.map_err(|e| e.to_string()).and_then(|result| result);
             this.update(cx, |this, cx| {
-                match result {
-                    Ok(message) => this.notice(message),
-                    Err(error) => this.fail(format!("更新に失敗しました: {error}")),
+                let url = result.as_ref().ok().filter(|result| !result.installed).map(|result| &result.url);
+                this.update_status = match &result {
+                    Ok(result) if result.installed => UpdateStatus::Installed(format!(
+                        "{} から {} に更新しました。再起動すると新しい版を使います。",
+                        result.current, result.latest
+                    ).into()),
+                    Ok(result) if result.available => UpdateStatus::Checked(format!(
+                        "更新あり：{} → {}", result.current, result.latest
+                    ).into()),
+                    Ok(result) => UpdateStatus::Checked(format!(
+                        "更新なし：現在のバージョンは {} です。", result.current
+                    ).into()),
+                    Err(error) => {
+                        let action = if check_only { "更新の確認" } else { "更新" };
+                        UpdateStatus::Failed(format!("{action}に失敗しました: {error}").into())
+                    }
+                };
+                if !this.show_update_panel {
+                    let message = this.update_status.message();
+                    if matches!(this.update_status, UpdateStatus::Failed(_)) {
+                        this.fail(message);
+                    } else if let Some(url) = url {
+                        this.notice(format!("{message} · {url}"));
+                    } else {
+                        this.notice(message);
+                    }
                 }
                 cx.notify();
             })
@@ -2457,6 +2804,11 @@ impl Workspace {
     }
 
     fn cancel_sub(&mut self, name: &str, cx: &mut Context<Self>) {
+        // A delegated child runs on after its parent's turn, so it is stopped directly.
+        if let Some(task) = greencode_core::delegate::find(&self.thread().meta.id, name) {
+            let _ = greencode_core::delegate::cancel(&task);
+            return;
+        }
         if self.thread().status == Status::Running {
             if let Some(cmd) = &self.thread().cmd {
                 let _ = cmd.send(Command::Remote(json!({"type":"sub_cancel","name":name})));
@@ -2468,6 +2820,14 @@ impl Workspace {
     }
 
     fn steer_sub(&mut self, name: &str, text: &str, cx: &mut Context<Self>) {
+        if let Some(task) = greencode_core::delegate::find(&self.thread().meta.id, name) {
+            match greencode_core::delegate::steer(&task, text) {
+                Ok(()) => self.notice(format!("→ {name}: {text}")),
+                Err(e) => self.notice(format!("{name} に指示できません: {e:#}")),
+            }
+            cx.notify();
+            return;
+        }
         if self.thread().status == Status::Running {
             if let Some(cmd) = &self.thread().cmd {
                 let _ = cmd.send(Command::Remote(
@@ -2480,6 +2840,49 @@ impl Workspace {
         }
         self.notice("実行中のサブエージェントに指示できません");
         cx.notify();
+    }
+
+    /// Shows a delegated child thread, following its live events while it runs.
+    fn open_child(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let meta = match self.threads.iter().find(|t| t.meta.id == id) {
+            Some(t) => t.meta.clone(),
+            None => match Session::load(id) {
+                Ok((meta, _)) => meta,
+                Err(e) => match greencode_core::delegate::running_meta(id) {
+                    Some(meta) => meta,
+                    None => return self.fail(format!("スレッドを開けません: {e:#}")),
+                },
+            },
+        };
+        let ix = self.attach_thread(meta, cx);
+        self.select(ix, window, cx);
+    }
+
+    /// Lists `meta`'s thread if it is new and follows a delegated run's live events; returns its index.
+    fn attach_thread(&mut self, meta: Meta, cx: &mut Context<Self>) -> usize {
+        let id = meta.id.clone();
+        let ix = match self.threads.iter().position(|t| t.meta.id == id) {
+            Some(ix) => ix,
+            None => {
+                let mode = self.thread().perms.mode();
+                self.threads.insert(0, Thread::new(meta, false, mode));
+                self.active += 1;
+                0
+            }
+        };
+        if let Some(mut rx) = greencode_core::delegate::take_view(&id) {
+            self.threads[ix].status = Status::Running;
+            cx.spawn(async move |this, cx| {
+                while let Some(ev) = rx.recv().await {
+                    if this.update(cx, |this, cx| this.on_event(&id, ev, cx)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
+        cx.notify();
+        ix
     }
 
     /// Opens the palette filtered to `query`.
@@ -2552,20 +2955,24 @@ impl Workspace {
         // The backend's own command of the same name wins over the GUI's, except for keybindings.
         if !any_backend
             && (self.thread().commands.iter().any(|command| command == name)
-                || (native && skills::command(&self.thread().meta.cwd, name).is_some())
+                || (native && skills::command(&self.thread().meta.cwd, &self.cfg, name).is_some())
                 || (backend == "opencode"
-                    && skills::opencode_commands(&self.thread().meta.cwd)
+                    && skills::opencode_commands(&self.thread().meta.cwd, &self.cfg)
                         .iter()
                         .any(|command| command == name)))
         {
             return false;
         }
-        // `/new` and `/clear` mapped by the backend would reset it under the visible transcript; open a new thread instead.
-        // A real extension command of that name returned above.
+        // `/clear` starts a new session in this thread; the backend's own command of that name returned above.
+        if !any_backend && !native && name == "clear" {
+            self.clear_session(cx);
+            return true;
+        }
+        // `/new` opens a new thread. A real extension command of that name returned above.
         if !any_backend
             && !native
             && rpc_backend(&self.cfg, &backend)
-            && matches!(name, "new" | "clear")
+            && name == "new"
         {
             self.run(Act::NewThread, window, cx);
             return true;
@@ -2616,7 +3023,8 @@ impl Workspace {
                         .join(", ")
                 )),
             },
-            "new" | "clear" => self.run(Act::NewThread, window, cx),
+            "new" => self.run(Act::NewThread, window, cx),
+            "clear" => self.clear_session(cx),
             "undo" => self.run(Act::Undo, window, cx),
             "fork" => self.run(Act::Fork, window, cx),
             "attach" => self.run(Act::Attach, window, cx),
@@ -2667,7 +3075,11 @@ impl Workspace {
                 match (arg, secs) {
                     ("", _) => {
                         let list: Vec<String> = self.ui["schedules"].as_array().into_iter().flatten()
-                            .map(|s| format!("{} 分ごと · {} · {}", s["every"].as_u64().unwrap_or(0) / 60, s["project"].as_str().unwrap_or(""), s["prompt"].as_str().unwrap_or(""))).collect();
+                            .map(|s| {
+                                let when = s["time"].as_str().map_or_else(|| format!("{} 分ごと", s["every"].as_u64().unwrap_or(0) / 60), |t| format!("定刻 {t}"));
+                                let paused = if s["enabled"] == false { "（停止中）" } else { "" };
+                                format!("{when}{paused} · {} · {}", s["project"].as_str().unwrap_or(""), s["prompt"].as_str().unwrap_or(""))
+                            }).collect();
                         self.notice(if list.is_empty() { "スケジュールはありません。/schedule 30m プロンプト で追加（m・h・d）、/schedule clear で全削除".to_string() } else { list.join("\n") });
                     }
                     ("clear", _) => { self.ui["schedules"] = json!([]); self.save_ui(); self.notice("スケジュールをすべて削除しました"); }
@@ -2697,11 +3109,17 @@ impl Workspace {
                 self.run_shell(format!("git switch -c {}", shell_quote(arg)), false, cx)
             }
             "push" => self.run_shell("git push -u origin HEAD".into(), false, cx),
+            "commit" if self.text_model().is_some() => self.generate_git(false, cx),
+            "pr" if self.text_model().is_some() => self.generate_git(true, cx),
             "pr" => self.run_shell("gh pr create --fill".into(), false, cx),
+            "titleprompt" => self.set_title_instructions(arg),
             "goal" => match arg {
                 "" => {
                     let text = match &self.thread().goal {
-                        Some((g, n)) => format!("ゴール: {g}（自動継続 {n} 回）"),
+                        Some((g, n)) => format!(
+                            "ゴール{}: {g}（自動継続 {n} 回）",
+                            if self.thread().goal_paused { "（一時停止中）" } else { "" }
+                        ),
                         None => "ゴールは設定されていません。/goal 完了条件 で設定します".into(),
                     };
                     self.notice(text)
@@ -2709,11 +3127,15 @@ impl Workspace {
                 "clear" => {
                     let ix = self.active;
                     self.threads[ix].goal = None;
+                    self.threads[ix].goal_paused = false;
                     self.drop_goal_continuations(ix);
                     self.notice("ゴールを解除しました")
                 }
+                "pause" => self.goal_pause(true, cx),
+                "resume" => self.goal_pause(false, cx),
                 goal => {
                     self.threads[self.active].goal = Some((goal.to_string(), 0));
+                    self.threads[self.active].goal_paused = false;
                     let prompt = format!("{goal}\n\n{GOAL_SUFFIX}");
                     if self.thread().status == Status::Idle {
                         self.threads[self.active].queue_held = false;
@@ -2732,7 +3154,18 @@ impl Workspace {
                 let prompt = format!("Save this reusable lesson with the ext learn tool after asking for approval: {arg}");
                 self.start_prompt(prompt, cx);
             }
-            "update" => self.run(Act::Update(arg.trim() == "check"), window, cx),
+            "update" => {
+                let mut args = arg.split_whitespace().peekable();
+                let check = args.next_if_eq(&"check").is_some();
+                let channel = args.next().map(str::parse).transpose();
+                match (channel, args.next()) {
+                    (Ok(channel), None) => self.run(Act::Update(check, channel.unwrap_or_default()), window, cx),
+                    _ => {
+                        self.fail("使い方: /update [check] [stable|main]");
+                        cx.notify();
+                    }
+                }
+            }
             "export" => self.run(Act::Export, window, cx),
             "import" => self.import_session_paths(vec![PathBuf::from(arg)], window, cx),
             "effort" => self.run(
@@ -2744,13 +3177,40 @@ impl Workspace {
             "theme" => {
                 if arg.is_empty() {
                     self.open_palette("テーマ: ", window, cx);
-                } else if let Some(t) = ThemeId::parse(arg) {
-                    self.run(Act::Theme(t), window, cx);
+                } else if let Some(choice) = Choice::parse(arg) {
+                    if let Choice::Custom(slug) = &choice {
+                        if !self.custom_themes.iter().any(|(s, _)| s == slug) {
+                            self.fail(format!(
+                                "テーマ「{slug}」がありません。~/.greencode/themes に JSON を置くか、パレットの「テーマを読み込む…」を使ってください"
+                            ));
+                            cx.notify();
+                            return true;
+                        }
+                    }
+                    self.run(Act::Theme(choice), window, cx);
+                } else if let Some(mode) = themes::ThemeMode::parse(arg) {
+                    self.run(Act::ThemeMode(mode), window, cx);
                 } else {
-                    self.fail("使い方: /theme [system|emerald|emerald-light|paper|sand|graphite|light|dark]");
+                    self.fail("使い方: /theme [名前 | system | auto]");
                 }
             }
             "diff" => self.run(Act::ToggleDiff, window, cx),
+            "clone" => {
+                if arg.is_empty() {
+                    self.run(Act::CloneProject, window, cx);
+                } else {
+                    self.start_clone(arg.to_string(), cx);
+                }
+            }
+            "project" => {
+                if arg.is_empty() {
+                    self.run(Act::NewProject, window, cx);
+                } else {
+                    self.start_new_project(arg.to_string(), window, cx);
+                }
+            }
+            "publish" => self.publish_project(cx),
+            "sync" => self.sync_default_branch(true, cx),
             "provider" => self.run(Act::AddProvider, window, cx),
             "login" => {
                 if arg.split_whitespace().count() > 1 {
@@ -2798,47 +3258,14 @@ impl Workspace {
                 self.notice(text);
             }
             "help" => self.notice(HELP),
+            "voice" => self.voice_command(arg, cx),
             "usage" => self.run(Act::Usage, window, cx),
+            "usage-limits" => self.usage_limits_notice(cx),
+            "usage-history" => self.run(Act::UsageHistory, window, cx),
             _ => return false,
         }
         cx.notify();
         true
-    }
-
-    fn theme_id(&self) -> ThemeId {
-        ThemeId::from_json(&self.ui["theme"])
-    }
-
-    fn window_is_dark(window: &Window) -> bool {
-        matches!(
-            window.appearance(),
-            gpui_kit::WindowAppearance::Dark | gpui_kit::WindowAppearance::VibrantDark
-        )
-    }
-
-    fn pal(&self, cx: &App) -> Pal {
-        Pal::for_theme(self.theme_id(), cx.theme().is_dark())
-    }
-
-    fn apply_theme(&self, window: &mut Window, cx: &mut App) {
-        let id = self.theme_id();
-        if id == ThemeId::System {
-            Theme::sync_system_appearance(Some(window), cx);
-        } else {
-            let dark = id.is_dark(Self::window_is_dark(window));
-            Theme::change(
-                if dark {
-                    gpui_kit::component::ThemeMode::Dark
-                } else {
-                    gpui_kit::component::ThemeMode::Light
-                },
-                Some(window),
-                cx,
-            );
-        }
-        let dark = cx.theme().is_dark();
-        let pal = Pal::for_theme(id, dark);
-        Theme::update(cx, |t| pal.sync_kit_theme(t, dark));
     }
 
     fn thread(&self) -> &Thread {
@@ -2860,9 +3287,9 @@ impl Workspace {
         if !t.loaded {
             // A thread that was never prompted has no session file yet.
             if Session::open(&t.meta.id).is_some() {
-                match Session::load(&t.meta.id) {
-                    Ok((_, messages)) => t.items = thread_view::items_from(&messages),
-                    Err(e) => t.items = vec![Item::Error(format!("{e:#}").into())],
+                match thread_view::session_items(&t.meta.id) {
+                    Ok(items) => t.items = items,
+                    Err(e) => t.items = vec![Item::Error(e.into())],
                 }
             }
             t.loaded = true;
@@ -2872,6 +3299,7 @@ impl Workspace {
         self.refresh_git(cx);
         self.recall = None;
         self.refresh_diff(cx);
+        self.sync_default_branch(false, cx);
         let draft = self.thread().draft.clone();
         if self.terminal_visible && self.active_terminal().is_none() {
             self.new_terminal(window, cx);
@@ -2887,6 +3315,8 @@ impl Workspace {
         if ix >= self.threads.len() || ix == self.active {
             return;
         }
+        let from = self.threads[self.active].meta.id.clone();
+        self.nav.visit(&from);
         self.finish_queue_edit(false, window, cx);
         let active = self.active;
         self.threads[active].draft = self
@@ -2931,12 +3361,12 @@ impl Workspace {
             chosen
         };
         if in_worktree {
-            match worktree::create(&project, &self.worktree_base(), &meta.id) {
+            match self.make_worktree(&project, &meta.id) {
                 Ok(path) => {
                     meta.cwd = path;
                     meta.repo = Some(project);
                 }
-                Err(e) => return self.fail(format!("worktree を作成できません: {e:#}")),
+                Err(e) => return self.fail(e),
             }
         }
         self.threads.insert(0, Thread::new(meta, true, mode));
@@ -2951,12 +3381,19 @@ impl Workspace {
         if !self.show_diff && self.files_panel.is_none() {
             return;
         }
-        let cwd = self.thread().meta.cwd.clone();
+        let scope = self.diff_scope();
+        let source = self.diff_source_scope();
         let id = self.thread().meta.id.clone();
         cx.spawn(async move |this, cx| {
             let diff = cx
                 .background_executor()
-                .spawn(async move { worktree::diff(&cwd) })
+                .spawn(async move {
+                    if matches!(&source.source, greencode_core::git::DiffSource::Uncommitted) {
+                        scope.diff()
+                    } else {
+                        source.diff()
+                    }
+                })
                 .await;
             this.update(cx, |this, cx| {
                 if this.apply_diff(generation, &id, &diff) {
@@ -3096,6 +3533,22 @@ impl Workspace {
         }
     }
 
+    /// Applies a thinking level to the config, ui.json, and every live agent.
+    fn set_effort(&mut self, level: Option<String>) {
+        self.notice(format!(
+            "思考の強さ: {}",
+            level.as_deref().unwrap_or("既定")
+        ));
+        self.ui["effort"] = json!(level);
+        self.save_ui();
+        Arc::make_mut(&mut self.cfg).effort = level;
+        for t in &self.threads {
+            if let Some(cmd) = &t.cmd {
+                let _ = cmd.send(Command::Config(self.cfg.clone()));
+            }
+        }
+    }
+
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.queue_edit.is_some() {
             self.finish_queue_edit(true, window, cx);
@@ -3108,6 +3561,13 @@ impl Workspace {
             return;
         }
         let text = self.input.read(cx).value().trim().to_string();
+        if over_limit(&text) {
+            self.notice(format!(
+                "メッセージは 120,000 文字までです（現在 {} 文字）。下書きはそのまま残しています",
+                text.chars().count()
+            ));
+            return;
+        }
         if self
             .thread()
             .dialog
@@ -3117,6 +3577,10 @@ impl Workspace {
             self.answer_ask((!text.is_empty()).then_some(text), cx);
             self.input.update(cx, |s, cx| set_input(s, "", window, cx));
             return;
+        }
+        if self.thread().dialog.as_ref().is_some_and(|(request, _)| request["method"] == "secret") {
+            // The secret is typed into the dialog's own masked field, not the composer.
+            return self.secret_save(window, cx);
         }
         if let Some((request, _)) = &self.thread().dialog {
             let value = if request["method"] == "confirm" {
@@ -3135,8 +3599,9 @@ impl Workspace {
             } else {
                 json!({"value": text})
             };
-            self.answer_dialog(value, cx);
+            // Clear while the dialog is still open so the answer never becomes the thread's draft.
             self.input.update(cx, |s, cx| set_input(s, "", window, cx));
+            self.answer_dialog(value, cx);
             return;
         }
         if text.is_empty() {
@@ -3170,10 +3635,17 @@ impl Workspace {
         }
         self.threads[self.active].last_user_at = now();
         self.recall = None;
+        if text.trim() == "/commit"
+            && self.thread().meta.backend == "native"
+            && !self.cfg.integration_opts.commit.enabled
+        {
+            self.notice("commit.enabled = false のため /commit は無効です".to_string());
+            return;
+        }
         let text = match text.as_str() {
             "/init" | "/review" | "/commit"
                 if self.thread().meta.backend == "native"
-                    && skills::command(&self.thread().meta.cwd, &text[1..]).is_none() =>
+                    && skills::command(&self.thread().meta.cwd, &self.cfg, &text[1..]).is_none() =>
             {
                 match text.as_str() {
                     "/init" => INIT_PROMPT,
@@ -3183,6 +3655,12 @@ impl Workspace {
                 .to_string()
             }
             _ => text,
+        };
+        // `@thread:ID` and `#N` carry a short reference block; a provider command is sent verbatim.
+        let text = if text.starts_with('/') {
+            text
+        } else {
+            self.expand_mentions(text)
         };
         // Follow-up behavior "steer": a message sent during a run goes into that run when the agent supports it.
         if self.ui["follow_up_steer"] == true
@@ -3214,31 +3692,40 @@ impl Workspace {
         self.start_prompt(text, cx);
     }
 
-    /// `/schedule`: starts every due scheduled prompt in a new background thread of its project.
+    /// `/schedule` and agents' `schedule_task`: starts every due scheduled prompt in a new background thread of its project.
     fn run_due_schedules(&mut self, now: u64, cx: &mut Context<Self>) {
         let mut due = vec![];
         for s in self.ui["schedules"].as_array_mut().into_iter().flatten() {
-            let (Some(every), Some(prompt), Some(project)) = (
-                s["every"].as_u64(),
-                s["prompt"].as_str(),
-                s["project"].as_str(),
-            ) else {
+            let (Some(prompt), Some(project)) = (s["prompt"].as_str(), s["project"].as_str()) else {
                 continue;
             };
-            if s["next"].as_u64().unwrap_or(0) > now || every == 0 {
+            if s["enabled"] == false || s["next"].as_u64().unwrap_or(0) > now {
                 continue;
             }
-            due.push((prompt.to_string(), PathBuf::from(project)));
-            s["next"] = json!(now + every);
+            let weekdays: Vec<u64> = s["weekdays"].as_array().into_iter().flatten().filter_map(Value::as_u64).collect();
+            let next = match (s["every"].as_u64().filter(|e| *e > 0), s["time"].as_str()) {
+                (Some(every), _) => now + every,
+                (None, Some(time)) => match schedule::next_fixed(now, time, &weekdays, schedule::utc_offset()) {
+                    Some(next) => next,
+                    None => continue,
+                },
+                (None, None) => continue,
+            };
+            let title = s["title"].as_str().unwrap_or(prompt).chars().take(50).collect::<String>();
+            let target = (s["backend"].as_str().map(str::to_string), s["model"].as_str().map(str::to_string));
+            due.push((prompt.to_string(), PathBuf::from(project), title, target));
+            s["next"] = json!(next);
         }
         if due.is_empty() {
             return;
         }
         self.save_ui();
-        for (prompt, project) in due {
-            let mut meta = Meta::new(project, self.cfg.model.clone(), "native".into());
+        for (prompt, project, title, (backend, model)) in due {
+            let backend = backend.unwrap_or_else(|| "native".into());
+            let model = model.unwrap_or_else(|| if backend == "native" { self.cfg.model.clone() } else { "default".into() });
+            let mut meta = Meta::new(project, model, backend);
             meta.subagent_model = self.cfg.subagent_model.clone();
-            meta.title = format!("⏱ {}", prompt.chars().take(50).collect::<String>());
+            meta.title = format!("⏱ {title}");
             self.threads
                 .insert(0, Thread::new(meta, true, self.cfg.mode));
             self.active += 1;
@@ -3317,8 +3804,30 @@ impl Workspace {
         self.start_in(self.active, text, cx)
     }
 
+    /// Palette `リセット時に再開`: queues the failed prompt as a reminder for the provider's limit reset.
+    fn resume_at_reset(&mut self) {
+        let t = self.thread();
+        let (at, id, prompt) = (t.reset_at, t.meta.id.clone(), t.last_prompt.clone());
+        let Some(prompt) = prompt.filter(|_| at > now()) else {
+            self.notice("再開できるプロンプトまたはリセット時刻がありません");
+            return;
+        };
+        if !self.ui["reminders"].is_array() {
+            self.ui["reminders"] = json!([]);
+        }
+        self.ui["reminders"].as_array_mut().unwrap().push(json!({"thread": id, "at": at, "prompt": prompt}));
+        self.save_ui();
+        self.notice(format!("{} にこのスレッドへ再送します（GreenCode の起動中のみ）", clock_local(at)));
+    }
+
     /// Sends `text` as the next turn of thread `ix`, starting its agent if needed.
     fn start_in(&mut self, ix: usize, text: String, cx: &mut Context<Self>) {
+        // The delegated child's backend is owned by its parent's task; a second one would fork its history.
+        if greencode_core::delegate::is_running(&self.threads[ix].meta.id) {
+            self.restore_text(ix, text, cx);
+            self.fail("委任タスクの実行中です。親スレッドの「指示」から送ってください");
+            return;
+        }
         if self.handoffs.contains(&self.threads[ix].meta.id)
             || greencode_core::handoff::is_open(&self.threads[ix].meta.id)
         {
@@ -3327,6 +3836,7 @@ impl Workspace {
             return;
         }
         self.threads[ix].last_prompt = Some(text.clone());
+        self.threads[ix].reset_at = 0;
         if let Some(error) = &self.cfg_error {
             self.fail(format!("設定を読み込めません: {error}"));
             return;
@@ -3347,6 +3857,7 @@ impl Workspace {
         let t = &mut self.threads[ix];
         t.warm = false;
         t.subs.clear();
+        t.bg_wait = None;
         if t.meta.title.is_empty() {
             t.meta.title = text.chars().take(60).collect();
         }
@@ -3375,6 +3886,27 @@ impl Workspace {
             || matches!(&ev, Event::Remote { command, .. } if command == "get_state" || command == "acp_state");
         let is_text = matches!(&ev, Event::Text(_));
         let done = matches!(&ev, Event::Done);
+        // Orchestration requests that concern the workspace, not this thread's transcript.
+        let ev = match ev {
+            Event::Dialog { request, reply } if request["method"] == "schedule" => {
+                let _ = reply.send(self.schedule_request(&request));
+                return;
+            }
+            Event::Remote { command, data } if command == "thread_opened" => {
+                if let Ok(meta) = serde_json::from_value::<Meta>(data["meta"].clone()) {
+                    self.attach_thread(meta, cx);
+                }
+                return;
+            }
+            Event::Remote { command, data } if command == "thread_renamed" => {
+                if let Some(t) = self.threads.iter_mut().find(|t| data["id"] == t.meta.id.as_str()) {
+                    t.meta.title = data["title"].as_str().unwrap_or_default().to_string();
+                }
+                cx.notify();
+                return;
+            }
+            ev => ev,
+        };
         let Some(ix) = self.threads.iter().position(|t| t.meta.id == id) else {
             return;
         };
@@ -3468,7 +4000,8 @@ impl Workspace {
                 }
             }
             Event::Dialog { request, reply } => {
-                if request["secret"] == true {
+                // `method: secret` is answered here (masked input); other secret requests belong to the terminal.
+                if request["secret"] == true && request["method"] != "secret" {
                     let _ = reply.send(json!({"cancelled":true}));
                     t.items.push(Item::Notice(
                         "秘密情報の入力はエージェント本体のターミナルで行ってください".into(),
@@ -3506,6 +4039,25 @@ impl Workspace {
             }
             Event::Remote { command, data } => {
                 match command.as_str() {
+                    "rate_limit" => {
+                        let at = data["reset_at"].as_u64().unwrap_or(0);
+                        t.reset_at = at;
+                        let text = if at > now() {
+                            format!("利用上限に達しました。{} にリセットされます。パレットの「リセット時に再開」で予約できます", clock_local(at))
+                        } else {
+                            "利用上限に達しました。しばらくしてから再試行してください".to_string()
+                        };
+                        t.items.push(Item::Notice(text.into()));
+                        changed = Some((n, true));
+                    }
+                    "usage_update" => {
+                        if let Some(used) = data["used"].as_u64() {
+                            t.usage.input = used;
+                        }
+                        if let Some(amount) = data["cost"]["amount"].as_f64() {
+                            t.cost = amount;
+                        }
+                    }
                     "dialog_closed" => {
                         if t.dialog
                             .as_ref()
@@ -3519,17 +4071,35 @@ impl Workspace {
                             };
                         }
                     }
+                    // Finished delegated tasks or messages from other threads woke this idle thread: they are its next turn.
+                    // `injected_prompt`: a turn another thread started here.
+                    "delegate_wake" | "injected_prompt" => {
+                        if t.loaded || command == "delegate_wake" {
+                            t.items.push(Item::User(data["text"].as_str().unwrap_or("").to_string().into()));
+                            changed = Some((n, true));
+                        }
+                        if data["steer"] != true {
+                            t.status = Status::Running;
+                        }
+                    }
+                    "background_wait" => {
+                        t.bg_wait = (data["waiting"] == true).then(|| data["label"].as_str().unwrap_or("").to_string());
+                    }
                     "subagent" => {
                         // A cancel reports only name and state; the row keeps its agent.
                         if let (Some(name), Some(state)) =
                             (data["name"].as_str(), data["state"].as_str())
                         {
                             let detail = data["detail"].as_str().unwrap_or("");
+                            let task = data["task"].as_str().map(str::to_string);
                             if let Some(existing) = t.subs.iter_mut().find(|s| s.name == name) {
                                 existing.state = state.into();
                                 existing.detail = detail.into();
                                 if let Some(agent) = data["agent"].as_str() {
                                     existing.agent = agent.into();
+                                }
+                                if task.is_some() {
+                                    existing.task = task;
                                 }
                             } else if let Some(agent) = data["agent"].as_str() {
                                 t.subs.push(SubRow {
@@ -3537,6 +4107,7 @@ impl Workspace {
                                     agent: agent.into(),
                                     state: state.into(),
                                     detail: detail.into(),
+                                    task,
                                 });
                             }
                         }
@@ -3770,7 +4341,7 @@ impl Workspace {
                     os_notify(&format!("完了: {}", t.meta.title), cx);
                 }
                 // Goal mode: keep going until the agent declares the goal met. Stopping holds the queue, which pauses it.
-                if let Some((goal, turns)) = t.goal.clone() {
+                if let Some((goal, turns)) = t.goal.clone().filter(|_| !t.goal_paused) {
                     let met = t
                         .items
                         .iter()
@@ -3803,7 +4374,7 @@ impl Workspace {
                                 edit.index += 1;
                             }
                         }
-                        t.queue.push_front(format!("{GOAL_CONTINUE}{goal}\nWhen it is completely done and verified, end your reply with the line GOAL MET."));
+                        t.queue.push_front(goal::goal_continuation(&goal));
                     }
                 }
                 let t = &mut self.threads[ix];
@@ -3817,6 +4388,7 @@ impl Workspace {
                     self.refresh_diff(cx);
                 }
                 self.request_suggestion(ix, cx);
+                self.request_title(ix, false, cx);
             }
         }
         if visible {
@@ -4027,31 +4599,9 @@ impl Workspace {
         &self.files.as_ref().unwrap().1
     }
 
-    /// Completions for the word being typed: `/command` at the start, `@file` anywhere.
+    /// Completions for the word being typed: `/command`, `/skill`, `$skill`, `@file`, `@thread`, `#PR`.
     fn suggestions(&mut self, cx: &App) -> Vec<String> {
-        let value = self.input.read(cx).value();
-        let word = value.rsplit(char::is_whitespace).next().unwrap_or("");
-        if let Some(q) = value
-            .strip_prefix('/')
-            .filter(|q| !q.contains(char::is_whitespace))
-        {
-            self.commands
-                .iter()
-                .filter(|c| c.starts_with(q))
-                .take(6)
-                .map(|c| format!("/{c}"))
-                .collect()
-        } else if let Some(q) = word.strip_prefix('@') {
-            let q = q.to_lowercase();
-            self.files()
-                .iter()
-                .filter(|f| f.to_lowercase().contains(&q))
-                .take(6)
-                .map(|f| format!("@{f}"))
-                .collect()
-        } else {
-            vec![]
-        }
+        self.completions(cx)
     }
 
     /// Tab in the composer or the terminal field. The inputs bind Tab to indent, so `capture_action` routes here too.
@@ -4079,7 +4629,9 @@ impl Workspace {
             || self.account_form.is_some()
             || self.cite_form.is_some()
             || self.usage.is_some()
+            || self.workflows.is_some()
             || self.device_form.is_some()
+            || self.theme_edit.is_some()
             || self.settings.is_some();
         if modal {
             return false;
@@ -4098,6 +4650,9 @@ impl Workspace {
     }
 
     fn complete(&mut self, s: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.complete_mention(s, window, cx) {
+            return;
+        }
         let value = self.input.read(cx).value().to_string();
         let start = value
             .rmatch_indices(char::is_whitespace)
@@ -4120,6 +4675,35 @@ impl Workspace {
                 Act::NewWorktree,
             ),
             ("プロジェクトを開く…  ⌘O".into(), Act::OpenProject),
+            ("リポジトリをクローン…".into(), Act::CloneProject),
+            ("新規プロジェクトを作成…".into(), Act::NewProject),
+            ("GitHub に公開…".into(), Act::PublishProject),
+            ("差分: 未コミット".into(), Act::DiffSource(greencode_core::git::DiffSource::Uncommitted)),
+            ("差分: ベースブランチとの差分".into(), Act::DiffSource(greencode_core::git::DiffSource::Base)),
+            ("差分: コミットを選ぶ…".into(), Act::PickCommit),
+            ("既定ブランチを今すぐ同期".into(), Act::SyncDefaultBranch),
+            (
+                format!(
+                    "設定: 既定ブランチを最新に保つ（{}）",
+                    if self.ui["sync_default_branch"] == true { "オン" } else { "オフ" }
+                ),
+                Act::Toggle("sync_default_branch"),
+            ),
+            (
+                format!(
+                    "設定: ホスト別フォルダにクローン（ghq・{}）",
+                    if self.ui["clone_host_folders"] == true { "オン" } else { "オフ" }
+                ),
+                Act::Toggle("clone_host_folders"),
+            ),
+            (
+                format!(
+                    "設定: マージ時にエージェントのクレジットを除去（{}）",
+                    if self.ui["pr_strip_credits"] == true { "オン" } else { "オフ" }
+                ),
+                Act::Toggle("pr_strip_credits"),
+            ),
+            ("ようこそページを開く".into(), Act::Welcome(welcome::WelcomeAct::Open)),
             (
                 "Claude Code / Codex セッションをファイルから開く…".into(),
                 Act::ImportSessionFiles,
@@ -4184,15 +4768,33 @@ impl Workspace {
                 "他のアプリから GreenCode を使う（MCP）".into(),
                 Act::CopyMcp,
             ),
-            ("GreenCode を更新…".into(), Act::Update(false)),
+            ("プロンプトリンクをコピー".into(), Act::CopyPromptLink(false)),
+            (
+                "プロンプトリンクをコピー（リポジトリとモデル付き）".into(),
+                Act::CopyPromptLink(true),
+            ),
+            ("スレッドリンクをコピー".into(), Act::CopyThreadLink),
+            ("スレッドIDをコピー".into(), Act::CopyThreadId),
+            (
+                "最後の返答を Markdown でコピー".into(),
+                Act::CopyLastReply,
+            ),
+            ("プロンプトリンクを開く…".into(), Act::OpenPromptLink),
+            ("GreenCode を更新…".into(), Act::Update(false, Channel::default())),
             ("設定…  ⌘,".into(), Act::Settings),
             ("利用状況（サブスクリプション上限）".into(), Act::Usage),
+            ("使用量の履歴".into(), Act::UsageHistory),
+            ("ワークフロー（実行・回答・再開）".into(), Act::Workflows),
             ("選択範囲を引用  ⇧⌘C".into(), Act::Cite),
             ("スレッドを上へ移動  ⌥⌘↑".into(), Act::Move(true)),
             ("スレッドを下へ移動  ⌥⌘↓".into(), Act::Move(false)),
             (
                 "サイドチャットの回答を元のスレッドへ持ち帰る".into(),
                 Act::BringBack,
+            ),
+            (
+                "/btw の <inject> を元のスレッドへ送る".into(),
+                Act::InjectBtw,
             ),
             ("ターミナルを切り替え  ⌘J".into(), Act::Terminal),
             ("Pi / OMP の端末 UI に引き継ぐ".into(), Act::Handoff),
@@ -4227,6 +4829,13 @@ impl Workspace {
             ),
             (
                 format!(
+                    "設定: / メニューにスキルを表示 = {}（切り替え）",
+                    if self.ui["slash_skills_off"] == true { "オフ" } else { "オン" }
+                ),
+                Act::Toggle("slash_skills_off"),
+            ),
+            (
+                format!(
                     "設定: ツール呼び出し（{}）",
                     tool_visibility_label(self.tool_visibility())
                 ),
@@ -4246,12 +4855,16 @@ impl Workspace {
             ),
             (
                 "Git: プルリクエストを作成（gh）".into(),
-                Act::Shell("gh pr create --fill".into()),
+                if self.text_model().is_some() { Act::GeneratePr } else { Act::Shell("gh pr create --fill".into()) },
             ),
+            ("コミットメッセージを生成してコミット".into(), Act::GenerateCommit),
+            ("タイトルを再生成".into(), Act::RegenerateTitle),
+            ("テキスト生成モデルを切り替え（オフ → 各モデル）".into(), Act::CycleTextModel),
             ("最後のターンを取り消す（ファイルも戻す）".into(), Act::Undo),
             ("このターンの bash 変更の差分".into(), Act::BashDiff),
             ("エージェントセッションを再起動".into(), Act::RestartAgent),
             ("問題を調査（トリアージ）".into(), Act::Triage),
+            ("ゲストリンクを作成（24時間・読み取り専用）".into(), Act::GuestLink),
             ("最後の返答を読み上げ".into(), Act::Speak),
             ("スレッドを複製（フォーク）".into(), Act::Fork),
             ("会話をMarkdownでエクスポート".into(), Act::Export),
@@ -4280,11 +4893,54 @@ impl Workspace {
                 Act::OpenFile(greencode_core::home().join("allow")),
             ),
         ];
-        let active_theme = self.theme_id();
-        v.extend(ThemeId::ALL.into_iter().map(|t| {
-            let suffix = if t == active_theme { " ✓" } else { "" };
-            (format!("{}{suffix}", t.palette_label()), Act::Theme(t))
-        }));
+        if self.thread().reset_at > now() {
+            v.push(("リセット時に再開".into(), Act::ResumeAtReset));
+        }
+        for mode in themes::ThemeMode::ALL {
+            let suffix = if mode == self.theme_mode() { " ✓" } else { "" };
+            v.push((
+                format!("外観: {}{suffix}", mode.hint()),
+                Act::ThemeMode(mode),
+            ));
+        }
+        v.push((
+            "外観を切り替え: システム → ライト → ダーク  ⌘⌥⇧A".into(),
+            Act::CycleThemeMode,
+        ));
+        let (light, dark) = (self.theme_slot(false), self.theme_slot(true));
+        for choice in themes::choices(&self.custom_themes) {
+            let suffix = if choice == light && choice == dark {
+                " ✓"
+            } else if choice == light {
+                " ✓ライト"
+            } else if choice == dark {
+                " ✓ダーク"
+            } else {
+                ""
+            };
+            let label = match &choice {
+                Choice::Builtin(t) => t.palette_label().to_string(),
+                Choice::Custom(_) => format!("テーマ: {}", choice.label(&self.custom_themes)),
+            };
+            v.push((format!("{label}{suffix}"), Act::Theme(choice)));
+        }
+        v.push((
+            "テーマ: 読み込む…（VS Code / GreenCode JSON）".into(),
+            Act::ImportTheme,
+        ));
+        v.push(("テーマ: 書き出す…".into(), Act::ExportTheme));
+        v.push(("テーマ: 編集…".into(), Act::EditTheme));
+        v.push(("背景画像を選択…".into(), Act::PickBackground));
+        if self.background_image().is_some() {
+            v.push(("背景画像をクリア".into(), Act::ClearBackground));
+            v.push((
+                format!(
+                    "背景の不透明度: {}%（+10%）",
+                    (self.background_opacity() * 100.).round() as u32
+                ),
+                Act::BackgroundOpacity(10),
+            ));
+        }
         v.extend(greencode_core::agents::AGENTS.iter().map(|a| {
             (
                 format!("エージェントをインストール/更新: {}", a.name),
@@ -4398,10 +5054,18 @@ impl Workspace {
                 Act::Effort(Some(level.into())),
             ));
         }
+        v.push((
+            "思考の強さを上げる  ⌘⌥.".into(),
+            Act::EffortStep(true),
+        ));
+        v.push((
+            "思考の強さを下げる  ⌘⌥,".into(),
+            Act::EffortStep(false),
+        ));
         for key in self.thread().perms.allowed() {
             v.push((format!("許可ルールを削除: {key}"), Act::Revoke(key)));
         }
-        for m in [Mode::Ask, Mode::AutoEdit, Mode::Full, Mode::Plan] {
+        for &m in greencode_core::config::backend_modes(&self.thread().meta.backend) {
             v.push((format!("権限: {}", mode_label(m)), Act::Mode(m)));
         }
         // One picker for every backend, as in T3 Code: the thread's own models switch in place, the others pick the backend too.
@@ -4480,6 +5144,12 @@ impl Workspace {
         for m in &self.thread().models {
             v.push((format!("モデル: {m}"), Act::Model(m.clone())));
         }
+        // Last, so a typed `provider/model` still picks `モデル:` first. The settings row only cycles.
+        v.push(("テキスト生成モデル: オフ".into(), Act::TextModel(None)));
+        for m in self.models() {
+            let chosen = if self.text_model().as_deref() == Some(m.as_str()) { "（選択中）" } else { "" };
+            v.push((format!("テキスト生成モデル: {m}{chosen}"), Act::TextModel(Some(m))));
+        }
         if rpc_backend(&self.cfg, &self.thread().meta.backend) {
             for level in &self.thread().thinking_levels {
                 v.push((
@@ -4524,6 +5194,8 @@ impl Workspace {
                 ));
             }
         }
+        v.extend(self.repo_acts());
+        v.extend(self.project_acts());
         v
     }
 
@@ -4638,7 +5310,7 @@ impl Workspace {
         }
         self.palette_accounts = rows;
         self.palette_logins = self.login_rows();
-        self.palette_skills = greencode_core::skills::list(&self.thread().meta.cwd)
+        self.palette_skills = greencode_core::skills::list(&self.thread().meta.cwd, &self.cfg)
             .into_iter()
             .map(|skill| skill.name)
             .collect();
@@ -4652,6 +5324,19 @@ impl Workspace {
             .as_ref()
             .map(|(p, _)| p.read(cx).value().to_lowercase())
             .unwrap_or_default();
+        // A palette prompt is a text box: its only row submits the current value.
+        if let Some(prompt) = self.text_prompt {
+            return vec![(format!("⏎ {}: {}", prompt.action(), q), Act::SubmitText)];
+        }
+        // The commit picker lists the whole first-parent history, not the usual twelve rows.
+        if self.picking_commit {
+            return self
+                .diff_commits
+                .iter()
+                .filter(|(sha, subject)| format!("コミット: {sha} {subject}").to_lowercase().contains(&q))
+                .map(|(sha, subject)| (format!("コミット: {sha} {subject}"), Act::DiffCommit(sha.clone())))
+                .collect();
+        }
         if let Some(rows) = self
             .registry_entries
             .as_ref()
@@ -4693,6 +5378,8 @@ impl Workspace {
         if self.palette.take().is_some() {
             self.login_palette = false;
             self.registry_entries = None;
+            self.text_prompt = None;
+            self.picking_commit = false;
             self.input.update(cx, |s, cx| s.focus(window, cx));
         } else {
             self.refresh_prs(cx);
@@ -4831,6 +5518,7 @@ impl Workspace {
                     | Act::Steer
                     | Act::ResumeQueue
                     | Act::Retry
+                    | Act::ResumeAtReset
             )
         {
             self.fail("端末 UI への引き継ぎが未完了です");
@@ -4869,6 +5557,22 @@ impl Workspace {
                 return;
             }
         }
+        // The palette's text is lost when it closes; take it before that.
+        if matches!(act, Act::SubmitText) {
+            let value = self
+                .palette
+                .as_ref()
+                .map(|(input, _)| input.read(cx).value().to_string())
+                .unwrap_or_default();
+            let prompt = self.text_prompt.take();
+            if self.palette.is_some() {
+                self.toggle_palette(window, cx);
+            }
+            if let Some(prompt) = prompt {
+                self.submit_prompt(prompt, value, window, cx);
+            }
+            return;
+        }
         if self.palette.is_some() {
             self.toggle_palette(window, cx);
         }
@@ -4878,7 +5582,7 @@ impl Workspace {
             Act::RegistryRemove(id) => self.remove_registry(id, cx),
             Act::CopyWebhook(id) => self.copy_webhook(&id, cx),
             Act::DeleteWebhook(id) => self.delete_webhook(&id),
-            Act::Update(check) => self.update_app(check, cx),
+            Act::Update(check, channel) => self.update_app(check, channel, cx),
             Act::CopilotLogin => self.start_device_login(DeviceKind::Copilot, window, cx),
             Act::ChatGptLogin => self.start_device_login(DeviceKind::ChatGpt, window, cx),
             Act::MistralLogin => self.start_device_login(DeviceKind::Mistral, window, cx),
@@ -4896,6 +5600,38 @@ impl Workspace {
                     Err(e) => self.fail(format!("{e:#}")),
                 }
             }
+            Act::CopyPromptLink(with_repo) => self.copy_prompt_link(with_repo, cx),
+            Act::CopyThreadLink => self.copy_thread_link(cx),
+            Act::CopyThreadId => self.copy_thread_id(cx),
+            Act::CopyMessage(ix) => {
+                let text = self
+                    .thread()
+                    .items
+                    .get(ix)
+                    .and_then(find::item_text)
+                    .map(str::to_string);
+                match text {
+                    Some(text) => {
+                        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text));
+                        self.notice("メッセージをコピーしました");
+                    }
+                    None => self.notice("コピーできるメッセージではありません"),
+                }
+            }
+            Act::CopyLastReply => {
+                let text = self.thread().items.iter().rev().find_map(|item| match item {
+                    Item::Assistant(text) if !text.trim().is_empty() => Some(text.clone()),
+                    _ => None,
+                });
+                match text {
+                    Some(text) => {
+                        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text));
+                        self.notice("最後の返答を Markdown でコピーしました");
+                    }
+                    None => self.notice("コピーできる返答がありません"),
+                }
+            }
+            Act::OpenPromptLink => self.open_link_from_clipboard(window, cx),
             Act::CopyMcp => {
                 let sibling = std::env::current_exe()
                     .ok()
@@ -5110,10 +5846,20 @@ impl Workspace {
             Act::Pin => {
                 let t = &mut self.threads[self.active];
                 t.pinned = !t.pinned;
+                let action = nav::SidebarAction::Pin {
+                    id: t.meta.id.clone(),
+                    value: !t.pinned,
+                };
+                self.undo.record(action);
             }
             Act::Archive => {
                 let t = &mut self.threads[self.active];
                 t.archived = !t.archived;
+                let action = nav::SidebarAction::Archive {
+                    id: t.meta.id.clone(),
+                    value: !t.archived,
+                };
+                self.undo.record(action);
             }
             Act::ToggleArchived => self.show_archived = !self.show_archived,
             Act::ResumeQueue => {
@@ -5170,6 +5916,7 @@ impl Workspace {
             Act::Handoff => self.handoff(window, cx),
             Act::HandoffAdopt => self.adopt_handoff(cx),
             Act::InstallAgent(name) => self.install_agent(name, window, cx),
+            Act::Welcome(a) => self.welcome_act(a, window, cx),
             Act::ToggleGit => {
                 self.show_git = !self.show_git;
                 self.refresh_git(cx);
@@ -5178,14 +5925,32 @@ impl Workspace {
             Act::Unstage(paths) => self.git_path_action(paths, false, cx),
             Act::GitReview => self.run(Act::Prompt(REVIEW_PROMPT), window, cx),
             Act::Usage => self.toggle_usage(window, cx),
+            Act::UsageHistory => self.open_usage_history(cx),
+            Act::Workflows => self.toggle_workflows(window, cx),
+            Act::SecretAdd => self.secret_add(window, cx),
+            Act::SecretRemove(i) => self.secret_remove(i),
+            Act::SecretTest => self.secret_test(cx),
             Act::Cite => self.open_cite(window, cx),
             Act::SettingsTab(tab) => {
                 self.settings_tab = tab;
                 self.settings_scroll = ScrollHandle::default();
+                if SETTINGS_TABS.get(tab).is_some_and(|(name, _)| matches!(*name, "詳細設定" | "エージェント")) {
+                    self.advanced_load();
+                }
+            }
+            Act::SettingPick(key) => self.advanced_pick(key, window, cx),
+            Act::SettingSave => self.advanced_save(false, window, cx),
+            Act::SettingReset => self.advanced_save(true, window, cx),
+            Act::OmpTab(tab) => self.advanced.omp_tab = tab,
+            Act::OmpTool(name, on) => self.advanced_tool(name, on, window, cx),
+            Act::SettingWrite(key, value) => {
+                self.advanced.key = None;
+                self.advanced_write(&key, value);
             }
             Act::Settings => {
                 if self.settings.take().is_some() {
                     self.connection_name = None;
+                    self.connection_fields = None;
                     self.input.update(cx, |s, cx| s.focus(window, cx));
                 } else {
                     let mut subs = vec![];
@@ -5216,6 +5981,29 @@ impl Workspace {
                         .unwrap()
                         .0
                         .update(cx, |s, cx| s.set_value(display, window, cx));
+                    let hints = [
+                        "実行ファイル（~ 可、空欄は既定）",
+                        "追加の引数（スペース区切り）",
+                        "環境変数 KEY=VALUE（スペース区切り）",
+                        "追加するモデルID",
+                        "追加するモデルID",
+                    ];
+                    let mut field_subs = vec![];
+                    let mut create = |i: usize| {
+                        let state = cx.new(|cx| InputState::new(window, cx).placeholder(hints[i]));
+                        field_subs.push(cx.subscribe_in(
+                            &state,
+                            window,
+                            move |this, _, ev: &InputEvent, window, cx| {
+                                if let InputEvent::PressEnter { .. } = ev {
+                                    this.save_connection_field(i, window, cx)
+                                }
+                            },
+                        ));
+                        state
+                    };
+                    self.connection_fields = Some((std::array::from_fn(&mut create), field_subs));
+                    self.fill_connection_fields(window, cx);
                     self.settings = Some((fields, subs));
                     self.settings_tab = 0;
                     self.settings_scroll = ScrollHandle::default();
@@ -5307,6 +6095,27 @@ impl Workspace {
                     self.threads[self.active].queue.push_back(text);
                 }
             }
+            act @ (Act::AddRepo
+            | Act::AddRepoPath(_)
+            | Act::RemoveRepo(_)
+            | Act::ToggleWorktreeRepo(_)
+            | Act::DiffRepo(_)
+            | Act::RepoCommit(_)
+            | Act::RepoPush(_)) => self.repo_act(act, window, cx),
+            act @ (Act::CloneProject
+            | Act::NewProject
+            | Act::PublishProject
+            | Act::DiffSource(_)
+            | Act::DiffCommit(_)
+            | Act::PickCommit
+            | Act::PinProject(_)
+            | Act::ArchiveProject(_)
+            | Act::SetCloneRoot
+            | Act::EditText(_)
+            | Act::CycleWorktreeSubmodules
+            | Act::SyncDefaultBranch) => self.git_act(act, window, cx),
+            Act::MergePr(number, auto) => self.merge_pr(number, auto, cx),
+            Act::SubmitText => {}
             Act::Prompt(text) => {
                 if self.thread().status == Status::Idle {
                     self.threads[self.active].queue_held = false;
@@ -5346,7 +6155,13 @@ impl Workspace {
                 }
             }
             Act::Snooze(secs) => {
-                self.threads[self.active].snoozed = now() + secs;
+                let t = &mut self.threads[self.active];
+                let action = nav::SidebarAction::Snooze {
+                    id: t.meta.id.clone(),
+                    value: t.snoozed,
+                };
+                t.snoozed = now() + secs;
+                self.undo.record(action);
                 // Move on to the newest thread that is still visible.
                 if let Some(ix) = (0..self.threads.len()).find(|i| {
                     *i != self.active
@@ -5394,18 +6209,21 @@ impl Workspace {
                 self.save_ui();
                 self.notice("このプロジェクトの新規スレッドは、現在のモデル・バックエンド・権限で始まります");
             }
+            Act::SnapshotToggle => self.snapshot_toggle(window, cx),
+            Act::SnapshotText => self.snapshot_toggle_text(window, cx),
+            Act::SnapshotShortcut => self.snapshot_cycle_shortcut(window, cx),
+            Act::TextModel(m) => self.set_text_model(m),
+            Act::CycleTextModel => self.cycle_text_model(),
+            Act::RegenerateTitle => self.request_title(self.active, true, cx),
+            Act::GenerateCommit => self.generate_git(false, cx),
+            Act::GeneratePr => self.generate_git(true, cx),
             Act::CycleVoiceProvider => {
                 // Local transcription uses whisper-cli when it and a model are installed.
                 let local = greencode_core::voice::local_available();
-                self.ui["voice_provider"] = json!(match self.ui["voice_provider"].as_str() {
-                    Some("openai") => "groq",
-                    Some("groq") if local => "local",
-                    Some("groq") => "off",
-                    Some("local") => "off",
-                    _ => "openai",
-                });
+                self.ui["voice_provider"] = json!(voice::next_provider(self.ui["voice_provider"].as_str(), local));
                 self.save_ui();
             }
+            Act::VoiceAction(what) => self.voice_action(what, cx),
             Act::ToggleExt(name) => {
                 let off = &mut Arc::make_mut(&mut self.cfg).ext_off;
                 let now_off = !off.iter().any(|o| o == name);
@@ -5445,6 +6263,40 @@ impl Workspace {
                 self.ui[key] = json!(self.ui[key] != true);
                 self.save_ui();
                 self.list.reset(self.thread().items.len());
+                if key == "labs_workflows" {
+                    if self.ui[key] == true {
+                        self.start_workflow_engine(cx);
+                        self.notice("ワークフローをオンにしました（設定 → ラボ）");
+                    } else {
+                        self.stop_workflow_engine();
+                        self.notice("ワークフローをオフにしました。実行は保持され、オンに戻すと続きから進みます");
+                    }
+                }
+            }
+            Act::SendShortcut => {
+                let cmd_enter = self.ui["send_shortcut"] != "cmd+enter";
+                self.ui["send_shortcut"] = json!(if cmd_enter { "cmd+enter" } else { "enter" });
+                self.input
+                    .update(cx, |s, cx| s.set_submit_on_enter(!cmd_enter, cx));
+                self.save_ui();
+                self.notice(if cmd_enter {
+                    "送信キー: ⌘Enter で送信（Enter は改行）"
+                } else {
+                    "送信キー: Enter で送信（Shift+Enter は改行）"
+                });
+            }
+            Act::CycleQuitMode => {
+                let next = match self.ui["quit_mode"].as_str() {
+                    Some("direct") => "hold",
+                    Some("hold") => "double",
+                    _ => "direct",
+                };
+                self.ui["quit_mode"] = json!(next);
+                self.save_ui();
+                self.notice(format!(
+                    "⌘Q の終了方法: {}",
+                    nav::quit_mode_label(Some(next))
+                ));
             }
             Act::RefreshBackendModels => {
                 self.refresh_backend_models(true, cx);
@@ -5522,14 +6374,26 @@ impl Workspace {
                 }
             }) {
                 Some(text) => {
-                    let spoken = speech_text(&text);
-                    spawn_external("/usr/bin/say", &[&spoken]);
+                    let cfg = self.cfg.clone();
+                    let rt = self.rt.handle().clone();
+                    rt.spawn(async move {
+                        let spoken = if cfg.services_opts.speech.enhanced {
+                            greencode_core::speech::enhanced(&cfg, &text).await
+                        } else {
+                            speech_text(&text)
+                        };
+                        greencode_core::speech::speak_voice(
+                            &cfg.services_opts.speech.voice,
+                            cfg.services_opts.speech.speed,
+                            &spoken,
+                        );
+                    });
                 }
                 None => self.notice("読み上げる返答がまだありません"),
             },
             // T3's `$skill`: load the skill's instructions into the draft so the agent can follow them.
             Act::Skill(name) => {
-                match greencode_core::skills::body(&self.thread().meta.cwd, &name) {
+                match greencode_core::skills::body(&self.thread().meta.cwd, &self.cfg, &name) {
                     Some(body) if !body.is_empty() => {
                         let mut draft = self.input.read(cx).value().to_string();
                         if !draft.is_empty() && !draft.ends_with('\n') {
@@ -5551,6 +6415,7 @@ impl Workspace {
                 }
                 _ => self.notice("再試行できるプロンプトがありません"),
             },
+            Act::ResumeAtReset => self.resume_at_reset(),
             Act::ToolVisibility => {
                 self.cycle_tool_visibility();
                 self.list.reset(self.thread().items.len());
@@ -5567,11 +6432,7 @@ impl Workspace {
                 match std::fs::create_dir_all(&dir) {
                     Ok(()) => {
                         self.new_thread(dir, false, window, cx);
-                        let prompt = "GreenCode の不具合を調査してください。\n\
-- `~/.greencode` の状態（sessions, runtime, ui.json。config.toml の秘密は表示しない）\n\
-- このリポジトリのソース（crates/）\n\
-症状: （ここに何が起きたかを書いてください）\n\
-原因の候補と確認手順を示してください。修正や GitHub への投稿は、必ず確認してから行ってください。";
+                        let prompt = greencode_core::triage::prompt("");
                         self.input.update(cx, |s, cx| {
                             set_input(s, prompt, window, cx);
                             s.focus(window, cx);
@@ -5579,6 +6440,17 @@ impl Workspace {
                         self.notice("症状を書き足して送信してください。");
                     }
                     Err(e) => self.fail(format!("作業フォルダを作成できません: {e}")),
+                }
+            }
+            // T3's "Share with guest": copy a read-only link that expires after 24 hours.
+            Act::GuestLink => {
+                let id = self.thread().meta.id.clone();
+                match greencode_core::remote::share_link(&id) {
+                    Ok(url) => {
+                        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(url));
+                        self.notice("ゲストリンクをコピーしました（24時間有効・読み取り専用）");
+                    }
+                    Err(e) => self.fail(format!("ゲストリンクを作成できません: {e:#}")),
                 }
             }
             Act::ToggleDisabled(key, name) => {
@@ -5678,10 +6550,38 @@ impl Workspace {
                         self.threads.insert(0, side);
                         self.active += 1;
                         self.select(0, window, cx);
+                        let question = if self.cfg.interaction_opts.btw.inject {
+                            format!("{question}\n\n{}", greencode_core::btw::DRAFT_INSTRUCTION)
+                        } else {
+                            question
+                        };
                         self.start_prompt(question, cx);
                     }
                     Some(Err(e)) => self.fail(format!("サイドチャットを開けません: {e:#}")),
                     None => self.fail("サイドチャットは、会話のあるネイティブスレッドで使えます"),
+                }
+            }
+            Act::InjectBtw => {
+                let parent = self.ui["side"][self.thread().meta.id.as_str()]
+                    .as_str()
+                    .and_then(|id| self.threads.iter().position(|t| t.meta.id == id));
+                let answer = self.thread().items.iter().rev().find_map(|i| {
+                    if let Item::Assistant(a) = i {
+                        Some(a.clone())
+                    } else {
+                        None
+                    }
+                });
+                let block = parent.zip(answer).and_then(|(ix, answer)| {
+                    greencode_core::btw::inject_block(&answer, self.cfg.interaction_opts.btw.inject).map(|t| (ix, t))
+                });
+                match block {
+                    Some((ix, text)) => {
+                        self.select(ix, window, cx);
+                        // Sent as a steer so it joins a running turn instead of waiting for it.
+                        self.run(Act::Ask(text), window, cx);
+                    }
+                    None => self.fail("このサイドチャットには送れる <inject> ブロックがありません"),
                 }
             }
             Act::BringBack => {
@@ -5776,18 +6676,25 @@ impl Workspace {
                     "サンドボックス: オフ"
                 });
             }
-            Act::Effort(level) => {
-                self.notice(format!(
-                    "思考の強さ: {}",
-                    level.as_deref().unwrap_or("既定")
-                ));
-                self.ui["effort"] = json!(level);
-                self.save_ui();
-                Arc::make_mut(&mut self.cfg).effort = level;
-                for t in &self.threads {
-                    if let Some(cmd) = &t.cmd {
-                        let _ = cmd.send(Command::Config(self.cfg.clone()));
-                    }
+            Act::Effort(level) => self.set_effort(level),
+            Act::EffortStep(up) => {
+                let levels =
+                    greencode_core::provider::effort_levels(&self.cfg, &self.thread().meta.model);
+                if levels.is_empty() {
+                    self.notice("このモデルには思考の強さの段階がありません");
+                } else {
+                    let current = self
+                        .cfg
+                        .effort
+                        .as_deref()
+                        .and_then(|value| levels.iter().position(|level| *level == value));
+                    let next = match current {
+                        Some(i) if up => levels[(i + 1) % levels.len()],
+                        Some(i) => levels[(i + levels.len() - 1) % levels.len()],
+                        None if up => levels[0],
+                        None => levels[levels.len() - 1],
+                    };
+                    self.set_effort(Some(next.to_string()));
                 }
             }
             Act::OpenCodeEffort(level) => {
@@ -5825,10 +6732,87 @@ impl Workspace {
                     None => self.notice(format!("許可ルールを削除しました: {key}")),
                 }
             }
-            Act::Theme(theme) => {
-                self.ui["theme"] = theme.to_json();
+            Act::Theme(choice) => self.set_theme(choice, window, cx),
+            Act::ThemeSlot(dark, choice) => {
+                themes::set_slot(&mut self.ui, dark, &choice);
                 self.save_ui();
                 self.apply_theme(window, cx);
+                cx.notify();
+            }
+            Act::ThemeMode(mode) => self.set_theme_mode(mode, window, cx),
+            Act::CycleThemeMode => {
+                let mode = self.theme_mode().cycle();
+                self.set_theme_mode(mode, window, cx);
+            }
+            Act::ImportTheme => {
+                let rx = cx.prompt_for_paths(PathPromptOptions {
+                    files: true,
+                    directories: false,
+                    multiple: false,
+                    prompt: Some("テーマを読み込む（VS Code / GreenCode JSON）".into()),
+                });
+                cx.spawn_in(window, async move |this, cx| {
+                    if let Ok(Ok(Some(paths))) = rx.await {
+                        if let Some(path) = paths.first() {
+                            this.update_in(cx, |this, window, cx| {
+                                this.import_theme(path, window, cx)
+                            })
+                            .ok();
+                        }
+                    }
+                })
+                .detach();
+            }
+            Act::ExportTheme => self.export_theme(window),
+            Act::EditTheme => self.open_theme_editor(window, cx),
+            Act::PickBackground => {
+                let rx = cx.prompt_for_paths(PathPromptOptions {
+                    files: true,
+                    directories: false,
+                    multiple: false,
+                    prompt: Some("背景画像（JPEG / PNG / WebP、16 MB まで）".into()),
+                });
+                cx.spawn_in(window, async move |this, cx| {
+                    if let Ok(Ok(Some(paths))) = rx.await {
+                        if let Some(path) = paths.first() {
+                            this.update_in(cx, |this, window, cx| {
+                                match greencode_core::theme::check_background(path) {
+                                    Ok(()) => {
+                                        this.ui["background_image"] =
+                                            json!(path.to_string_lossy());
+                                        this.save_ui();
+                                        this.apply_theme(window, cx);
+                                        this.notice(format!(
+                                            "背景画像を設定しました（不透明度 {}%）",
+                                            (this.background_opacity() * 100.).round() as u32
+                                        ));
+                                    }
+                                    Err(e) => this.fail(format!("背景画像を設定できません: {e:#}")),
+                                }
+                                cx.notify();
+                            })
+                            .ok();
+                        }
+                    }
+                })
+                .detach();
+            }
+            Act::ClearBackground => {
+                if let Some(object) = self.ui.as_object_mut() {
+                    object.remove("background_image");
+                }
+                self.save_ui();
+                self.apply_theme(window, cx);
+                self.notice("背景画像をクリアしました");
+                cx.notify();
+            }
+            Act::BackgroundOpacity(delta) => {
+                let percent = ((self.background_opacity() * 100.).round() as i16 + delta)
+                    .clamp(0, 100);
+                self.ui["background_opacity"] = json!(percent);
+                self.save_ui();
+                self.apply_theme(window, cx);
+                cx.notify();
             }
             Act::ImportSessionFiles => {
                 let rx = cx.prompt_for_paths(PathPromptOptions {
@@ -6284,8 +7268,10 @@ impl Workspace {
             || self.account_form.is_some()
             || self.cite_form.is_some()
             || self.usage.is_some()
+            || self.workflows.is_some()
             || self.device_form.is_some()
             || self.terminal_visible
+            || self.theme_edit.is_some()
             || self.settings.is_some()
         {
             return false;
@@ -6371,6 +7357,25 @@ impl Workspace {
                 return;
             }
         }
+        if self.terminal_visible
+            && k.modifiers.shift
+            && matches!(k.key.as_str(), "pageup" | "pagedown" | "home" | "end")
+            && (!matches!(k.key.as_str(), "home" | "end") || cmd)
+            && self.active_terminal().is_some_and(|t| {
+                !t.raw() && t.input.read(cx).focus_handle(cx).is_focused(window)
+            })
+        {
+            let term = self.active_terminal().unwrap();
+            match k.key.as_str() {
+                "pageup" => term.scroll_by_page(false),
+                "pagedown" => term.scroll_by_page(true),
+                "home" => term.scroll_to_top(),
+                _ => term.scroll.scroll_to_bottom(),
+            }
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
         match k.key.as_str() {
             "escape" if self.model_picker.is_some() => self.close_model_picker(window, cx),
             "down" | "up" if self.model_picker.is_some() => {
@@ -6381,12 +7386,22 @@ impl Workspace {
             "down" | "up" if self.palette.is_some() => {
                 let n = self.filtered_acts(cx).len().max(1);
                 self.palette_ix = (self.palette_ix + if k.key == "down" { 1 } else { n - 1 }) % n;
-                if self.login_palette || self.registry_entries.is_some() {
+                if self.login_palette || self.registry_entries.is_some() || self.picking_commit {
                     self.palette_scroll.scroll_to_item(self.palette_ix);
                 }
                 cx.notify();
             }
             "escape" if self.usage.is_some() => self.toggle_usage(window, cx),
+            "escape" if self.workflows.is_some() => self.toggle_workflows(window, cx),
+            key if self.usage.is_some()
+                && self.palette.is_none()
+                && !(cmd || k.modifiers.control || k.modifiers.alt)
+                && self.input.read(cx).value().is_empty()
+                && self.usage_key(key, cx) =>
+            {
+                cx.stop_propagation()
+            }
+            "escape" if self.find.is_open() => self.close_find(window, cx),
             "escape" if self.pr_panel.is_some() && self.palette.is_none() => {
                 self.toggle_prs(window, cx)
             }
@@ -6396,8 +7411,13 @@ impl Workspace {
             "escape" if self.device_form.is_some() => self.close_device_form(window, cx),
             "escape" if self.oauth_form.is_some() => self.close_oauth_form(window, cx),
             "escape" if self.provider_form.is_some() => self.close_provider_form(window, cx),
+            "escape" if self.theme_edit.is_some() => self.close_theme_editor(window, cx),
             "escape" if self.settings.is_some() => self.run(Act::Settings, window, cx),
+            "," if cmd && k.modifiers.alt => self.run(Act::EffortStep(false), window, cx),
+            "." if cmd && k.modifiers.alt => self.run(Act::EffortStep(true), window, cx),
             "," if cmd => self.run(Act::Settings, window, cx),
+            "q" if cmd => self.request_quit(ev.is_held, cx),
+            "f6" => self.cycle_focus(shift, window, cx),
             // ctrl-c, ctrl-d, ctrl-z and the like go to the terminal's foreground program as control bytes.
             // Only while the terminal's input has focus: the composer keeps its own ctrl-a, ctrl-e and so on.
             key if k.modifiers.control
@@ -6423,7 +7443,11 @@ impl Workspace {
                 self.dismiss_suggestion(cx)
             }
             "escape" if self.thread().dialog.is_some() => {
-                self.answer_dialog(json!({"cancelled":true}), cx)
+                if self.thread().dialog.as_ref().is_some_and(|(request, _)| request["method"] == "secret") {
+                    self.secret_refuse(window, cx)
+                } else {
+                    self.answer_dialog(json!({"cancelled":true}), cx)
+                }
             }
             "escape" if self.thread().pending.is_some() => self.answer(Decision::Deny, cx),
             "escape" if self.thread().status == Status::Running => self.stop(),
@@ -6455,11 +7479,11 @@ impl Workspace {
                     self.edit_queue(i, window, cx);
                 }
             }
-            "a" if cmd && shift => {
+            "a" if cmd && shift && !k.modifiers.alt => {
                 let mode = self.thread().perms.mode();
                 self.run(
                     Act::Mode(Self::cycle(
-                        &[Mode::Ask, Mode::AutoEdit, Mode::Full, Mode::Plan],
+                        greencode_core::config::backend_modes(&self.thread().meta.backend),
                         &mode,
                     )),
                     window,
@@ -6502,8 +7526,26 @@ impl Workspace {
             "d" if cmd => self.run(Act::ToggleDiff, window, cx),
             "e" if cmd && shift => self.run(Act::ToggleFiles, window, cx),
             "c" if cmd && shift && self.palette.is_none() => self.run(Act::Cite, window, cx),
+            "a" if cmd && k.modifiers.alt && shift => {
+                self.run(Act::CycleThemeMode, window, cx)
+            }
+            "a" if cmd && k.modifiers.alt => self.open_palette("テーマ: ", window, cx),
             "k" if cmd => self.toggle_palette(window, cx),
+            "z" if cmd && !shift => {
+                if self.undo_sidebar() {
+                    cx.stop_propagation();
+                }
+            }
             "z" if cmd && shift && self.palette.is_none() => self.run(Act::Undo, window, cx),
+            "f" if cmd && self.palette.is_none() && self.settings.is_none() => {
+                self.open_find(window, cx)
+            }
+            "[" if cmd && self.palette.is_none() && self.settings.is_none() => {
+                self.navigate(true, window, cx)
+            }
+            "]" if cmd && self.palette.is_none() && self.settings.is_none() => {
+                self.navigate(false, window, cx)
+            }
             // Text pastes fall through to the input.
             "v" if cmd
                 && self.model_picker.is_none()
@@ -6514,7 +7556,8 @@ impl Workspace {
                 && self.account_form.is_none()
                 && self.cite_form.is_none()
                 && self.usage.is_none()
-                && self.device_form.is_none() =>
+                && self.device_form.is_none()
+                && self.theme_edit.is_none() =>
             {
                 if !self.paste_attachment(window, cx) {
                     return;
@@ -6544,6 +7587,7 @@ impl Workspace {
         let dot = match t.status {
             Status::Running => Some(pal.accent),
             Status::Waiting => Some(pal.warn),
+            Status::Idle if t.bg_wait.is_some() => Some(pal.accent),
             Status::Idle => None,
         };
         div()
@@ -6610,11 +7654,17 @@ impl Workspace {
                 continue;
             }
             let p = t.project();
+            // An archived project drops out of the sidebar; the thread being viewed stays reachable.
+            if self.project_archived(&p) && i != self.active {
+                continue;
+            }
             match groups.iter_mut().find(|(g, _)| *g == p) {
                 Some((_, v)) => v.push(i),
                 None => groups.push((p, vec![i])),
             }
         }
+        let pinned = self.pinned_projects();
+        groups.sort_by_key(|(p, _)| pinned.iter().position(|q| q == p).unwrap_or(usize::MAX));
         let mut body = div()
             .id("threads")
             .flex_1()
@@ -6624,18 +7674,52 @@ impl Workspace {
         for (project, ixs) in groups {
             let mut ixs = ixs;
             ixs.sort_by_key(|i| !self.threads[*i].pinned);
+            let (pinned_now, archived_now) =
+                (self.project_pinned(&project), self.project_archived(&project));
+            let pin_act = Act::PinProject(project.clone());
+            let pin_label = if pinned_now { "📌" } else { "ピン" };
+            let archive_act = Act::ArchiveProject(project.clone());
+            let archive_label = if archived_now { "復元" } else { "保管" };
+            let pin_id = format!("project-pin-{}", project.display());
+            let archive_id = format!("project-archive-{}", project.display());
             body = body.child(
                 div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
                     .px_2()
                     .pt_3()
                     .pb_1()
                     .text_xs()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(pal.muted)
-                    .child(SharedString::from(project_name(&project))),
+                    .child(div().flex_1().truncate().child(SharedString::from(format!(
+                        "{}{}",
+                        project_name(&project),
+                        if archived_now { "（保管済み）" } else { "" }
+                    ))))
+                    .child(chip(pin_id, pin_label, pal).on_click(
+                        cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.run(pin_act.clone(), window, cx)
+                        }),
+                    ))
+                    .child(chip(archive_id, archive_label, pal).on_click(
+                        cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.run(archive_act.clone(), window, cx)
+                        }),
+                    )),
             );
-            for i in ixs {
+            // Delegated child threads sit indented under their parent when both are listed here.
+            let is_child = |i: &usize| {
+                let parent = self.threads[*i].meta.parent.as_deref();
+                parent.is_some_and(|p| ixs.iter().any(|j| self.threads[*j].meta.id == p))
+            };
+            for &i in ixs.iter().filter(|i| !is_child(i)) {
                 body = body.child(self.thread_row(i, pal, cx));
+                let id = self.threads[i].meta.id.as_str();
+                for &c in ixs.iter().filter(|c| self.threads[**c].meta.parent.as_deref() == Some(id)) {
+                    body = body.child(self.thread_row(c, pal, cx).ml_4());
+                }
             }
         }
         if !settled.is_empty() {
@@ -6760,6 +7844,7 @@ impl Workspace {
                         )),
                     ),
             )
+            .track_focus(&self.sidebar_focus)
     }
 
     fn item(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -6979,22 +8064,45 @@ impl Workspace {
             }
             centred(column().child(card))
         });
-        // T3 offers a retry after a failed turn.
+        // T3 offers a retry after a failed turn, and a resume when the provider reported a limit reset.
         let retry =
             (matches!(item, Item::Error(_))
                 && ix + 1 == t.items.len()
                 && t.status == Status::Idle
                 && t.last_prompt.is_some())
             .then(|| {
-                div().flex().justify_end().px_6().child(
-                    chip(("retry", ix), "再試行", pal).on_click(cx.listener(
-                        |this, _: &ClickEvent, window, cx| this.run(Act::Retry, window, cx),
-                    )),
-                )
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap_2()
+                    .px_6()
+                    .child(
+                        chip(("retry", ix), "再試行", pal).on_click(cx.listener(
+                            |this, _: &ClickEvent, window, cx| this.run(Act::Retry, window, cx),
+                        )),
+                    )
+                    .children((t.reset_at > now()).then(|| {
+                        chip(("resume-at-reset", ix), "リセット時に再開", pal).on_click(
+                            cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.run(Act::ResumeAtReset, window, cx)
+                            }),
+                        )
+                    }))
             });
+        let copy = matches!(item, Item::User(_) | Item::Assistant(_)).then(|| {
+            div().flex().justify_end().px_6().child(
+                chip(("copy-message", ix), "コピー", pal).on_click(cx.listener(
+                    move |this, _: &ClickEvent, window, cx| {
+                        this.run(Act::CopyMessage(ix), window, cx)
+                    },
+                )),
+            )
+        });
         div()
             .children(header)
             .child(thread_view::render_item(ix, item, pal, mono, toggle))
+            .children(copy)
             .children(edit)
             .children(card)
             .children(retry)
@@ -7024,6 +8132,17 @@ impl Workspace {
                 }
             });
         }
+        // A secret request is answered in its own masked field, so focus that instead of the composer.
+        if self.thread().dialog.as_ref().is_some_and(|(request, _)| request["method"] == "secret") {
+            let entry = self.secrets.entry.clone();
+            if !entry.read(cx).focus_handle(cx).is_focused(window) {
+                cx.defer_in(window, move |this, window, cx| {
+                    if this.thread().dialog.as_ref().is_some_and(|(request, _)| request["method"] == "secret") {
+                        entry.update(cx, |s, cx| s.focus(window, cx));
+                    }
+                });
+            }
+        }
         let has_selection = gpui_kit::base::TextSelection::has_selection(window, cx);
         let suggestions = self.suggestions(cx);
         let t = self.thread();
@@ -7035,17 +8154,18 @@ impl Workspace {
         } else {
             String::new()
         };
-        let usage = (billed > 0).then(|| {
-            format!(
-                "{:.1}k トークン · キャッシュ {}%{cost}",
-                used as f64 / 1000.,
-                t.spent.cache_read * 100 / billed
-            )
+        // ACP reports a context size per turn without a spend counter, so the token count alone is shown.
+        let usage = (used > 0).then(|| {
+            let cache = (billed > 0)
+                .then(|| format!(" · キャッシュ {}%", t.spent.cache_read * 100 / billed))
+                .unwrap_or_default();
+            format!("{:.1}k トークン{cache}{cost}", used as f64 / 1000.)
         });
         let (model, backend) = (self.model_label(), t.meta.backend.clone());
         let mode_chips = self.mode_chips(pal, cx);
         let backends = self.backends();
         let mode = self.thread().perms.mode();
+        let modes = greencode_core::config::backend_modes(&self.thread().meta.backend);
         let can_send = status == Status::Idle || !self.input.read(cx).value().trim().is_empty();
         let _ = window;
 
@@ -7070,6 +8190,9 @@ impl Workspace {
                     .text_color(pal.muted)
                     .children(extension_ui.into_iter().map(SharedString::from)),
             );
+        }
+        if let Some(row) = self.goal_row(pal, cx) {
+            col = col.child(row);
         }
         if let Some((request, _)) = &t.dialog {
             let mut dialog = div()
@@ -7162,6 +8285,21 @@ impl Workspace {
                                 this.answer_dialog(json!({"confirmed":false}), cx)
                             },
                         )));
+                } else if request["method"] == "secret" {
+                    dialog = dialog
+                        .child(Input::new(&self.secrets.entry))
+                        .child(chip("secret-save", "保存", pal).on_click(cx.listener(
+                            |this, _: &ClickEvent, window, cx| this.secret_save(window, cx),
+                        )))
+                        .child(chip("secret-refuse", "拒否", pal).on_click(cx.listener(
+                            |this, _: &ClickEvent, window, cx| this.secret_refuse(window, cx),
+                        )))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(pal.muted)
+                                .child("この欄の値は会話にも下書きにも残りません · esc で拒否"),
+                        );
                 } else {
                     dialog = dialog.child(
                         div()
@@ -7298,6 +8436,11 @@ impl Workspace {
                             .truncate()
                             .child(SharedString::from(sub.detail.clone())),
                     );
+                if let Some(task) = sub.task.clone() {
+                    row = row.child(chip(("sub-open", i), "開く", pal).on_click(cx.listener(
+                        move |this, _: &ClickEvent, window, cx| this.open_child(&task, window, cx),
+                    )));
+                }
                 if sub.state == "running" {
                     let name = sub.name.clone();
                     let cancel_name = name.clone();
@@ -7390,9 +8533,10 @@ impl Workspace {
         if !suggestions.is_empty() {
             let mut row = div().flex().flex_wrap().gap_1();
             for (i, s) in suggestions.into_iter().enumerate() {
+                let label = self.completion_label(&s);
                 let text = s.clone();
                 row = row.child(
-                    chip(("suggest", i), s, pal)
+                    chip(("suggest", i), label, pal)
                         .when(i == 0, |c| c.bg(pal.hover).text_color(pal.fg))
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                             this.complete(&text, window, cx)
@@ -7538,10 +8682,7 @@ impl Workspace {
                 .child(chip("mode", mode_label(mode), pal).on_click(cx.listener(
                     move |this, _: &ClickEvent, window, cx| {
                         this.run(
-                            Act::Mode(Self::cycle(
-                                &[Mode::Ask, Mode::AutoEdit, Mode::Full, Mode::Plan],
-                                &mode,
-                            )),
+                            Act::Mode(Self::cycle(modes, &mode)),
                             window,
                             cx,
                         )
@@ -7758,6 +8899,31 @@ impl Workspace {
                                         this.insert_terminal_output(window, cx)
                                     })),
                             )
+                            .child(chip("terminal-select-all", "すべて選択", pal).on_click(
+                                cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    if let Some(term) = this.active_terminal_mut() {
+                                        term.selection = term.lines.len().checked_sub(1).map(|n| (0, n));
+                                    }
+                                    cx.notify();
+                                }),
+                            ))
+                            .child(chip("terminal-copy", "コピー", pal).on_click(cx.listener(
+                                |this, _: &ClickEvent, _, cx| {
+                                    if let Some(term) = this.active_terminal() {
+                                        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                                            term.copy_text(),
+                                        ));
+                                    }
+                                },
+                            )))
+                            .child(chip("terminal-latest", "最新へ", pal).on_click(
+                                cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    if let Some(term) = this.active_terminal() {
+                                        term.scroll.scroll_to_bottom();
+                                    }
+                                    cx.notify();
+                                }),
+                            ))
                             .child(
                                 chip("terminal-selection", "選択を下書きに追加", pal).on_click(
                                     cx.listener(|this, _: &ClickEvent, window, cx| {
@@ -7816,6 +8982,7 @@ impl Workspace {
             .flex()
             .flex_col()
             .bg(pal.panel)
+            .track_focus(&self.conversation_focus)
             .child(
                 div()
                     .h(px(44.))
@@ -7851,6 +9018,24 @@ impl Workspace {
                                 .child(path.clone()),
                         )
                     })
+                    .child(
+                        gpui_kit::base::Button::new("show-updates")
+                            .accessibility_label("アップデート")
+                            .aria_expanded(self.show_update_panel)
+                            .flex_shrink_0()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(if self.show_update_panel { pal.accent } else { pal.line })
+                            .hover(|s| s.bg(pal.hover))
+                            .focus(|s| s.border_color(pal.fg))
+                            .child("アップデート")
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.show_update_panel = !this.show_update_panel;
+                                cx.notify();
+                            })),
+                    )
                     .child(icon_button("palette", "⌘K", pal).on_click(cx.listener(
                         |this, _: &ClickEvent, window, cx| this.toggle_palette(window, cx),
                     )))
@@ -7883,6 +9068,11 @@ impl Workspace {
                         )),
                     ),
             )
+            .when(self.show_update_panel, |d| {
+                d.child(div().px_6().py_3().border_b_1().border_color(pal.line).bg(pal.card)
+                    .child(self.update_controls(pal, cx)))
+            })
+            .children(self.find_bar(find::Target::Thread, pal, cx))
             .child(body)
             .children(terminal)
             .children(composer)
@@ -7993,6 +9183,11 @@ impl Workspace {
             .flex_1()
             .font_family(mono)
             .text_xs()
+            .track_scroll(&self.find.diff_scroll)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, window, cx| window.focus(&this.diff_focus, cx)),
+            )
             .into_any_element()
         };
         div()
@@ -8005,6 +9200,7 @@ impl Workspace {
             .bg(pal.panel)
             .border_l_1()
             .border_color(pal.line)
+            .track_focus(&self.diff_focus)
             .child(
                 div()
                     .h(px(44.))
@@ -8015,15 +9211,18 @@ impl Workspace {
                     .border_b_1()
                     .border_color(pal.line)
                     .font_weight(FontWeight::MEDIUM)
-                    .child("未コミットの変更"),
+                    .child("差分"),
             )
+            .child(self.diff_source_row(pal, cx))
+            .children(self.repo_picker(pal, cx))
+            .children(self.find_bar(find::Target::Diff, pal, cx))
             .child(body)
     }
 
     fn palette_view(&self, pal: Pal, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let (state, _) = self.palette.as_ref()?;
         let mut rows = div().id("palette-rows").flex().flex_col().p_1().when(
-            self.login_palette || self.registry_entries.is_some(),
+            self.login_palette || self.registry_entries.is_some() || self.picking_commit,
             |d| {
                 d.max_h(px(420.))
                     .overflow_y_scroll()
@@ -8071,6 +9270,12 @@ impl Workspace {
                         .when(self.registry_entries.is_some(), |d| {
                             d.child(div().px_3().pt_3().child("ACP レジストリ"))
                         })
+                        .when_some(self.text_prompt, |d, prompt| {
+                            d.child(div().px_3().pt_3().child(prompt.hint()))
+                        })
+                        .when(self.picking_commit, |d| {
+                            d.child(div().px_3().pt_3().child("差分に表示するコミット（新しい100件）"))
+                        })
                         .child(
                             div()
                                 .p_2()
@@ -8083,25 +9288,100 @@ impl Workspace {
         )
     }
 
+    fn update_controls(&self, pal: Pal, cx: &mut Context<Self>) -> Div {
+        use gpui_kit::base::Button;
+
+        if !cfg!(target_os = "macos") {
+            return div().text_color(pal.muted).child("アプリ内からの更新は macOS のみ対応しています。");
+        }
+
+        let locked = self.update_status.locked();
+        let channel = self.update_channel;
+        let button = |id: &'static str, label: &'static str, highlight| {
+            Button::new(id)
+                .accessibility_label(label)
+                .disabled(locked)
+                .px_3()
+                .py_1()
+                .rounded_md()
+                .border_1()
+                .border_color(if highlight { pal.accent } else { pal.line })
+                .bg(if highlight { pal.selected } else { pal.panel })
+                .text_color(if locked { pal.muted } else { pal.fg })
+                .hover(|s| s.bg(pal.hover))
+                .focus(|s| s.border_color(pal.fg))
+                .child(label)
+        };
+        let message = self.update_status.message();
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(div().flex().flex_wrap().items_center().gap_2().child("更新チャネル").children(
+                [
+                    (Channel::Stable, "update-stable", "安定版 (stable)"),
+                    (Channel::Main, "update-main", "コミット版 (main)"),
+                ].map(|(choice, id, label)| {
+                    let selected = choice == channel;
+                    button(id, label, selected)
+                        .aria_toggled(if selected { accesskit::Toggled::True } else { accesskit::Toggled::False })
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            if !this.update_status.locked() && this.update_channel != choice {
+                                this.update_channel = choice;
+                                this.update_status = UpdateStatus::Unchecked;
+                                cx.notify();
+                            }
+                        }))
+                }),
+            ))
+            .child(div().flex().flex_wrap().gap_2().children(
+                [("update-check", "更新を確認", true), ("update-install", "今すぐ更新", false)]
+                    .map(|(id, label, check)| button(id, label, !check)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.update_app(check, channel, cx);
+                        }))),
+            ))
+            .child(div().id("update-status").role(accesskit::Role::Status).aria_label(message.clone())
+                .text_sm().text_color(if matches!(self.update_status, UpdateStatus::Failed(_)) { pal.warn } else { pal.muted })
+                .child(message))
+    }
+
     /// The settings screen: every row changes its setting on click and saves at once.
     fn settings_view(&self, pal: Pal, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let (fields, _) = self.settings.as_ref()?;
         let t = self.thread();
-        let row = |label: SharedString, control: AnyElement| {
+        // The label, an optional short note under it, and the control on the right.
+        let row = |label: SharedString, hint: &str, control: AnyElement| {
             div()
                 .flex()
                 .items_center()
                 .justify_between()
-                .gap_3()
+                .gap_4()
                 .min_h(px(28.))
-                .child(div().flex_1().truncate().child(label))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap_0p5()
+                        .child(div().truncate().child(label))
+                        .when(!hint.is_empty(), |d| {
+                            d.child(div().text_xs().text_color(pal.muted).child(hint.to_string()))
+                        }),
+                )
                 .child(control)
         };
+        let n = std::cell::Cell::new(0usize);
+        let next_id = || {
+            n.set(n.get() + 1);
+            n.get()
+        };
         // A chip showing the current value; clicking runs `act`.
-        let mut n = 0usize;
-        let mut button = |value: String, act: Act, cx: &mut Context<Self>| {
-            n += 1;
-            chip(("setting", n), value, pal)
+        let button = |value: String, act: Act, cx: &mut Context<Self>| {
+            chip(("setting", next_id()), value, pal)
+                .max_w(px(320.))
+                .truncate()
                 .border_1()
                 .border_color(pal.line)
                 .bg(pal.panel)
@@ -8111,42 +9391,63 @@ impl Workspace {
                 }))
                 .into_any_element()
         };
-        let on_off = |on: bool| if on { "オン" } else { "オフ" }.to_string();
-        let compaction = if !self.cfg.compaction_enabled {
-            "オフ"
-        } else if self.cfg.compaction == "snap" {
-            "スナップ（画像に退避・モデル呼び出しなし）"
-        } else {
-            "要約"
+        let toggle = |label: &str, hint: &str, on: bool, act: Act, cx: &mut Context<Self>| {
+            let click = cx.listener(move |this, _: &ClickEvent, window, cx| this.run(act.clone(), window, cx));
+            row(
+                label.to_string().into(),
+                hint,
+                switch(("setting-switch", next_id()), label.to_string(), on, pal)
+                    .on_change(move |_, event, window, cx| click(event, window, cx))
+                    .into_any_element(),
+            )
         };
-        let compaction_row = row(
-            "自動圧縮".into(),
-            button(compaction.into(), Act::CycleCompaction, cx),
-        );
-        let ext_rows: Vec<_> = greencode_core::tools::ext::CATALOG
-            .iter()
-            .map(|(name, about)| {
-                let on = !self.cfg.ext_off.iter().any(|o| o == name);
-                row(
-                    format!("{name} — {about}").into(),
-                    button(on_off(on), Act::ToggleExt(name), cx),
+        // Every option side by side; clicking one runs its actions in order.
+        let choice = |options: Vec<(&'static str, Vec<Act>)>, current: Option<usize>, cx: &mut Context<Self>| {
+            div()
+                .flex()
+                .flex_shrink_0()
+                .gap_0p5()
+                .p_0p5()
+                .rounded_lg()
+                .bg(pal.hover)
+                .children(
+                    options
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, (label, acts))| {
+                            let selected = current == Some(i);
+                            gpui_kit::base::Button::new(("setting-choice", next_id()))
+                                .accessibility_label(label)
+                                .aria_toggled(if selected { accesskit::Toggled::True } else { accesskit::Toggled::False })
+                                .px_2()
+                                .py_0p5()
+                                .rounded_md()
+                                .text_xs()
+                                .cursor_pointer()
+                                .text_color(if selected { pal.fg } else { pal.muted })
+                                .when(selected, |d| d.bg(pal.panel).shadow_sm())
+                                .hover(|s| s.text_color(pal.fg))
+                                .child(label)
+                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                    for act in &acts {
+                                        this.run(act.clone(), window, cx)
+                                    }
+                                }))
+                        })
+                        .collect::<Vec<_>>(),
                 )
-            })
-            .collect();
-        let modes = [Mode::Ask, Mode::AutoEdit, Mode::Full, Mode::Plan];
-        let effort = self.cfg.effort.clone();
-        let next_effort = match effort.as_deref() {
-            None => Some("low"),
-            Some("low") => Some("medium"),
-            Some("medium") => Some("high"),
-            _ => None,
-        }
-        .map(String::from);
-        let sandbox = greencode_core::tools::SANDBOX.load(std::sync::atomic::Ordering::Relaxed);
-        let project = t.project();
-        let default = &self.ui["projects"][project.to_string_lossy().as_ref()];
-        let lock = |locked: bool| if locked { " 🔒" } else { "" };
+                .into_any_element()
+        };
+        // Options of an action that steps through them in this order: an option repeats the step until it is reached.
+        let cycle = |labels: &[&'static str], current: usize, act: Act| {
+            labels
+                .iter()
+                .enumerate()
+                .map(|(i, label)| (*label, vec![act.clone(); (i + labels.len() - current) % labels.len()]))
+                .collect::<Vec<_>>()
+        };
         let settings = self.cfg.policy.as_ref().map(|p| &p.settings);
+        let policy_hint = |locked: bool, hint: &'static str| if locked { "組織のポリシーで固定" } else { hint };
         let banner = self.cfg.policy.as_ref().map(|p| {
             let mut line = div().flex().gap_2().items_center().child(format!(
                 "{} の管理ポリシーが適用されています",
@@ -8238,192 +9539,276 @@ impl Workspace {
             .text_xl()
             .font_weight(FontWeight::SEMIBOLD)
             .child(SETTINGS_TABS[tab].0);
+        let name = SETTINGS_TABS[tab].0;
         let mut col = SettingsPage { pal, groups: Vec::new() };
-        match tab {
-            0 => {
+        let macos = cfg!(target_os = "macos");
+        match name {
+            "一般" => {
+                let quit = match self.ui["quit_mode"].as_str() {
+                    Some("direct") => 1,
+                    Some("hold") => 2,
+                    _ => 0,
+                };
+                let tools = match self.tool_visibility() {
+                    ToolVisibility::Show => 0,
+                    ToolVisibility::Successful => 1,
+                    ToolVisibility::All => 2,
+                    ToolVisibility::Zen => 3,
+                };
+                let steer = self.ui["follow_up_steer"] == true;
+                let cmd_enter = self.ui["send_shortcut"] == "cmd+enter";
+                let text = |key: &str, empty: &str| {
+                    self.ui[key].as_str().filter(|s| !s.is_empty()).unwrap_or(empty).to_string()
+                };
+                let suggest_locked = settings.and_then(|s| s.suggest_next.as_ref()).is_some_and(|s| s.locked);
+                let voice_locked = settings.and_then(|s| s.voice_provider.as_ref()).is_some_and(|s| s.locked);
                 col = col
                     .section("表示と通知")
+                    .child(toggle("通知", "", self.ui["notify_off"] != true, Act::Toggle("notify_off"), cx))
                     .child(row(
-                        "完了・承認待ちの通知".into(),
-                        button(
-                            on_off(self.ui["notify_off"] != true),
-                            Act::Toggle("notify_off"),
-                            cx,
-                        ),
+                        "⌘Q".into(),
+                        "",
+                        choice(cycle(&["2回押しで終了", "すぐ終了", "長押しで終了"], quit, Act::CycleQuitMode), Some(quit), cx),
                     ))
                     .child(row(
-                        "ツール呼び出しの表示".into(),
-                        button(
-                            tool_visibility_label(self.tool_visibility()).into(),
-                            Act::ToolVisibility,
-                            cx,
-                        ),
+                        "ツールの呼び出し".into(),
+                        "",
+                        choice(cycle(&["すべて表示", "成功を隠す", "すべて隠す", "Zen"], tools, Act::ToolVisibility), Some(tools), cx),
                     ))
                     .section("入力")
                     .child(row(
-                        "実行中に送信したメッセージ".into(),
-                        button(
-                            if self.ui["follow_up_steer"] == true {
-                                "ステア（実行中のターンに送る）"
-                            } else {
-                                "キュー（次のターンで送る）"
-                            }
-                            .into(),
-                            Act::Toggle("follow_up_steer"),
+                        "送信キー".into(),
+                        "",
+                        choice(cycle(&["Enter", "⌘Enter"], cmd_enter as usize, Act::SendShortcut), Some(cmd_enter as usize), cx),
+                    ))
+                    .child(row(
+                        "実行中に送ったメッセージ".into(),
+                        "",
+                        choice(
+                            cycle(&["次のターンで送る", "すぐ割り込む"], steer as usize, Act::Toggle("follow_up_steer")),
+                            Some(steer as usize),
                             cx,
                         ),
                     ))
+                    .child(toggle(
+                        "/ メニューにスキルを表示",
+                        "",
+                        self.ui["slash_skills_off"] != true,
+                        Act::Toggle("slash_skills_off"),
+                        cx,
+                    ))
+                    .child(toggle(
+                        "次のプロンプトを提案",
+                        policy_hint(suggest_locked, ""),
+                        self.ui["suggest_next"] == true,
+                        Act::Toggle("suggest_next"),
+                        cx,
+                    ))
+                    .section("自動生成")
                     .child(row(
-                        "次のプロンプトを提案（追加リクエスト）".into(),
-                        button(
-                            format!(
-                                "{}{}",
-                                on_off(self.ui["suggest_next"] == true),
-                                lock(
-                                    settings
-                                        .and_then(|s| s.suggest_next.as_ref())
-                                        .is_some_and(|s| s.locked)
-                                )
-                            ),
-                            Act::Toggle("suggest_next"),
-                            cx,
-                        ),
+                        "モデル".into(),
+                        "スレッド名・コミット・PR・ブランチ名",
+                        button(self.text_model().unwrap_or_else(|| "オフ".into()), Act::CycleTextModel, cx),
                     ))
                     .child(row(
-                        "音声入力の文字起こし".into(),
+                        "タイトルの追加指示".into(),
+                        "",
+                        button(text("title_instructions", "なし"), Act::EditText(git::TextPrompt::TitleInstructions), cx),
+                    ))
+                    .section("音声入力")
+                    .child(row(
+                        "文字起こし".into(),
+                        policy_hint(voice_locked, ""),
                         button(
-                            format!(
-                                "{}{}",
-                                match self.ui["voice_provider"].as_str() {
-                                    Some("openai") => "OpenAI",
-                                    Some("groq") => "Groq",
-                                    Some("local") => "ローカル（whisper.cpp）",
-                                    _ => "オフ",
-                                },
-                                lock(
-                                    settings
-                                        .and_then(|s| s.voice_provider.as_ref())
-                                        .is_some_and(|s| s.locked)
-                                )
-                            ),
+                            voice::provider_label(self.ui["voice_provider"].as_str()).into(),
                             Act::CycleVoiceProvider,
                             cx,
                         ),
                     ))
-                    .section("スレッドの自動保管")
                     .child(row(
-                        "非アクティブ 7 日で保管".into(),
-                        button(
-                            on_off(self.ui["auto_settle_off"] != true),
-                            Act::Toggle("auto_settle_off"),
-                            cx,
-                        ),
+                        "言語".into(),
+                        "",
+                        button(voice::language_label(&self.ui), Act::VoiceAction("language"), cx),
+                    ))
+                    .child(toggle(
+                        "英語に翻訳",
+                        "",
+                        self.ui["voice_translate"] == true,
+                        Act::Toggle("voice_translate"),
+                        cx,
+                    ))
+                    .child(toggle(
+                        "「えー」「um」を除く",
+                        "",
+                        self.ui["voice_fillers"] == true,
+                        Act::Toggle("voice_fillers"),
+                        cx,
                     ))
                     .child(row(
-                        "PR がマージされたら保管".into(),
-                        button(
-                            on_off(self.ui["settle_merged_off"] != true),
-                            Act::Toggle("settle_merged_off"),
-                            cx,
-                        ),
-                    ))
-                    .child(row(
-                        "PR がクローズされたら保管".into(),
-                        button(
-                            on_off(self.ui["settle_closed"] == true),
-                            Act::Toggle("settle_closed"),
-                            cx,
-                        ),
-                    ))
-                    .child(row(
-                        "PR があるスレッドは保持".into(),
-                        button(
-                            on_off(self.ui["settle_keep_pr"] == true),
-                            Act::Toggle("settle_keep_pr"),
-                            cx,
-                        ),
-                    ))
-                    .section("リモートアクセス")
-                    .child(
+                        "マイク".into(),
+                        if macos { "" } else { "macOS のみ" },
                         div()
                             .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap_3()
-                            .py_0p5()
-                            .child(div().text_xs().text_color(pal.muted).child(
-                                "greencode-cli serve でブラウザやスマートフォンから操作できます",
-                            ))
-                            .child(chip("remote-copy", "コマンドをコピー", pal).on_click(
-                                |_, _, cx| {
-                                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
-                                        "greencode-cli serve".into(),
-                                    ))
-                                },
-                            )),
-                    )
+                            .gap_1()
+                            .child(button(voice::mic_label(&self.ui), Act::VoiceAction("mic"), cx))
+                            .child(button("テスト".into(), Act::VoiceAction("test"), cx))
+                            .into_any_element(),
+                    ))
+                    .child(row(
+                        "辞書".into(),
+                        "/voice dict で編集",
+                        div().text_sm().child(voice::dict_label(&self.ui)).into_any_element(),
+                    ))
+                    .child(toggle(
+                        "モデルで整える",
+                        "",
+                        self.ui["voice_cleanup"] == true,
+                        Act::Toggle("voice_cleanup"),
+                        cx,
+                    ))
+                    .child(row(
+                        "整形モデル".into(),
+                        "",
+                        button(
+                            text("voice_cleanup_model", "スレッドのモデル"),
+                            Act::EditText(git::TextPrompt::VoiceCleanupModel),
+                            cx,
+                        ),
+                    ))
+                    .child(row(
+                        "整形の追加指示".into(),
+                        "",
+                        button(
+                            text("voice_cleanup_instructions", "なし"),
+                            Act::EditText(git::TextPrompt::VoiceInstructions),
+                            cx,
+                        ),
+                    ))
+                    .child(row(
+                        "訂正の合図".into(),
+                        "",
+                        button(text("voice_correction", "なし"), Act::EditText(git::TextPrompt::VoiceCorrection), cx),
+                    ))
+                    .section("スナップショット")
+                    .child(toggle(
+                        "ウィンドウを撮影して添付",
+                        if macos { "" } else { "macOS のみ" },
+                        macos && self.ui["snapshot"] == true,
+                        Act::SnapshotToggle,
+                        cx,
+                    ))
+                    .child(toggle(
+                        "ウィンドウ内のテキストも添付",
+                        "",
+                        self.ui["snapshot_text"] == true,
+                        Act::SnapshotText,
+                        cx,
+                    ))
+                    .child(row(
+                        "ショートカット".into(),
+                        "",
+                        button(snapshot::shortcut_label(&self.ui).into(), Act::SnapshotShortcut, cx),
+                    ))
+                    .section("自動で保管するスレッド")
+                    .child(toggle(
+                        "7 日間使っていない",
+                        "",
+                        self.ui["auto_settle_off"] != true,
+                        Act::Toggle("auto_settle_off"),
+                        cx,
+                    ))
+                    .child(toggle(
+                        "PR がマージされた",
+                        "",
+                        self.ui["settle_merged_off"] != true,
+                        Act::Toggle("settle_merged_off"),
+                        cx,
+                    ))
+                    .child(toggle(
+                        "PR がクローズされた",
+                        "",
+                        self.ui["settle_closed"] == true,
+                        Act::Toggle("settle_closed"),
+                        cx,
+                    ))
+                    .child(toggle(
+                        "PR があるスレッドは除く",
+                        "",
+                        self.ui["settle_keep_pr"] == true,
+                        Act::Toggle("settle_keep_pr"),
+                        cx,
+                    ))
+                    .section("その他")
+                    .child(row(
+                        "リモートアクセス".into(),
+                        "greencode-cli serve",
+                        chip("remote-copy", "コピー", pal)
+                            .border_1()
+                            .border_color(pal.line)
+                            .bg(pal.panel)
+                            .text_color(pal.fg)
+                            .on_click(|_, _, cx| {
+                                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("greencode-cli serve".into()))
+                            })
+                            .into_any_element(),
+                    ))
+                    .child(row(
+                        "ようこそページ".into(),
+                        "",
+                        button("開く".into(), Act::Welcome(welcome::WelcomeAct::Open), cx),
+                    ))
             }
-            1 => {
+            "モデルと権限" => {
+                let efforts = [None, Some("low"), Some("medium"), Some("high")];
+                let effort = efforts.iter().position(|e| self.cfg.effort.as_deref() == *e);
+                let modes = [Mode::Ask, Mode::AutoEdit, Mode::Full, Mode::Plan];
+                let mode_choices = |act: fn(Mode) -> Act| {
+                    modes
+                        .iter()
+                        .map(|m| (if *m == Mode::Plan { "プラン" } else { mode_label(*m) }, vec![act(*m)]))
+                        .collect::<Vec<_>>()
+                };
+                let mode_locked = settings.and_then(|s| s.default_mode.as_ref()).is_some_and(|s| s.locked);
+                let sandbox_locked = settings.and_then(|s| s.sandbox.as_ref()).is_some_and(|s| s.locked);
                 col = col
                     .section("モデル")
                     .child(row(
-                        format!("新規スレッドの既定モデル: {}", self.cfg.model).into(),
-                        button(
-                            format!("現在の {} にする", t.meta.model),
-                            Act::DefaultModel,
-                            cx,
-                        ),
+                        "新規スレッド".into(),
+                        &self.cfg.model,
+                        button(format!("{} にする", t.meta.model), Act::DefaultModel, cx),
                     ))
                     .child(row(
                         "思考の強さ".into(),
-                        button(
-                            effort.unwrap_or_else(|| "既定".into()),
-                            Act::Effort(next_effort),
+                        "",
+                        choice(
+                            efforts
+                                .iter()
+                                .zip(["既定", "低", "中", "高"])
+                                .map(|(e, label)| (label, vec![Act::Effort(e.map(String::from))]))
+                                .collect(),
+                            effort,
                             cx,
                         ),
                     ))
                     .section("権限")
                     .child(row(
-                        "新規スレッドの権限".into(),
-                        button(
-                            format!(
-                                "{}{}",
-                                mode_label(self.cfg.mode),
-                                lock(
-                                    settings
-                                        .and_then(|s| s.default_mode.as_ref())
-                                        .is_some_and(|s| s.locked)
-                                )
-                            ),
-                            Act::DefaultMode(Self::cycle(&modes, &self.cfg.mode)),
-                            cx,
-                        ),
+                        "新規スレッド".into(),
+                        policy_hint(mode_locked, ""),
+                        choice(mode_choices(Act::DefaultMode), modes.iter().position(|m| *m == self.cfg.mode), cx),
                     ))
                     .child(row(
-                        "このスレッドの権限".into(),
-                        button(
-                            mode_label(t.perms.mode()).into(),
-                            Act::Mode(Self::cycle(&modes, &t.perms.mode())),
-                            cx,
-                        ),
+                        "このスレッド".into(),
+                        "",
+                        choice(mode_choices(Act::Mode), modes.iter().position(|m| *m == t.perms.mode()), cx),
                     ))
-                    .child(row(
-                        "サンドボックス（bash の書き込み制限）".into(),
-                        button(
-                            format!(
-                                "{}{}",
-                                on_off(sandbox),
-                                lock(
-                                    settings
-                                        .and_then(|s| s.sandbox.as_ref())
-                                        .is_some_and(|s| s.locked)
-                                )
-                            ),
-                            Act::Sandbox,
-                            cx,
-                        ),
+                    .child(toggle(
+                        "サンドボックス",
+                        policy_hint(sandbox_locked, "bash の書き込みを制限"),
+                        greencode_core::tools::SANDBOX.load(std::sync::atomic::Ordering::Relaxed),
+                        Act::Sandbox,
+                        cx,
                     ))
-                    .section("許可ルール（常に許可）")
+                    .section("常に許可")
                     .children(
                         t.perms
                             .allowed()
@@ -8431,95 +9816,104 @@ impl Workspace {
                             .then(|| div().text_xs().text_color(pal.muted).child("なし")),
                     )
                     .children(t.perms.allowed().into_iter().map(|key| {
-                        row(
-                            key.clone().into(),
-                            button("削除".into(), Act::Revoke(key), cx),
-                        )
+                        row(key.clone().into(), "", button("削除".into(), Act::Revoke(key), cx))
                     }))
             }
-            2 => {}
-            3 => {
+            "ツール" => {
+                let compaction = if !self.cfg.compaction_enabled {
+                    2
+                } else if self.cfg.compaction == "snap" {
+                    1
+                } else {
+                    0
+                };
                 col = col
-                    .section("コンテキストと学習")
-                    .child(compaction_row)
+                    .section("コンテキスト")
                     .child(row(
-                        "自己改善の自動学習".into(),
-                        button(
-                            on_off(self.cfg.learning.auto),
-                            Act::SetLearning(!self.cfg.learning.auto),
-                            cx,
-                        ),
+                        "自動圧縮".into(),
+                        "",
+                        choice(cycle(&["要約", "スナップ", "オフ"], compaction, Act::CycleCompaction), Some(compaction), cx),
                     ))
-                    .section("拡張ツール（ext・OMP 相当）")
-                    .children(ext_rows)
+                    .child(toggle(
+                        "自動学習",
+                        "",
+                        self.cfg.learning.auto,
+                        Act::SetLearning(!self.cfg.learning.auto),
+                        cx,
+                    ))
+                    .section("拡張ツール")
+                    .children(
+                        greencode_core::tools::ext::CATALOG
+                            .iter()
+                            .map(|(name, about)| {
+                                let on = !self.cfg.ext_off.iter().any(|o| o == name);
+                                toggle(name, ext_hint(name).unwrap_or(about), on, Act::ToggleExt(name), cx)
+                            })
+                            .collect::<Vec<_>>(),
+                    )
             }
-            4 => {
-                col =
-                    col.section("このプロジェクトの既定")
-                        .child(row(
-                            SharedString::from(
-                                match (default["model"].as_str(), default["backend"].as_str()) {
-                                    (Some(model), Some(backend)) => {
-                                        format!("{} の既定: {backend} · {model}", project.display())
-                                    }
-                                    _ => format!("{} の既定: なし", project.display()),
-                                },
-                            ),
-                            div()
-                                .flex()
-                                .gap_1()
-                                .child(button(
-                                    "現在の設定を保存".into(),
-                                    Act::SaveProjectDefault,
-                                    cx,
-                                ))
-                                .child(button("解除".into(), Act::ClearProjectDefault, cx))
-                                .into_any_element(),
-                        ))
-                        .section("ワークツリー")
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(pal.muted)
-                                .child(format!("保存先: {}", self.worktree_base().display())),
+            "プロジェクト" => {
+                let project = t.project();
+                let default = &self.ui["projects"][project.to_string_lossy().as_ref()];
+                let saved = match (default["model"].as_str(), default["backend"].as_str()) {
+                    (Some(model), Some(backend)) => format!("{backend} · {model}"),
+                    _ => "未設定".into(),
+                };
+                col = col
+                    .section("このプロジェクトの既定")
+                    .child(row(
+                        project.display().to_string().into(),
+                        &saved,
+                        div()
+                            .flex()
+                            .gap_1()
+                            .child(button("今の設定を保存".into(), Act::SaveProjectDefault, cx))
+                            .child(button("解除".into(), Act::ClearProjectDefault, cx))
+                            .into_any_element(),
+                    ))
+                    .section("ワークツリー")
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(pal.muted)
+                            .child(format!("保存先: {}", self.worktree_base().display())),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().flex_1().child(Input::new(&self.storage.field)))
+                            .child(chip("storage-save", "保存", pal).on_click(cx.listener(
+                                |this, _: &ClickEvent, _, cx| this.save_worktree_dir(cx),
+                            ))),
+                    )
+                    .children(
+                        self.storage.error.as_ref().map(|e| {
+                            div().text_xs().text_color(gpui_kit::red()).child(e.clone())
+                        }),
+                    )
+                    .child(toggle(
+                        "自動クリーンアップ",
+                        "",
+                        self.ui["auto_cleanup"] == true,
+                        Act::Toggle("auto_cleanup"),
+                        cx,
+                    ))
+                    .child(
+                        chip(
+                            "storage-scan",
+                            if self.storage.busy {
+                                "確認中…"
+                            } else {
+                                "今すぐクリーンアップ"
+                            },
+                            pal,
                         )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(div().flex_1().child(Input::new(&self.storage.field)))
-                                .child(chip("storage-save", "保存", pal).on_click(cx.listener(
-                                    |this, _: &ClickEvent, _, cx| this.save_worktree_dir(cx),
-                                ))),
-                        )
-                        .children(
-                            self.storage.error.as_ref().map(|e| {
-                                div().text_xs().text_color(gpui_kit::red()).child(e.clone())
-                            }),
-                        )
-                        .child(row(
-                            "自動クリーンアップ".into(),
-                            button(
-                                on_off(self.ui["auto_cleanup"] == true),
-                                Act::Toggle("auto_cleanup"),
-                                cx,
-                            ),
-                        ))
-                        .child(
-                            chip(
-                                "storage-scan",
-                                if self.storage.busy {
-                                    "確認中…"
-                                } else {
-                                    "今すぐクリーンアップ"
-                                },
-                                pal,
-                            )
-                            .on_click(cx.listener(
-                                |this, _: &ClickEvent, _, cx| this.cleanup(false, false, cx),
-                            )),
-                        );
+                        .on_click(cx.listener(
+                            |this, _: &ClickEvent, _, cx| this.cleanup(false, false, cx),
+                        )),
+                    );
                 let removable: Vec<_> = self
                     .storage
                     .candidates
@@ -8549,7 +9943,7 @@ impl Workspace {
                         col.child(
                             chip(
                                 "storage-remove",
-                                format!("削除する（{} 件・{} bytes）", removable.len(), bytes),
+                                format!("{} 件を削除（{} bytes）", removable.len(), bytes),
                                 pal,
                             )
                             .on_click(cx.listener(
@@ -8557,12 +9951,120 @@ impl Workspace {
                             )),
                         );
                 }
+                let prefix = self.ui["worktree_prefix"].as_str().unwrap_or("greencode/").to_string();
+                let submodules = match self.ui["worktree_submodules"].as_str() {
+                    Some("top") => 1,
+                    Some("skip") => 2,
+                    _ => 0,
+                };
+                col = col
+                    .section("ソース管理")
+                    .child(row(
+                        "クローン先".into(),
+                        "",
+                        button(self.clone_root().display().to_string(), Act::SetCloneRoot, cx),
+                    ))
+                    .child(toggle(
+                        "ホストごとのフォルダに分ける",
+                        "github.com/owner/repo",
+                        self.ui["clone_host_folders"] == true,
+                        Act::Toggle("clone_host_folders"),
+                        cx,
+                    ))
+                    .child(toggle(
+                        "既定ブランチを自動で同期",
+                        "1 時間ごと",
+                        self.ui["sync_default_branch"] == true,
+                        Act::Toggle("sync_default_branch"),
+                        cx,
+                    ))
+                    .child(row(
+                        "既定ブランチを今すぐ同期".into(),
+                        "",
+                        button("同期".into(), Act::SyncDefaultBranch, cx),
+                    ))
+                    .child(row(
+                        "ブランチ接頭辞".into(),
+                        "",
+                        button(
+                            if prefix.is_empty() { "なし".into() } else { prefix },
+                            Act::EditText(git::TextPrompt::WorktreePrefix),
+                            cx,
+                        ),
+                    ))
+                    .child(row(
+                        "サブモジュール".into(),
+                        "",
+                        choice(
+                            cycle(&["再帰的", "トップレベルのみ", "スキップ"], submodules, Act::CycleWorktreeSubmodules),
+                            Some(submodules),
+                            cx,
+                        ),
+                    ))
+                    .child(toggle(
+                        "マージ時にエージェントのクレジットを除く",
+                        "",
+                        self.ui["pr_strip_credits"] == true,
+                        Act::Toggle("pr_strip_credits"),
+                        cx,
+                    ))
+                    .section("プロジェクト");
+                for project in self.known_projects() {
+                    let (pinned, archived) = (self.project_pinned(&project), self.project_archived(&project));
+                    let state = if archived {
+                        "保管済み"
+                    } else if pinned {
+                        "ピン留め中"
+                    } else {
+                        ""
+                    };
+                    col = col.child(row(
+                        project.display().to_string().into(),
+                        state,
+                        div()
+                            .flex()
+                            .gap_1()
+                            .child(button(
+                                if pinned { "ピン解除".into() } else { "ピン留め".into() },
+                                Act::PinProject(project.clone()),
+                                cx,
+                            ))
+                            .child(button(
+                                if archived { "復元".into() } else { "保管".into() },
+                                Act::ArchiveProject(project),
+                                cx,
+                            ))
+                            .into_any_element(),
+                    ));
+                }
             }
-            _ => {
-                col = col.section("キーバインド（キー → スラッシュコマンド）");
+            "シークレット" => col = self.secrets_section(col, pal, cx),
+            "詳細設定" => col = self.advanced_section(col, pal, cx),
+            "エージェント" => col = self.omp_section(col, pal, cx),
+            "ラボ" => {
+                let workflows = greencode_core::workflow::paths().workflows;
+                col = col
+                    .section("ワークフロー")
+                    .child(toggle(
+                        "ワークフロー",
+                        "",
+                        self.ui["labs_workflows"] == true,
+                        Act::Toggle("labs_workflows"),
+                        cx,
+                    ))
+                    .child(row("一覧".into(), "", button("開く".into(), Act::Workflows, cx)))
+                    .child(row(
+                        "定義フォルダ".into(),
+                        &workflows.display().to_string(),
+                        button("開く".into(), Act::OpenFile(workflows), cx),
+                    ))
+            }
+            "キーとファイル" => {
+                col = col.section("キーバインド");
                 for (key, command) in self.ui["keys"].as_object().into_iter().flatten() {
                     col = col.child(row(
-                        format!("{key}  →  {}", command.as_str().unwrap_or("")).into(),
+                        key.clone().into(),
+                        command.as_str().unwrap_or(""),
                         button("削除".into(), Act::Unbind(key.clone()), cx),
                     ));
                 }
@@ -8577,30 +10079,19 @@ impl Workspace {
                             .child(div().flex_1().child(Input::new(&fields[1])))
                             .child(button("追加".into(), Act::Bind, cx)),
                     )
-                    .section("設定ファイル")
-                    .child(
-                        div()
-                            .flex()
-                            .gap_1()
-                            .child(button(
-                                "config.toml".into(),
-                                Act::OpenFile(greencode_core::home().join("config.toml")),
-                                cx,
-                            ))
-                            .child(button(
-                                "mcp.json（MCPサーバー）".into(),
-                                Act::OpenFile(greencode_core::home().join("mcp.json")),
-                                cx,
-                            ))
-                            .child(button(
-                                "ui.json".into(),
-                                Act::OpenFile(greencode_core::home().join("ui.json")),
-                                cx,
-                            )),
-                    );
+                    .section("設定ファイル");
+                for (file, about) in [("config.toml", ""), ("mcp.json", "MCP サーバー"), ("ui.json", "")] {
+                    col = col.child(row(
+                        file.into(),
+                        about,
+                        button("開く".into(), Act::OpenFile(greencode_core::home().join(file)), cx),
+                    ));
+                }
             }
+            // 外観 and 接続 lay out their own content below.
+            _ => {}
         }
-        let content = if tab == 2 {
+        let content = if name == "接続" {
             // The connection list and detail scroll on their own, so this page fills the height.
             div()
                 .flex_1()
@@ -8629,7 +10120,7 @@ impl Workspace {
                         .pb_10()
                         .child(title)
                         .children(banner.map(|b| b.pb_4()))
-                        .when(tab == 0, |d| d.child(theme_settings(self.theme_id(), pal, cx)))
+                        .when(name == "外観", |d| d.child(theme_settings(self, pal, cx)))
                         .child(col.build()),
                 )
                 .into_any_element()
@@ -8769,6 +10260,7 @@ impl Render for Workspace {
             Theme::global_mut(cx).tokens.background = gpui_kit::transparent_black().into();
         }
         let pal = self.pal(cx);
+        let background = self.background_layer();
         let sidebar = self.sidebar(pal, cx).into_any_element();
         let main = self.main_panel(pal, window, cx).into_any_element();
         let diff = self
@@ -8784,16 +10276,21 @@ impl Render for Workspace {
             .model_picker_view(pal, cx)
             .map(|p| p.into_any_element());
         let settings = self.settings_view(pal, cx).map(|p| p.into_any_element());
+        let theme_editor = self
+            .theme_editor_view(pal, cx)
+            .map(|p| p.into_any_element());
         let provider_form = self
             .provider_form_view(pal, cx)
             .map(|p| p.into_any_element());
         let oauth_form = self.oauth_form_view(pal, cx).map(|p| p.into_any_element());
         let key_form = self.key_form_view(pal, cx).map(|p| p.into_any_element());
+        let welcome = self.welcome_view(pal, cx).map(|p| p.into_any_element());
         let account_form = self
             .account_form_view(pal, cx)
             .map(|p| p.into_any_element());
         let cite_form = self.cite_form_view(pal, cx).map(|p| p.into_any_element());
         let usage = self.usage_view(pal, cx).map(|p| p.into_any_element());
+        let workflows = self.workflows_view(pal, cx).map(|p| p.into_any_element());
         let device_form = self.device_form_view(pal, cx).map(|p| p.into_any_element());
         div()
             .size_full()
@@ -8828,22 +10325,64 @@ impl Render for Workspace {
                     }
                 },
             ))
+            // ⌘F: the inputs bind it to their own search; the app's find bar takes it over.
+            .capture_action(cx.listener(
+                |this, _: &gpui_kit::component::input::Search, window, cx| {
+                    let raw_terminal = this.terminal_visible
+                        && this.active_terminal().is_some_and(|t| {
+                            t.raw() && t.input.read(cx).focus_handle(cx).is_focused(window)
+                        });
+                    if !raw_terminal && this.palette.is_none() && this.settings.is_none() {
+                        this.open_find(window, cx);
+                        cx.stop_propagation();
+                    }
+                },
+            ))
+            // ⌘[ / ⌘]: inputs bind them to outdent/indent; history navigation takes them over.
+            .capture_action(cx.listener(
+                |this, _: &gpui_kit::component::input::Outdent, window, cx| {
+                    if this.palette.is_none() && this.settings.is_none() {
+                        this.navigate(true, window, cx);
+                        cx.stop_propagation();
+                    }
+                },
+            ))
+            .capture_action(cx.listener(
+                |this, _: &gpui_kit::component::input::Indent, window, cx| {
+                    if this.palette.is_none() && this.settings.is_none() {
+                        this.navigate(false, window, cx);
+                        cx.stop_propagation();
+                    }
+                },
+            ))
+            // ⌘Z still undoes typing when no sidebar action is waiting.
+            .capture_action(cx.listener(
+                |this, _: &gpui_kit::component::input::Undo, _window, cx| {
+                    if this.undo_sidebar() {
+                        cx.stop_propagation();
+                    }
+                },
+            ))
+            .children(background)
             .child(sidebar)
             .child(main)
             .children(git)
             .children(diff)
             .children(files_panel)
             .children(pr_panel)
-            .children(palette)
             .children(model_picker)
             .children(settings)
+            .children(palette)
             .children(provider_form)
             .children(oauth_form)
             .children(key_form)
+            .children(welcome)
             .children(account_form)
             .children(cite_form)
             .children(usage)
+            .children(workflows)
             .children(device_form)
+            .children(theme_editor)
     }
 }
 
@@ -8929,6 +10468,17 @@ mod tests {
                 assert!(ws.ui["webhooks"].as_array().unwrap().is_empty());
             })
         });
+    }
+
+    #[gpui_kit::test]
+    async fn workflows_page_opens_and_closes_with_escape(cx: &mut TestAppContext) {
+        let (ws, cx) = open(cx);
+        cx.update(|window, cx| {
+            ws.update(cx, |ws, cx| ws.run(super::Act::Workflows, window, cx));
+        });
+        ws.read_with(cx, |ws, _| assert!(ws.workflows.is_some()));
+        cx.simulate_keystrokes("escape");
+        ws.read_with(cx, |ws, _| assert!(ws.workflows.is_none()));
     }
 
     fn tool(name: &str, input: serde_json::Value) -> Item {
@@ -9218,9 +10768,9 @@ mod tests {
                 ws.terminals = Default::default();
                 ws.new_terminal(window, cx);
                 let previous = &ws.active_terminal().unwrap().previous;
-                assert_eq!(previous.len(), 500);
-                assert_eq!(previous[0].as_ref(), "line 1");
-                assert_eq!(previous[499].as_ref(), "line 500");
+                assert_eq!(previous.len(), 501);
+                assert_eq!(previous[0].as_ref(), "line 0");
+                assert_eq!(previous[500].as_ref(), "line 500");
                 let term = ws.active_terminal_mut().unwrap();
                 term.feed("\x1b[3");
                 term.feed("1mred\nstill red\x1b[0m");
@@ -9262,7 +10812,7 @@ mod tests {
         static HOME_GUARD: std::cell::RefCell<Option<std::sync::MutexGuard<'static, ()>>> = const { std::cell::RefCell::new(None) };
     }
 
-    pub(super) fn open(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) {
+    pub(super) fn open_fresh(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) {
         HOME_GUARD.with(|g| {
             if g.borrow().is_none() {
                 *g.borrow_mut() = Some(HOME.lock().unwrap_or_else(|e| e.into_inner()));
@@ -9284,6 +10834,13 @@ mod tests {
         });
         ws.update(cx, |ws, _| ws.agent_spawner = answering_agent);
         cx.run_until_parked();
+        (ws, cx)
+    }
+
+    /// `open_fresh` without the first-run welcome page covering the window.
+    pub(super) fn open(cx: &mut TestAppContext) -> (Entity<Workspace>, &mut VisualTestContext) {
+        let (ws, cx) = open_fresh(cx);
+        ws.update(cx, |ws, _| ws.welcome = None);
         (ws, cx)
     }
 
@@ -10124,6 +11681,7 @@ mod tests {
                 agent: "task".into(),
                 state: "done".into(),
                 detail: "done".into(),
+                task: None,
             });
             ws.start_prompt("next".into(), cx);
             assert!(ws.thread().subs.is_empty());
@@ -10131,6 +11689,32 @@ mod tests {
         assert!(
             matches!(rx.try_recv(), Ok(greencode_core::Command::Prompt(text)) if text == "next")
         );
+    }
+
+    #[gpui_kit::test]
+    async fn orchestration_events_open_child_threads_and_save_schedules(cx: &mut TestAppContext) {
+        let (ws, cx) = open(cx);
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        ws.update(cx, |ws, cx| {
+            let parent = ws.thread().meta.id.clone();
+            let project = ws.thread().project();
+            let mut child = Meta::new(project.clone(), "default".into(), "codex".into());
+            child.parent = Some(parent.clone());
+            child.title = "↳ kid: say hi".into();
+            let child_id = child.id.clone();
+            let opened = Event::Remote { command: "thread_opened".into(), data: json!({"meta": child}) };
+            ws.on_event(&parent, opened, cx);
+            let ix = ws.threads.iter().position(|t| t.meta.id == child_id).expect("child listed");
+            assert_eq!(ws.threads[ix].meta.parent.as_deref(), Some(parent.as_str()));
+            assert_eq!(ws.threads.iter().filter(|t| t.meta.id == child_id).count(), 1);
+            let request = json!({"method": "schedule", "action": "save", "prompt": "nightly", "project": project,
+                "schedule": {"type": "interval", "everyMs": 3_600_000}});
+            ws.on_event(&parent, Event::Dialog { request, reply: reply_tx }, cx);
+            let saved = &ws.ui["schedules"][0];
+            assert_eq!((saved["prompt"].as_str(), saved["every"].as_u64()), (Some("nightly"), Some(3600)));
+        });
+        let reply = reply_rx.await.expect("schedule request answered");
+        assert!(reply["scheduledTaskId"].is_string(), "{reply}");
     }
 
     #[gpui_kit::test]
@@ -10375,6 +11959,78 @@ mod tests {
             ws.run(super::Act::Delete, window, cx);
             assert!(cwd.exists() && ws.threads.len() == 1);
         });
+    }
+
+    #[gpui_kit::test]
+    async fn multi_repo_checkpoint_restores_each_repository_and_names_the_plain_folder(
+        cx: &mut TestAppContext,
+    ) {
+        let (ws, cx) = open(cx);
+        let root = std::env::temp_dir().join(format!(
+            "greencode-ui-multi-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let (api, web) = (root.join("shop/api"), root.join("shop/web"));
+        for repo in [&api, &web] {
+            std::fs::create_dir_all(repo).unwrap();
+            std::fs::write(repo.join("f"), "one\n").unwrap();
+            for args in [
+                &["init", "-q"][..],
+                &["add", "."][..],
+                &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"][..],
+            ] {
+                assert!(std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(repo)
+                    .args(args)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success());
+            }
+        }
+        ws.update_in(cx, |ws, window, cx| ws.new_thread(root.join("shop"), false, window, cx));
+        cx.run_until_parked();
+        assert_eq!(ws.read_with(cx, |ws, _| ws.thread_repos()), vec![api.clone(), web.clone()]);
+
+        ws.update(cx, |ws, cx| ws.refresh_repos(cx));
+        cx.run_until_parked();
+        ws.read_with(cx, |ws, _| {
+            let acts = ws.repo_acts();
+            assert!(acts.iter().any(|(label, _)| label == "リポジトリを追加…"));
+            assert_eq!(acts.iter().filter(|(label, _)| label.starts_with("Worktree 対象 ✓")).count(), 2);
+        });
+
+        // The diff pane groups both repositories and narrows to the picked one.
+        std::fs::write(api.join("g"), "x").unwrap();
+        std::fs::write(web.join("g"), "x").unwrap();
+        let grouped = ws.read_with(cx, |ws, _| ws.diff_scope().diff());
+        assert!(grouped.contains("## api") && grouped.contains("b/api/g"));
+        assert!(grouped.contains("## web") && grouped.contains("b/web/g"));
+        ws.update_in(cx, |ws, window, cx| {
+            ws.run(super::Act::DiffRepo(Some(api.clone())), window, cx)
+        });
+        let only_api = ws.read_with(cx, |ws, _| ws.diff_scope().diff());
+        assert!(only_api.contains("## api") && !only_api.contains("## web"));
+        ws.update_in(cx, |ws, window, cx| ws.run(super::Act::DiffRepo(None), window, cx));
+
+        ws.update(cx, |ws, _| ws.record_checkpoint(0));
+        ws.read_with(cx, |ws, _| {
+            let entry = &ws.ui["checkpoints"][ws.thread().meta.id.as_str()][0];
+            assert!(entry[api.to_string_lossy().as_ref()].is_string());
+            assert!(entry[web.to_string_lossy().as_ref()].is_string());
+        });
+        std::fs::write(web.join("f"), "two\n").unwrap();
+        assert_eq!(ws.update(cx, |ws, _| ws.restore_checkpoint(0)), Some(1));
+        assert_eq!(std::fs::read_to_string(web.join("f")).unwrap(), "one\n");
+        assert_eq!(std::fs::read_to_string(api.join("f")).unwrap(), "one\n");
+        // The project folder itself holds no snapshot; the rewind names it instead of failing.
+        assert!(ws.read_with(cx, |ws, _| matches!(
+            ws.thread().items.last(),
+            Some(Item::Notice(text)) if text.contains("shop")
+        )));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// `Config::default()` has no providers; `Config::load` adds the presets.
@@ -11994,6 +13650,62 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    async fn advanced_settings_edit_any_config_key_and_reload(cx: &mut TestAppContext) {
+        let (ws, cx) = open(cx);
+        cx.simulate_keystrokes("cmd-,");
+        let tab = super::SETTINGS_TABS.iter().position(|(n, _)| *n == "詳細設定").unwrap();
+        let config = greencode_core::home().join("config.toml");
+        cx.update(|window, cx| {
+            ws.update(cx, |ws, cx| {
+                ws.run(super::Act::SettingsTab(tab), window, cx);
+                // Credentials are listed but never editable here.
+                assert!(ws.advanced.rows.iter().any(|r| r.key == "tui.symbol_preset" && r.writable));
+                assert!(!ws.advanced.rows.iter().any(|r| r.writable && r.key.ends_with("api_key")));
+                ws.run(super::Act::SettingPick("tui.symbol_preset".into()), window, cx);
+                assert_eq!(ws.advanced.value.read(cx).value().as_ref(), "unicode");
+                ws.advanced.value.update(cx, |s, cx| s.set_value("ascii", window, cx));
+                ws.run(super::Act::SettingSave, window, cx);
+                assert_eq!(ws.cfg.tui.symbol_preset, greencode_core::config::SymbolPreset::Ascii);
+                assert!(ws.advanced.rows.iter().any(|r| r.key == "tui.symbol_preset" && r.set));
+                // An invalid value is refused and leaves the file alone.
+                ws.advanced.value.update(cx, |s, cx| s.set_value("sideways", window, cx));
+                ws.run(super::Act::SettingSave, window, cx);
+                assert!(ws.advanced.outcome.as_ref().is_some_and(|(ok, _)| !ok));
+                ws.run(super::Act::SettingReset, window, cx);
+                assert_eq!(ws.cfg.tui.symbol_preset, greencode_core::config::SymbolPreset::Unicode);
+                assert_eq!(ws.advanced.value.read(cx).value().as_ref(), "unicode");
+            })
+        });
+        assert!(!std::fs::read_to_string(&config).unwrap_or_default().contains("symbol_preset"));
+    }
+
+    #[gpui_kit::test]
+    async fn omp_settings_tab_edits_native_settings_and_tools(cx: &mut TestAppContext) {
+        let (ws, cx) = open(cx);
+        cx.simulate_keystrokes("cmd-,");
+        let tab = super::SETTINGS_TABS.iter().position(|(n, _)| *n == "エージェント").unwrap();
+        cx.update(|window, cx| {
+            ws.update(cx, |ws, cx| {
+                ws.run(super::Act::SettingsTab(tab), window, cx);
+                // OMP's choices become chips only where the native key accepts them.
+                assert_eq!(ws.advanced.choices["tui.symbol_preset"], ["unicode", "nerd", "ascii"]);
+                ws.run(super::Act::SettingWrite("tui.symbol_preset".into(), Some("ascii".into())), window, cx);
+                assert_eq!(ws.cfg.tui.symbol_preset, greencode_core::config::SymbolPreset::Ascii);
+                ws.run(super::Act::SettingWrite("tui.symbol_preset".into(), None), window, cx);
+                assert_eq!(ws.cfg.tui.symbol_preset, greencode_core::config::SymbolPreset::Unicode);
+                // A built-in tool goes through the allowlist; an `ext` one through the ツール tab's switch.
+                ws.run(super::Act::OmpTool("grep", false), window, cx);
+                assert!(!greencode_core::tools::tool_on(&ws.cfg.tools, "grep") && greencode_core::tools::tool_on(&ws.cfg.tools, "read"));
+                ws.run(super::Act::OmpTool("ast", false), window, cx);
+                assert!(ws.cfg.ext_off.iter().any(|t| t == "ast"));
+                // The GUI's own overrides survive the reload a config edit triggers.
+                ws.run(super::Act::OmpTool("grep", true), window, cx);
+                assert!(ws.cfg.tools.is_empty() && ws.cfg.ext_off.iter().any(|t| t == "ast"));
+            })
+        });
+    }
+
+    #[gpui_kit::test]
     async fn settings_screen_changes_and_persists_settings(cx: &mut TestAppContext) {
         use greencode_core::permission::Mode;
         let (ws, cx) = open(cx);
@@ -12041,6 +13753,19 @@ mod tests {
             })
         });
         assert!(ws.read_with(cx, |ws, _| ws.ui["keys"].as_object().unwrap().is_empty()));
+        // A text setting opens the palette over the settings screen and saves what is typed.
+        cx.update(|window, cx| {
+            ws.update(cx, |ws, cx| {
+                ws.run(super::Act::Settings, window, cx);
+                ws.run(super::Act::EditText(super::git::TextPrompt::VoiceCorrection), window, cx)
+            })
+        });
+        cx.simulate_input("訂正");
+        cx.simulate_keystrokes("enter");
+        ws.read_with(cx, |ws, _| {
+            assert_eq!(ws.ui["voice_correction"], "訂正");
+            assert!(ws.palette.is_none() && ws.settings.is_some());
+        });
     }
 
     #[gpui_kit::test]
@@ -12392,6 +14117,39 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    async fn usage_history_tab_and_period_keys(cx: &mut TestAppContext) {
+        use super::usage::UsageTab;
+        let (ws, cx) = open(cx);
+        ws.update_in(cx, |ws, window, cx| {
+            ws.run(super::Act::UsageHistory, window, cx);
+            let u = ws.usage.as_mut().unwrap();
+            assert!(u.tab == UsageTab::Cost && u.days == 30);
+            u.history = Some(vec![greencode_core::usage_history::Row {
+                day: (super::now() / 86400) as u32,
+                provider: "claude".into(),
+                model: "claude-sonnet-4-5".into(),
+                input: 1_000,
+                output: 500,
+                cache_read: 2_000,
+                cache_write: 0,
+                reported: 0.,
+            }]);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("t");
+        ws.read_with(cx, |ws, _| assert!(ws.usage.as_ref().unwrap().tab == UsageTab::Tokens));
+        cx.simulate_keystrokes("3");
+        ws.read_with(cx, |ws, _| assert_eq!(ws.usage.as_ref().unwrap().days, 92));
+        cx.simulate_keystrokes("1");
+        ws.read_with(cx, |ws, _| assert_eq!(ws.usage.as_ref().unwrap().days, 7));
+        cx.simulate_keystrokes("c");
+        ws.read_with(cx, |ws, _| assert!(ws.usage.as_ref().unwrap().tab == UsageTab::Cost));
+        cx.simulate_keystrokes("escape");
+        ws.read_with(cx, |ws, _| assert!(ws.usage.is_none()));
+    }
+
+    #[gpui_kit::test]
     async fn pull_requests_panel_toggles_and_closes_the_files_panel(cx: &mut TestAppContext) {
         use super::Act;
         let (ws, cx) = open(cx);
@@ -12585,15 +14343,19 @@ mod tests {
 
     #[gpui_kit::test]
     async fn themes_switch_persist_and_support_slash_command(cx: &mut TestAppContext) {
-        use super::{Pal, ThemeId};
+        use super::{themes, Choice, Pal, ThemeId};
         use gpui_kit::component::ActiveTheme;
 
         let (ws, cx) = open(cx);
         cx.update(|window, cx| {
             ws.update(cx, |ws, cx| {
-                ws.run(super::Act::Theme(ThemeId::Emerald), window, cx);
+                ws.run(
+                    super::Act::Theme(Choice::Builtin(ThemeId::Emerald)),
+                    window,
+                    cx,
+                );
                 assert!(cx.theme().is_dark());
-                assert_eq!(ws.theme_id(), ThemeId::Emerald);
+                assert_eq!(ws.theme_choice(false), Choice::Builtin(ThemeId::Emerald));
                 assert_eq!(
                     ws.pal(cx).accent,
                     Pal::for_theme(ThemeId::Emerald, true).accent
@@ -12604,13 +14366,13 @@ mod tests {
         let saved: serde_json::Value =
             serde_json::from_slice(&std::fs::read(greencode_core::home().join("ui.json")).unwrap())
                 .unwrap();
-        assert_eq!(saved["theme"], json!("emerald"));
+        assert_eq!(saved["theme_light"], json!("emerald"));
 
         cx.simulate_input("/theme paper");
         cx.simulate_keystrokes("enter");
         ws.read_with(cx, |ws, cx| {
             assert!(!cx.theme().is_dark());
-            assert_eq!(ws.theme_id(), ThemeId::Paper);
+            assert_eq!(ws.theme_choice(false), Choice::Builtin(ThemeId::Paper));
             assert_eq!(
                 ws.pal(cx).panel,
                 Pal::for_theme(ThemeId::Paper, false).panel
@@ -12630,16 +14392,84 @@ mod tests {
             let restored = cx.new(|cx| Workspace::new(Config::default(), None, window, cx));
             restored.read_with(cx, |ws, cx| {
                 assert!(!cx.theme().is_dark());
-                assert_eq!(ws.theme_id(), ThemeId::Paper);
+                assert_eq!(ws.theme_choice(false), Choice::Builtin(ThemeId::Paper));
             });
 
             std::fs::write(greencode_core::home().join("ui.json"), r#"{"theme":true}"#).unwrap();
             let legacy_dark = cx.new(|cx| Workspace::new(Config::default(), None, window, cx));
             legacy_dark.read_with(cx, |ws, cx| {
                 assert!(cx.theme().is_dark());
-                assert_eq!(ws.theme_id(), ThemeId::Dark);
+                assert_eq!(ws.theme_choice(false), Choice::Builtin(ThemeId::Dark));
+                assert_eq!(ws.theme_mode(), themes::ThemeMode::Dark);
+            });
+
+            std::fs::create_dir_all(greencode_core::home().join("themes")).unwrap();
+            std::fs::write(
+                greencode_core::home().join("themes/night.json"),
+                r##"{"name":"Night","appearance":"dark","panel":"#101820","accent":"#00FF00"}"##,
+            )
+            .unwrap();
+            std::fs::write(
+                greencode_core::home().join("ui.json"),
+                r#"{"theme_mode":"system","theme_light":"night"}"#,
+            )
+            .unwrap();
+            let custom = cx.new(|cx| Workspace::new(Config::default(), None, window, cx));
+            custom.read_with(cx, |ws, cx| {
+                assert_eq!(ws.theme_choice(false), Choice::Custom("night".into()));
+                let expected: gpui_kit::Hsla = gpui_kit::rgba(0x00FF00FF).into();
+                assert_eq!(ws.pal(cx).accent, expected);
             });
         });
+    }
+
+    #[gpui::test]
+    async fn project_pins_keep_order_and_archive_moves_them_out(cx: &mut TestAppContext) {
+        let (ws, cx) = open(cx);
+        let (a, b) = (
+            greencode_core::home().join("a"),
+            greencode_core::home().join("b"),
+        );
+        ws.update(cx, |ws, _| {
+            ws.toggle_project("pinned_projects", &a);
+            ws.toggle_project("pinned_projects", &b);
+            assert_eq!(ws.pinned_projects(), vec![a.clone(), b.clone()]);
+            ws.toggle_project("pinned_projects", &a);
+            assert_eq!(ws.pinned_projects(), vec![b.clone()]);
+            ws.toggle_project("archived_projects", &b);
+            assert!(ws.project_archived(&b));
+            // Pinned projects lead the known list; the active thread's project follows.
+            assert_eq!(ws.known_projects().first(), Some(&b));
+            assert!(ws.project_acts().iter().any(|(label, _)| label.starts_with("プロジェクトを復元: b")));
+
+            // Worktree branch prefixes are normalized when read; defaults survive an empty ui.json.
+            assert_eq!(ws.worktree_options().prefix, "greencode/");
+            ws.ui["worktree_prefix"] = serde_json::json!("feat");
+            assert_eq!(ws.worktree_options().prefix, "feat/");
+            ws.ui["worktree_submodules"] = serde_json::json!("skip");
+            assert_eq!(
+                ws.worktree_options().submodules,
+                greencode_core::worktree::Submodules::Skip
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn text_generation_model_cycles_through_the_picker_and_off(cx: &mut TestAppContext) {
+        let (ws, cx) = open(cx);
+        ws.update_in(cx, |ws, _, _| {
+            let models = ws.models();
+            assert!(!models.is_empty());
+            ws.set_text_model(None);
+            ws.cycle_text_model();
+            assert_eq!(ws.text_model(), Some(models[0].clone()));
+            // A model that left the picker cycles back to off instead of staying selected.
+            ws.set_text_model(Some("missing/model".into()));
+            ws.cycle_text_model();
+            assert_eq!(ws.text_model(), None);
+            ws.set_text_model(None);
+        });
+        cx.run_until_parked();
     }
 }
 

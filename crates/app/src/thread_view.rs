@@ -445,6 +445,21 @@ pub fn items_from(messages: &[Message]) -> Vec<Item> {
     items
 }
 
+pub const NEW_SESSION: &str = "── 新しいセッション ──";
+
+/// What a saved thread shows: every message, with a marker where `/clear` started a new session.
+pub fn session_items(id: &str) -> Result<Vec<Item>, String> {
+    let (_, messages, resets) = greencode_core::session::Session::load_all(id).map_err(|e| format!("{e:#}"))?;
+    let (mut items, mut from) = (Vec::new(), 0);
+    for at in resets {
+        items.extend(items_from(&messages[from..at]));
+        items.push(Item::Notice(NEW_SESSION.into()));
+        from = at;
+    }
+    items.extend(items_from(&messages[from..]));
+    Ok(items)
+}
+
 /// Records a tool's result; returns the item's index.
 pub fn finish_tool(items: &mut [Item], tool_id: &str, out: String, err: bool) -> Option<usize> {
     let ix = items.iter().rposition(|i| matches!(i, Item::Tool { id, .. } if id == tool_id))?;

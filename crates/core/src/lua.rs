@@ -72,6 +72,10 @@ struct Inner {
 
 pub struct Lua {
     cwd: PathBuf,
+    /// Explicit `extensions` entries, resolved; they load even when `disabledExtensions` names them.
+    extra: Vec<PathBuf>,
+    /// `extension-module:<name>` ids left out of the discovered directories.
+    disabled: Vec<String>,
     inner: Mutex<Inner>,
     notes: Arc<Mutex<Vec<String>>>,
 }
@@ -80,21 +84,54 @@ fn trusted_file() -> PathBuf {
     crate::home().join("trusted")
 }
 
-fn lua_files(dir: &Path) -> Vec<PathBuf> {
+/// `<name>.lua` files, minus the extension modules `disabled` names.
+fn lua_files(dir: &Path, disabled: &[String]) -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|e| e == "lua"))
+        .filter(|p| {
+            let name = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            !disabled.iter().any(|d| d == name)
+        })
         .collect();
     v.sort();
     v
 }
 
+/// Explicit extension entries must be absolute or `~/`: a cwd-relative entry would let any
+/// checkout run Lua without the project-trust prompt.
+fn expand(entry: &str) -> Option<PathBuf> {
+    match entry.strip_prefix("~/") {
+        Some(rest) => Some(crate::user_home().join(rest)),
+        None if entry == "~" => Some(crate::user_home()),
+        None => Some(PathBuf::from(entry)).filter(|p| p.is_absolute()),
+    }
+}
+
 impl Lua {
-    pub fn new(cwd: &Path) -> Lua {
-        Lua { cwd: cwd.to_path_buf(), inner: Default::default(), notes: Default::default() }
+    pub fn new(cwd: &Path, opts: &crate::config::integrations::IntegrationOpts) -> Lua {
+        let extra = opts
+            .extensions
+            .iter()
+            .filter_map(|entry| expand(entry))
+            .flat_map(|path| {
+                if path.is_dir() {
+                    lua_files(&path, &[])
+                } else {
+                    vec![path]
+                }
+            })
+            .filter(|p| p.extension().is_some_and(|e| e == "lua"))
+            .collect();
+        let disabled = opts
+            .disabled_extensions
+            .iter()
+            .filter_map(|entry| entry.strip_prefix("extension-module:").map(String::from))
+            .collect();
+        Lua { cwd: cwd.to_path_buf(), extra, disabled, inner: Default::default(), notes: Default::default() }
     }
 
     fn project_dir(&self) -> PathBuf {
@@ -110,7 +147,7 @@ impl Lua {
     /// Project extensions run with the user's privileges, so a cloned repo must not load them silently.
     pub fn untrusted(&self) -> Option<PathBuf> {
         let dir = self.project_dir();
-        (!lua_files(&dir).is_empty() && !self.is_trusted()).then_some(dir)
+        (!lua_files(&dir, &self.disabled).is_empty() && !self.is_trusted()).then_some(dir)
     }
 
     pub fn trust(&self) {
@@ -123,10 +160,11 @@ impl Lua {
 
     /// (Re)loads extensions if any file changed since the last call.
     pub async fn refresh(&self) -> Result<(), String> {
-        let mut files = lua_files(&crate::home().join("extensions"));
+        let mut files = lua_files(&crate::home().join("extensions"), &self.disabled);
         if self.is_trusted() {
-            files.extend(lua_files(&self.project_dir()));
+            files.extend(lua_files(&self.project_dir(), &self.disabled));
         }
+        files.extend(self.extra.iter().cloned());
         let stamp: Vec<_> = files.iter().map(|p| (p.clone(), p.metadata().and_then(|m| m.modified()).ok())).collect();
         let rx = {
             let mut inner = self.inner.lock().unwrap();
@@ -206,12 +244,37 @@ impl Lua {
             return Value::Null;
         }
         match self.call("_hook", json!(ev), payload).await {
-            Ok(v) => v,
+            Ok(v) => {
+                self.notes.lock().unwrap().push(format!("{HOOK_TAG}{ev}"));
+                v
+            }
             Err(e) => {
                 self.notes.lock().unwrap().push(format!("{ev} hook failed: {e}"));
                 Value::Null
             }
         }
+    }
+}
+
+/// Marks a note as a hook-run status line for `statusLine.showHookStatus`; the TUI strips it.
+pub const HOOK_TAG: &str = "\u{1f}hook\u{1f}";
+
+/// The hook event a note reports, when the note came from `hook()` rather than `gc.notify`.
+pub fn hook_event(note: &str) -> Option<&str> {
+    note.strip_prefix(HOOK_TAG)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hook_notes_are_tagged_and_split_from_plain_notifications() {
+        let note = format!("{HOOK_TAG}tool_end");
+        assert_eq!(hook_event(&note), Some("tool_end"));
+        assert_eq!(hook_event("gc.notify text"), None);
+        // A notification that merely mentions the tag mid-string stays a notification.
+        assert_eq!(hook_event("prefix \u{1f}hook\u{1f}tool_end"), None);
     }
 }
 

@@ -38,6 +38,9 @@ pub struct Meta {
     /// Set when `cwd` is a worktree: the repository it was created from.
     #[serde(default)]
     pub repo: Option<PathBuf>,
+    /// Set on a child thread started by `delegate_task` (or a native `task` item with `backend`): its parent thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
 }
 
 impl Meta {
@@ -57,6 +60,7 @@ impl Meta {
             backend,
             created: now.as_secs(),
             repo: None,
+            parent: None,
         }
     }
 }
@@ -105,6 +109,11 @@ pub struct LinkedPr {
 
 fn dir() -> PathBuf {
     crate::home().join("sessions")
+}
+
+/// Same rule as `validate_id`, for other modules that build per-session paths.
+pub(crate) fn check_id(id: &str) -> Result<()> {
+    validate_id(id)
 }
 
 pub(crate) fn validate_id(id: &str) -> Result<()> {
@@ -244,30 +253,52 @@ impl Session {
         source
     }
 
-    /// Messages since the last compaction marker (the marker becomes the first message).
+    /// Messages since the last compaction marker (the marker becomes the first message) and the last `reset`.
     pub fn load(id: &str) -> Result<(Meta, Vec<Message>)> {
+        let (meta, mut messages, resets) = Self::load_all(id)?;
+        messages.drain(..resets.last().copied().unwrap_or(0));
+        Ok((meta, messages))
+    }
+
+    /// Appends the marker `/clear` leaves: the next agent starts with no history; the view keeps what came before.
+    pub fn reset(id: &str) -> Result<()> {
+        match Self::open(id) {
+            Some(s) => s.append(&json!({ "reset": true })),
+            None => Ok(()),
+        }
+    }
+
+    /// Like `load`, but keeps the messages from before each `reset`; the third value is the message index each one starts at.
+    pub fn load_all(id: &str) -> Result<(Meta, Vec<Message>, Vec<usize>)> {
         validate_id(id)?;
         let f = std::fs::File::open(Self::path(id))?;
         let mut meta = None;
         let mut messages = Vec::new();
+        let mut resets = Vec::new();
         for line in BufReader::new(f).lines() {
             let Ok(v) = serde_json::from_str::<Value>(&line?) else {
                 continue;
             };
+            let base = resets.last().copied().unwrap_or(0);
             if let Some(m) = v.get("meta") {
                 meta = serde_json::from_value(m.clone()).ok();
+            } else if v.get("reset").is_some() {
+                resets.push(messages.len());
             } else if let Some(s) = v.get("compact").and_then(Value::as_str) {
                 let frames: Vec<String> = v
                     .get("frames")
                     .and_then(|f| serde_json::from_value(f.clone()).ok())
                     .unwrap_or_default();
-                messages = vec![crate::snap::message(s, &frames)];
+                messages.truncate(base);
+                messages.push(crate::snap::message(s, &frames));
             } else if let Some(at) = v.get("truncate").and_then(Value::as_u64) {
+                let mut tail = messages.split_off(base);
                 if v["keep_user_messages"] == true {
-                    rewind_exploration(&mut messages, at as usize);
+                    rewind_exploration(&mut tail, at as usize);
                 } else {
-                    messages.truncate(at as usize);
+                    tail.truncate(at as usize);
                 }
+                messages.append(&mut tail);
             } else if let Ok(m) = serde_json::from_value(v) {
                 messages.push(m);
             }
@@ -276,7 +307,7 @@ impl Session {
             .map(|v| v.meta)
             .or(meta)
             .ok_or_else(|| anyhow!("session {id} has no meta line"))?;
-        Ok((meta, messages))
+        Ok((meta, messages, resets))
     }
 
     /// Text-only history for a future cross-backend handoff. Tool state and reasoning are not portable.
@@ -285,7 +316,12 @@ impl Session {
         let f = std::fs::File::open(Self::path(id))?;
         let mut messages = Vec::new();
         for line in BufReader::new(f).lines() {
-            if let Ok(message) = serde_json::from_str::<Message>(&line?) {
+            let line = line?;
+            if line.starts_with("{\"reset\"") {
+                messages.clear();
+                continue;
+            }
+            if let Ok(message) = serde_json::from_str::<Message>(&line) {
                 let update = message.content.iter().any(
                     |b| matches!(b, crate::Block::Text { text } if crate::context::is_update(text)),
                 );

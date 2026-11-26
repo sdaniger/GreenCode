@@ -75,7 +75,7 @@ pub fn schedule_failed(dir: &Path, label: &str) -> Result<bool> {
     }
 }
 
-fn escape(s: &str) -> String {
+pub(crate) fn escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
@@ -112,7 +112,7 @@ fn launchctl_enabled() -> bool {
     !cfg!(test) && std::env::var_os("GREENCODE_NO_LAUNCHCTL").is_none()
 }
 
-fn domain() -> Result<String> {
+pub(crate) fn domain() -> Result<String> {
     let out = std::process::Command::new("id").arg("-u").output().context("id -u")?;
     Ok(format!("gui/{}", String::from_utf8_lossy(&out.stdout).trim()))
 }

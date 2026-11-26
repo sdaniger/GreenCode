@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key><string>GreenCode</string>
+	<key>CFBundleDisplayName</key><string>GreenCode</string>
+	<key>CFBundleIdentifier</key><string>dev.greencode.app</string>
+	<key>CFBundleExecutable</key><string>greencode</string>
+	<key>CFBundlePackageType</key><string>APPL</string>
+	<key>CFBundleShortVersionString</key><string>@VERSION@</string>
+	<key>CFBundleVersion</key><string>@VERSION@</string>
+	<key>NSHighResolutionCapable</key><true/>
+	<!-- greencode://new?prompt=… opens a draft, greencode://thread/ID a thread, greencode://open?path=… a folder -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key><string>GreenCode link</string>
+			<key>CFBundleURLSchemes</key>
+			<array><string>greencode</string></array>
+		</dict>
+	</array>
+</dict>
+</plist>

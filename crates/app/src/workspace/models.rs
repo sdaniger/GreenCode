@@ -122,6 +122,13 @@ impl Workspace {
             if ids.is_empty() {
                 ids = cached.get(&t.meta.backend).cloned().unwrap_or_default();
             }
+            if let Some(over) = self.cfg.backend_overrides.get(&t.meta.backend) {
+                for model in &over.models {
+                    if !ids.contains(model) {
+                        ids.push(model.clone());
+                    }
+                }
+            }
             add(&t.meta.backend, ids, model_option);
         }
         if t.meta.backend != "native" {
@@ -880,7 +887,7 @@ impl Workspace {
             bar = bar.child(speed);
         }
         bar = bar.child(div().flex_1());
-        for m in [Mode::Ask, Mode::AutoEdit, Mode::Full, Mode::Plan] {
+        for &m in greencode_core::config::backend_modes(&self.thread().meta.backend) {
             bar = bar.child(
                 chip(
                     SharedString::from(format!("picker-mode-{}", mode_label(m))),

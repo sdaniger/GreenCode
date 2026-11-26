@@ -1,0 +1,470 @@
+theme.dark	テーマ	ダークテーマ	背景が暗いターミナル向けの配色
+theme.light	テーマ	ライトテーマ	背景が明るいターミナル向けの配色
+symbolPreset	テーマ	記号セット	アイコンに使う文字の組み合わせ
+colorBlindMode	テーマ	色覚サポート	差分の追加を緑ではなく青で表示
+composer.shape	入力欄	入力欄の形	入力欄とステータス行の見た目
+composer.tokenRate	入力欄	生成速度	生成中のトークン毎秒をその場に表示
+statusLine.preset	ステータス行	プリセット	ステータス行の構成をまとめて切り替え
+statusLine.separator	ステータス行	区切り	セグメント間の記号のスタイル
+statusLine.contextLine	ステータス行	コンテキスト表示	左右の区切りの行に文脈の使用量を出す
+statusLine.sessionAccent	ステータス行	セッション色	セッション名の色を枠線と余白にも使う
+statusLine.transparent	ステータス行	背景を透過	端末の背景をそのまま使う
+statusLine.compactThinkingLevel	ステータス行	思考レベルを省略	思考レベルをモデル名のアイコン一つにまとめる
+statusLine.showHookStatus	ステータス行	フックの状態を表示	フックの状態メッセージをステータス行の下に出す
+task.showResolvedModelBadge	表示	解決後のモデルを表示	各サブエージェントが実際に使ったモデル ID を出す
+tui.resizeScrollback	表示	履歴の再描画	リサイズ後の履歴の整え方を選ぶ
+terminal.showProgress	表示	端末の進捗表示	実行中は OSC 9;4 の進捗を端末に送る
+terminal.programStatus	表示	プログラム状態 (OSC 7501)	作業中・待機・完了・失敗を端末に知らせる
+tui.textSizing	表示	大きな見出し (Kitty)	Kitty 端末で見出しを 2 倍の大きさで描く
+tui.colorfulMarkdown	表示	カラフルな Markdown	見出しや強調、表の見出しに配色を使う
+tui.renderMermaid	表示	Mermaid 図を描画	Mermaid のコードを文字の図として表示
+tui.renderSvg	表示	SVG 図を描画	エージェントに作図を促し画像として表示
+tui.renderEmbeds	表示	画像とページの埋め込み	画像や Web ページを本文中に表示する
+tui.autoGraph	表示	表の自動グラフ化	数値の表の下にテーマ色のグラフを描く
+tui.reactions	表示	エージェントの反応	応答に絵文字で反応させる
+tui.codexResetFireworks	表示	Codex リセットの花火	Codex の使用量リセットを花火で祝う
+tui.titleState	表示	タイトルの実行状態	端末タイトルに作業中や入力待ちを表示
+tui.titleSpinner	表示	タイトルのスピナー	作業中にタイトルで回すアニメーションの種類
+tui.spinnerInterval	表示	スピナーの間隔 (ms)	スピナーのコマ送りの間隔、0 なら静止
+tui.maxFps	表示	最大フレームレート	画面を描き直す頻度の上限
+tui.hyperlinks	表示	端末のハイパーリンク	パスや URL をクリックで開く
+tui.mouse	表示	クリックでフォーカス	クリックでサブエージェントや HUD を選ぶ
+tui.tight	表示	詰めたレイアウト	出力の左右の余白 1 文字を詰める
+display.shimmer	表示	きらめき	読み込み中の文字に使うアニメーション
+tui.motion	表示	動き	スピナーや点滅をまとめて切り替える
+display.pinnedAgents	表示	固定したエージェント	入力欄の上に実行中のエージェントを並べる
+display.subagentLivePreview	表示	サブエージェントの実況	固定した各エージェントの現在のツール呼び出しを出す
+display.smoothStreaming	表示	なめらかな表示	届いた分ずつ少し遅らせて文字を流す
+display.hideToolActivity	表示	ツールの動作を隠す	モデルが呼んだツールと結果を履歴に出さない
+display.showTokenUsage	表示	トークン使用量を表示	各応答にターンごとのトークン数を出す
+display.showTurnTime	表示	ターン時間を表示	入力から応答までの合計時間を出す
+display.cacheMissMarker	表示	キャッシュミスの印	キャッシュを外したターンの後に区切りを出す
+display.shellVisualization	表示	シェル実行の可視化	bash コマンドを実行の流れとして表示
+display.advisorCollapsedLines	表示	アドバイザーの省略行数	畳んだカードに残す注記の行数
+display.collapseCompacted	表示	圧縮前の履歴を畳む	要約より前の履歴を要約の下に畳む
+showHardwareCursor	表示	端末カーソルを表示	IME 入力のためにカーソルを出す
+tui.imeSafeCursor	表示	IME に強い入力欄	変換中の文字で枠線がずれない
+title.icons	表示	タイトルのアイコン	セッション名の頭に付くアイコンや短い印
+terminal.showImages	画像	画像をインライン表示	端末の中に画像をそのまま描く
+images.autoResize	画像	画像を自動縮小	大きい画像を 2000x2000 以内に収める
+images.blockImages	画像	画像を送らない	
+defaultThinkingLevel	思考	思考レベル	思考に対応したモデルの推論の深さ
+hideThinkingBlock	思考	思考ブロックを隠す	応答中の思考ブロックを出さない
+expandThinkingBlocks	思考	思考ブロックを開いたまま	終わった後も思考を畳まずに残す
+proseOnlyThinking	思考	思考は地の文のみ	思考の要約からコードブロックを除く
+omitThinking	思考	思考の要約を省く	対応する提供元に思考の要約を送らせない
+externalThinking	思考	外部思考	本人にも見せない下書き用で、対応モデルの推論は止まる
+model.loopGuard.enabled	思考	ループ検出	推論や本文の同じ繰り返しを止める
+model.loopGuard.checkAssistantContent	思考	本文もループ検出	応答本文も繰り返しを調べる
+model.loopGuard.toolCallReminder	思考	ループ時のツール催促	計画だけを繰り返す Gemini にツール呼び出しを促す
+model.toolCallLoopGuard.enabled	思考	ツール呼び出しのループ検出	同じツール呼び出しの繰り返しを検出して軌道修正する
+model.toolCallLoopGuard.threshold	思考	ツールループのしきい値	何回続いたら軌道修正するか
+model.toolCallLoopGuard.exemptTools	思考	ループ検出の除外ツール	繰り返しても検出しないツール名
+providers.autoThinkingMaxEffort	思考	自動思考の上限	auto が選べる最大の深さ
+temperature	サンプリング	温度	出力のばらつき、0 で毎回同じ結果
+topP	サンプリング	Top P	候補を上位の累積確率で絞る
+topK	サンプリング	Top K	上位 K 個の候補から選ぶ
+minP	サンプリング	Min P	確率の低すぎる候補を捨てる
+presencePenalty	サンプリング	出現ペナルティ	既に出た語を繰り返しにくくする
+repetitionPenalty	サンプリング	繰り返しペナルティ	同じ語の繰り返しを抑える
+textVerbosity	サンプリング	応答の詳しさ	OpenAI Responses と Codex の応答の長さ
+tier.openai	サンプリング	サービス階層 (OpenAI)	OpenAI 系リクエストの処理階層
+tier.anthropic	サンプリング	サービス階層 (Anthropic)	Claude リクエストの処理階層
+tier.google	サンプリング	サービス階層 (Google)	Gemini リクエストの処理階層
+tier.subagent	サンプリング	サービス階層 (サブエージェント)	サブエージェントに使う処理階層
+tier.advisor	サンプリング	サービス階層 (アドバイザー)	アドバイザーモデルに使う処理階層
+modelRoleStorage	プロンプト	モデル役割の保存先	モデル選択の役割を残す場所
+inlineToolDescriptors	プロンプト	ツール説明を本文に	ツールの説明をプロンプトに一度だけ書く
+includeModelInPrompt	プロンプト	使用モデルを明記	どのモデルかをプロンプトに書く
+includeWorkspaceTree	プロンプト	作業ツリーを含める	プロンプトにディレクトリ構成を載せる
+encourageEdits	プロンプト	編集ツールを使わせる	ファイル編集は edit ツールに限る
+skillful	プロンプト	スキルを一覧に載せる	利用できるスキルをシステムプロンプトに並べる
+personality	プロンプト	性格	システムプロンプトに反映する話し方の雰囲気
+retry.maxRetries	再試行と代替	再試行回数	API エラー時にやり直す回数
+retry.maxDelayMs	再試行と代替	再試行の待ち上限	再試行の間隔の上限、超えると待たずに失敗する
+retry.waitForUsageReset	再試行と代替	利用上限の回復を待つ	提供元が示す回復時刻まで待って再開する
+retry.modelFallback	再試行と代替	モデルの代替	エラー時に別のモデルへ切り替える
+retry.fallbackOn	再試行と代替	代替の条件	どの失敗で代替モデルへ切り替えるか
+retry.rateLimitWalksChain	再試行と代替	回数制限でも連鎖	回数制限でも代替モデルの連鎖へ進む
+retry.usageAwareFallback	再試行と代替	残量を見た代替	残量が少なければ同じ提供元の別アカウントを優先
+retry.usageReservePct	再試行と代替	残量の余白	残りがこの割合を切ったら上限間近とみなす
+retry.usageReservePolicy	再試行と代替	余白に達したとき	同じ提供元の枠が残り僅かになったときの動き
+retry.fallbackChains	再試行と代替	代替モデルの連鎖	モデルや提供元ごとに代替の順番を決める JSON
+retry.fallbackRevertPolicy	再試行と代替	元のモデルに戻る条件	代替の後で元のモデルへ戻す時期
+providers.anthropic.serverSideFallback	再試行と代替	Anthropic 側の代替 Fable 5	拒否された要求を Opus 5 で再試行する
+advisor.enabled	アドバイザー	アドバイザーを有効化	2 つ目のモデルが各ターンを見て注記を挟む
+advisor.syncBacklog	アドバイザー	レビュー待ちを同期	レビューが追い付くまで本体を待たせる
+advisor.immuneTurns	アドバイザー	割り込み後の猶予ターン	割り込みの直後は指摘を控えるターン数
+advisor.continueSeverity	アドバイザー	再開させる重大度	どの重要度の指摘で応答後に再開するか
+advisor.reviewMode	アドバイザー	レビューの周期	レビューをターンごとに行うか終了時だけか
+advisor.reviewInterval	アドバイザー	レビュー間隔	何回に 1 回レビューするか
+advisor.maxNotesPerUpdate	アドバイザー	1 回の指摘の上限	一度に受け取る指摘の最大数
+advisor.evictStaleResults	アドバイザー	古い結果を捨てる	前回の読み取り結果を短い置き文字に置き換える
+prewalk.enabled	事前走査	事前走査を有効化	計画を立てた後、最初の編集で速いモデルに渡す
+prewalk.from	事前走査	計画側のモデル	/prewalk restart で計画に戻るモデル
+prewalk.into	事前走査	引き継ぎ先	最初の編集で切り替える先のモデル
+prewalk.auto	事前走査	自動の事前走査	難しい推論が先頭にあるかを判定して切り替える
+prewalk.autoTarget	事前走査	自動時の引き継ぎ先	自動の事前走査で切り替える先のモデル
+images.describeForTextModels	視覚	画像を文章で渡す	画像を見られないモデルには説明文を渡す
+images.urls.enabled	視覚	画像を URL で渡す	画像をアップロードし短い URL で渡す
+images.urls.backends	視覚	画像 URL の置き場所	画像を公開する先の並び
+images.urls.command	視覚	画像アップロードのコマンド	アップロードに使うコマンドの引数テンプレート
+images.urls.publicBaseUrl	視覚	画像 URL の公開元	外から届く画像 URL の基点
+images.urls.ttlHours	視覚	画像 URL の有効期間 (時間)	画像 URL を使える時間
+images.urls.bindHost	視覚	画像 URL の待受ホスト	配信サーバが待ち受けるホスト
+images.urls.sshTarget	視覚	画像 URL の SSH 先	SSH 転送の接続先
+images.urls.sshRemotePort	視覚	画像 URL の SSH ポート	SSH 転送の受け側ポート
+steeringMode	入力	作業中のメッセージ	作業中に届いたメッセージをどう処理するか
+followUpMode	入力	追いメッセージの扱い	ターン終了後に続きのメッセージを送る方法
+interruptMode	入力	中断のタイミング	割り込みでツールを止める時期
+btw.inject	入力	/btw の差し込み	/btw の下書きを Alt+I で本編に送る
+tui.vimMode	入力	Vim 編集モード	入力欄を Vim のキー操作で編集する
+tui.vimModeDisplay	入力	Vim モードの表示	現在の Vim モードをどう示すか
+loop.mode	入力	ループの動き	/loop の各回の前に何をするか
+loop.conditionTimeoutMs	入力	ループ条件の待ち (ms)	/loop の条件コマンドを待つ上限
+composer.recallClearedDrafts	入力	消した下書きを呼び出す	Ctrl+c で消した下書きを終了まで残す
+doubleEscapeAction	入力	Esc 2 回の動作	空の入力欄で Esc を 2 回押したときの動き
+input.bareExitOnEmptySession	入力	空セッションでの exit	最初のメッセージ前なら exit だけで終了する
+input.bareSlashCommands	入力	/ なしのコマンド	コマンド名だけでもスラッシュコマンドを実行する
+treeFilterMode	入力	セッションツリーの絞り込み	セッションツリーを開いたときの既定の絞り込み
+autocompleteMaxVisible	入力	補完候補の件数	
+spelling.typoDetection	入力	綴りの検出 (macOS)	macOS の辞書で綴り違いに印を付ける
+spelling.autocomplete	入力	単語の補完	
+composer.predictions	入力	次の入力を予測	応答後に次のメッセージを予測して薄く表示する
+composer.predictionAlternatives	入力	予測の候補数	4 つまで候補を出して選べる
+spelling.autocorrect	入力	自動修正 (macOS)	確かな綴り違いを自動で直す
+emojiAutocomplete	入力	絵文字の補完	:name: や顔文字から絵文字を補完する
+paste.largeMenuThreshold	入力	大きい貼り付けのメニュー	この行数を超える貼り付けで選択肢を出す
+tools.approval	承認	ツールごとの承認	ツール別に自動許可・確認・拒否を決める
+tools.approvalMode	承認	ツールの承認	ツール呼び出しをどこまで自動で通すか
+tools.restrictedFolders	承認	制限するフォルダ	常に明示的な承認が要るフォルダ
+completion.notify	通知	完了の通知	応答が終わったら知らせる
+error.notify	通知	エラーの通知	エラーで止まったら知らせる
+ask.timeout	通知	質問の待ち時間	回答が無いとき自動で送るまでの秒数
+ask.notify	通知	質問の通知	入力待ちになったら知らせる
+pty.notify	通知	コンソールの通知	対話コンソールの入力待ちを知らせる
+recap.enabled	通知	待機中の要約	放置されたら状況を短くまとめる
+recap.idleSeconds	通知	要約までの待ち時間	何秒放置したら要約を出すか
+stt.enabled	音声	音声入力	マイクから文字起こしして入力する
+stt.submitTrigger	音声	音声入力の送信条件	話し終えたら自動で送る条件
+collab.relayUrl	共有	中継サーバ	/collab が使う中継サーバ
+collab.webUrl	共有	Web UI の URL	/collab のリンクが開く Web 画面
+collab.displayName	共有	表示名	他の参加者に見える名前
+collab.autoStart	共有	自動で共有	起動したセッションを自動で中継に載せる
+share.serverUrl	共有	共有サーバ	/share のアップロードと閲覧の基点
+share.store	共有	共有の保存先	/share の暗号化データをどこに置くか
+share.redactSecrets	共有	秘密の伏せ字	共有前に認証情報を伏せる
+stream.serverUrl	配信	配信サーバ	ライブ配信で使うサーバ
+stream.redactPatterns	配信	追加の伏せ字パターン	配信前に伏せる正規表現を足す
+magicKeywords.enabled	魔法の言葉	魔法の言葉	決まった言葉に隠し機能を割り当てる
+autoResume	起動と更新	自動で再開	同じフォルダの直近のセッションを続ける
+startup.quiet	起動と更新	静かな起動	起動時の挨拶と状態表示を省く
+startup.showSplash	起動と更新	起動画面を表示	起動時にアニメーションの画面を出す
+startup.setupWizard	起動と更新	セットアップ案内	新しい手順だけを一度案内する
+startup.checkUpdate	起動と更新	更新を確認	起動時に新しい版があるか調べる
+update.channel	起動と更新	更新の系統	安定版か先行版かを選ぶ
+update.auto	起動と更新	自動更新	起動時に裏で更新し次回から新しい版で動く
+marketplace.autoUpdate	起動と更新	プラグインの自動更新	起動時にプラグインの更新を調べる
+startup.changelogMode	起動と更新	更新内容の表示	更新の説明を要約・詳細・非表示から選ぶ
+session.worktreeScope	起動と更新	再開の対象	再開候補に他の作業ツリーを含めるか
+power.sleepPrevention	電源	スリープの抑止	実行中はスリープを止める
+features.unexpectedStopDetection	エージェント	途中終了の検出	本文なしで止まったときに自動で立て直す
+git.enabled	Git	Git 連携	ブランチや状態、PR の情報を出す
+skills.registryUrl	スキル	スキルの配布元	スキルの検索や公開に使う配布元
+workspace.additionalDirectories	一般	追加の作業フォルダ	毎回のセッションに加える別の作業フォルダ
+contextFiles.extra	一般	追加の指示ファイル	AGENTS.md と一緒に読む指示ファイル名
+contextPromotion.enabled	一般	コンテキストの自動昇格	溢れたら圧縮せず広い文脈のモデルへ移る
+extendedContext	一般	拡張コンテキスト	使えるなら広い文脈枠を使う
+branchSummary.enabled	一般	分岐の要約	枝を離れるときに要約を作る
+compaction.enabled	圧縮	自動圧縮	文脈が膨らんだら自動で縮める
+compaction.experimentalContextManagement	圧縮	ノート併用の文脈 (実験的)	窓をまたいでノートと生の履歴を残す
+compaction.midTurnEnabled	圧縮	ターン途中の圧縮	応答の合間の区切りでも圧縮を検討する
+compaction.methodOrder	圧縮	圧縮方法の順番	自動の圧縮で試す方法の優先順
+compaction.thresholdPercent	圧縮	圧縮のしきい値	文脈が何割に達したら圧縮するか
+compaction.thresholdTokens	圧縮	圧縮のトークン上限	このトークン数で圧縮する
+compaction.handoffSaveToDisk	圧縮	引き継ぎ文書を保存	引き継ぎ用の文書をファイルに残す
+compaction.remoteStreamingV2Enabled	圧縮	リモート圧縮 V2	対応モデルで新しい圧縮方式を使う
+compaction.asyncEnabled	圧縮	非同期の圧縮	しきい値に近づいたら裏で要約を用意する
+compaction.idleEnabled	圧縮	待機中の圧縮	放置中に文脈を圧縮する
+compaction.idleThresholdTokens	圧縮	待機圧縮のしきい値	このトークン数を超えたら待機中に圧縮する
+compaction.idleTimeoutSeconds	圧縮	待機圧縮までの時間	何秒放置したら圧縮するか
+compaction.supersedeReads	圧縮	古い読み取りを捨てる	同じファイルを読み直したら前の結果を省く
+compaction.dropUseless	圧縮	無益な結果を省く	空振りしたツール結果を消費後に省く
+ttsr.enabled	ルール (TTSR)	TTSR	出力がルールに合えば生成中に止める
+ttsr.judge	ルール (TTSR)	判定付きルール	質問形式のルールを判定モデルに尋ねる
+ttsr.contextMode	ルール (TTSR)	発動時の出力	発動したとき途中の出力を残すか捨てるか
+ttsr.interruptMode	ルール (TTSR)	中断の範囲	どこまでを生成中に止めるか
+ttsr.repeatMode	ルール (TTSR)	繰り返しの条件	同じルールをいつ再び発動できるか
+ttsr.repeatGap	ルール (TTSR)	繰り返しの間隔	何メッセージ空けたら再発動するか
+ttsr.builtinRules	ルール (TTSR)	組み込みルール	最初から入っているルールを読み込む
+ttsr.disabledRules	ルール (TTSR)	無効にするルール	無視するルールの名前
+snapcompact.systemPrompt	実験	Snapcompact システムプロンプト	システムプロンプトを画像にして送る
+snapcompact.toolResults	実験	Snapcompact ツール結果	大きいツール結果を画像にして送る
+tools.format	実験	ツール呼び出しの形式	ツールをモデルにどう渡すか
+snapcompact.shape	実験	Snapcompact の枠	画像化するときの枠の形
+memory.backend	記憶	記憶の保存先	記憶の仕組みをどれにするか
+autolearn.enabled	自動学習	自動学習 (実験的)	停止後に教訓を記憶へ残すよう促す
+autolearn.autoContinue	自動学習	停止時に自動実行	停止のたびに記録用のターンを 1 回走らせる
+mnemopi.dbPath	Mnemopi	DB のパス	記憶を置く SQLite のファイル
+mnemopi.bank	Mnemopi	バンク名	共有する記憶のまとまりの名前
+mnemopi.scoping	Mnemopi	記憶の範囲	全体で共有するか作業フォルダごとに分けるか
+mnemopi.embeddingVariant	Mnemopi	埋め込みの種類	英語向けか多言語向けかの埋め込みモデル
+mnemopi.autoRecall	Mnemopi	自動で思い出す	セッション開始時に記憶を思い出す
+mnemopi.recallRelevance	Mnemopi	記憶の関連度	思い出した記憶が課題に合うか判定する
+mnemopi.autoRetain	Mnemopi	自動で覚える	終わったやり取りを記憶に残す
+mnemopi.polyphonicRecall	Mnemopi	多角的な想起	複数の手掛かりを合わせて記憶を探す
+mnemopi.enhancedRecall	Mnemopi	想起の高速化	同じ問い合わせの結果を使い回す
+mnemopi.proactiveLinking	Mnemopi	自動で関連付け	覚えた記憶を関連する項目につなぐ
+mnemopi.noEmbeddings	Mnemopi	埋め込みを使わない	語の一致だけで記憶を探す
+mnemopi.embeddingModel	Mnemopi	埋め込みモデル	埋め込みの種類を上書きするモデル ID
+mnemopi.embeddingApiUrl	Mnemopi	埋め込み API の URL	埋め込みに使う互換 API の接続先
+mnemopi.embeddingApiKey	Mnemopi	埋め込み API の鍵	埋め込み API の認証キー
+mnemopi.embeddingQueryPrefix	Mnemopi	埋め込みの前置き	検索語の前に付ける文字列
+mnemopi.embeddingInputType	Mnemopi	埋め込みの入力種別	検索か保存かを API に伝える
+mnemopi.llmMode	Mnemopi	LLM の使い方	記憶に LLM を使うかどうか
+mnemopi.llmBaseUrl	Mnemopi	LLM のベース URL	記憶用 LLM の互換 API の接続先
+mnemopi.llmApiKey	Mnemopi	LLM の API 鍵	記憶用 LLM の認証キー
+mnemopi.llmModel	Mnemopi	LLM のモデル	記憶用 LLM のモデル名
+hindsight.apiUrl	Hindsight	API の URL	Hindsight サーバの接続先
+hindsight.apiToken	Hindsight	API トークン	認証が要るサーバのトークン
+hindsight.bankId	Hindsight	バンク ID	記憶のまとまりの識別子
+hindsight.scoping	Hindsight	記憶の範囲	全体か作業フォルダ単位かを選ぶ
+hindsight.globalScope	Hindsight	全体に残す	作業フォルダを問わず読める記憶として残す
+hindsight.autoRecall	Hindsight	自動で思い出す	セッション開始時に記憶を思い出す
+hindsight.autoRetain	Hindsight	自動で覚える	数ターンごとと区切りで履歴を残す
+hindsight.retainMode	Hindsight	記憶の残し方	セッションごとに 1 件かターンごとに分けるか
+hindsight.mentalModelsEnabled	Hindsight	メンタルモデルを読む	蓄積された要約を起動時に指示へ載せる
+hindsight.mentalModelAutoSeed	Hindsight	メンタルモデルを自動作成	足りない定番の要約を開始時に作る
+sharpshooter.model	Sharpshooter	抽出モデル	記憶の抽出と整理に使うモデル
+edit.mode	編集	編集モード	編集ツールの方式を選ぶ
+edit.magic.model	編集	Magic 編集のモデル	magic モードの変更を書くモデル
+edit.fuzzyMatch	編集	あいまい一致	空白の違いを高確度なら受け入れる
+edit.fuzzyThreshold	編集	あいまい一致のしきい値	どこまで似ていれば受け入れるか
+edit.streamingAbort	編集	プレビュー失敗で中止	差分の下見に失敗した編集を打ち切る
+edit.recoverInlineEdits	編集	本文中の編集を拾う	本文に書かれた編集内容を実行する
+edit.blockAutoGenerated	編集	自動生成ファイルを保護	生成されたとみなすファイルの編集を断る
+edit.enforceSeenLines	編集	未確認行の編集を断る	読んでいない行を狙った編集を拒否する
+edit.blackbox.enabled	編集	解析失敗を記録	編集で構文解析が壊れた前後の全文を残す
+edit.autoRepair.enabled	編集	解析失敗を自動修復	壊れた箇所を小さいモデルに直させる
+readLineNumbers	読み取り	行番号	読み取り結果の先頭に行番号を付ける
+read.defaultLimit	読み取り	既定の行数	行数を指定しないときに返す行数
+read.renderMarkdown	読み取り	Markdown の整形	読み取り結果の Markdown を整形して表示
+read.toolResultPreview	読み取り	結果を本文に表示	読み取り結果を履歴にそのまま出す
+read.summarize.enabled	読み取り要約	要約を返す	範囲を指定しない読み取りで構造だけ返す
+read.summarize.prose	読み取り要約	文章も要約	Markdown やテキストも構造で要約する
+read.summarize.minBodyLines	読み取り要約	本文の要約行数	本文がこの行数を超えたら畳む
+read.summarize.minCommentLines	読み取り要約	コメントの要約行数	長いコメントをこの行数から畳む
+read.summarize.minTotalLines	読み取り要約	要約する最小行数	これ未満のファイルはそのまま返す
+read.summarize.unfoldUntil	読み取り要約	展開後の行数	要約をこの行数まで広げる
+read.summarize.unfoldLimit	読み取り要約	展開の上限	要約を広げるときの上限行数
+lsp.enabled	LSP	LSP	言語サーバの診断と整形を有効にする
+lsp.lazy	LSP	遅延起動	必要になったときだけ言語サーバを起動する
+lsp.shared	LSP	言語サーバの共有	プロジェクト内で言語サーバを共有する
+lsp.formatOnWrite	LSP	書き込み時に整形	
+lsp.diagnosticsOnWrite	LSP	書き込み時に診断	書き込み後の誤りを言語サーバに調べさせる
+lsp.diagnosticsOnEdit	LSP	編集時に診断	編集後の誤りを言語サーバに調べさせる
+lsp.diagnosticsDeduplicate	LSP	診断の重複を省く	既に見せた診断を繰り返さない
+lsp.requestTimeout	LSP	応答の待ち時間	言語サーバの応答を待つ秒数
+bash.enabled	Bash	Bash	シェルコマンドを実行するツールを有効にする
+bash.allowCompoundCommands	Bash	連続コマンドを許可	&& でつないだ各コマンドを個別に判定する
+bash.autoBackground.enabled	Bash	長時間実行を裏へ	時間のかかるコマンドを裏で走らせ結果を後で受け取る
+bash.gitGuard	Bash	Git の保護	共有の作業を消す git 操作を断る
+bash.patterns	Bash	承認パターン	bash コマンドの承認ルールを並べる
+bash.allowedEnvVars	Bash	許可する環境変数	承認判定で前に付けてよい変数名
+bashInterceptor.enabled	Bash	コマンドの横取り	専用ツールがあるコマンドを止める
+bash.direnv	Bash	direnv の自動読み込み	リポジトリの .envrc を bash に読み込む
+bash.direnvLoadTimeoutMs	Bash	direnv の待ち時間 (ms)	.envrc の読み込みを待つ上限
+shellMinimizer.enabled	Bash	出力の圧縮	冗長なコマンド出力を短くまとめる
+shellMinimizer.sourceOutlineLevel	Bash	ソース表示の圧縮	ソースを読むときの要約の強さ
+eval.py	Eval と実行環境	Python の Eval	eval で Python を動かせる
+eval.js	Eval と実行環境	JavaScript の Eval	eval で JavaScript を動かせる
+eval.autoProvision	Eval と実行環境	Eval 環境の用意	初回に JavaScript の実行環境を自動で作る
+eval.tools.enabled	Eval と実行環境	Eval で定義するツール	eval で定義したツールをサブエージェントに使わせる
+eval.workpool.freshAgents	Eval と実行環境	Workpool で毎回起動	項目ごとに新しいサブエージェントを起動する
+eval.autoBackground.enabled	Eval と実行環境	長時間の Eval を裏へ	時間のかかる eval を裏で走らせる
+python.kernelMode	Eval と実行環境	Python の実行方式	カーネルを保つか毎回起動するか
+python.interpreter	Eval と実行環境	Python の実行ファイル	使う Python のパス
+browser.enabled	使えるツール	ブラウザ	eval からブラウザを動かせる
+todo.enabled	使えるツール	TODO	todo ツールで作業を管理する
+glob.enabled	使えるツール	Glob	glob ツールでファイルを探す
+grep.enabled	使えるツール	Grep	grep ツールで中身を検索する
+astGrep.enabled	使えるツール	AST Grep	ast_grep ツールで構文構造を検索する
+astEdit.enabled	使えるツール	AST Edit	ast_edit ツールで構文を書き換える
+find.enabled	使えるツール	意味検索	自然な言葉でファイルや行範囲を検索する
+debug.enabled	使えるツール	デバッガ	DAP でデバッグできる
+launch.enabled	使えるツール	サービス	名前付きの bash サービスを常駐させる
+speechgen.enabled	使えるツール	音声の生成	音声ファイルを作る tts ツールを有効にする
+generate_image.enabled	使えるツール	画像の生成	画像生成と編集のツールを有効にする
+computer.enabled	使えるツール	コンピュータ	画面操作や入力、アクセシビリティを eval から使う
+ratchet.enabled	使えるツール	ラチェット	改善を繰り返す eval の機能を有効にする
+archive.enabled	使えるツール	アーカイブ	過去のセッションやプロジェクトを読む
+commit.enabled	使えるツール	選択コミット	自分が書いた行だけをコミットする
+checkpoint.enabled	使えるツール	チェックポイント	会話の地点を保存して巻き戻せる
+fetch.enabled	使えるツール	URL の読み取り	read で URL を取得できる
+vault.enabled	使えるツール	Obsidian 保管庫	vault:// で Obsidian の中身を読み書きする
+github.enabled	使えるツール	GitHub CLI	issue や PR の操作を github ツールで行う
+web_search.enabled	使えるツール	Web 検索	Web 上の最新情報を探すツール
+security.enabled	使えるツール	セキュリティ	セキュリティ検査の計画と実行を有効にする
+ask.enabled	使えるツール	質問	ask ツールでユーザーに尋ねる
+out.enabled	使えるツール	途中の返信	作業中でも応答を差し込める
+disassembler.backend	使えるツール	逆アセンブラ	解析に使うバックエンドを選ぶ
+todo.reminders	TODO	TODO の催促	終える前に TODO を片付けるよう促す
+todo.remindersMax	TODO	催促の回数	
+todo.midRunNudges	TODO	途中の TODO 催促	長いターンで TODO の更新を促す頻度
+todo.eager	TODO	TODO の自動作成	最初のメッセージ後に TODO を作る強さ
+todo.backend	TODO	TODO の保存先	TODO を写す拡張機能
+tasks.todoClearDelay	TODO	TODO の自動消去	完了した TODO を消すまでの時間
+browser.cdpUrl	検索とブラウザ	CDP の接続先	起動せずに接続するブラウザの CDP 先
+browser.relay	検索とブラウザ	ブラウザ中継	自分の Chrome のタブを中継経由で操作する
+browser.relayUrl	検索とブラウザ	中継の URL	ブラウザ中継の接続先を上書きする
+browser.headless	検索とブラウザ	画面なしブラウザ	窓を出さずにブラウザを動かす
+browser.cmux	検索とブラウザ	cmux のブラウザ	cmux の WebView を操作に使う
+browser.tern	検索とブラウザ	Tern のブラウザ	Tern の画面内にブラウザを重ねて開く
+browser.webkit	検索とブラウザ	WebKit のブラウザ	自前の WebKit でタブを開く
+browser.webkitPath	検索とブラウザ	WebKit の場所	WebKit 本体かエンジンのディレクトリ
+browser.freezeOnTurnEnd	検索とブラウザ	ターン終了時に凍結	待機中は裏のタブを止めて負荷を下げる
+browser.idleCloseSec	検索とブラウザ	タブの自動終了	この秒数使わなかったタブを閉じる
+browser.screenshotDir	検索とブラウザ	スクリーンショットの保存先	撮った画像を置くフォルダ
+grep.contextBefore	検索とブラウザ	一致の前の行	一致した行の前に出す行数
+grep.contextAfter	検索とブラウザ	一致の後の行	一致した行の後に出す行数
+find.verifyModel	意味で探す	検証のモデル	抜粋の検証に先に使うモデル
+computer.display	コンピュータ	対象の画面	操作する画面を選ぶ
+computer.maxWidth	コンピュータ	画像の最大幅	撮る画像の幅の上限
+computer.maxHeight	コンピュータ	画像の最大高	撮る画像の高さの上限
+computer.takeover	コンピュータ	入力の乗っ取り	本物の入力を一時的に使う条件
+disassembler.maxOpen	逆アセンブラ	同時に開く数	プロジェクトで同時に開く DB の上限
+disassembler.idleCloseSec	逆アセンブラ	放置時の終了	この秒数使わない DB を保存して閉じる
+ida.python	IDA Pro	IDA の Python	ida_domain を読み込める Python
+ida.installDir	IDA Pro	IDA の場所	libidalib を含むディレクトリ
+ghidra.installDir	Ghidra	Ghidra の場所	Ghidra 12 以降のインストール先
+ghidra.python	Ghidra	Ghidra の Python	pyghidra を読み込める Python
+binja.installDir	Binary Ninja	Binary Ninja の場所	本体か .app のあるディレクトリ
+binja.python	Binary Ninja	Binary Ninja の Python	API を読み込める Python 3
+github.cache.enabled	GitHub	表示のキャッシュ	issue や PR の表示を使い回す
+github.cache.softTtlSec	GitHub	キャッシュの期限	この秒数はそのまま返し裏で更新する
+github.cache.hardTtlSec	GitHub	キャッシュの失効	この秒数を過ぎたキャッシュは捨てる
+tools.artifactSpillThreshold	出力の上限	退避する大きさ (KB)	これを超える出力はファイルに逃がす
+tools.artifactTailBytes	出力の上限	末尾の残す量 (KB)	退避時に本文へ残す末尾の量
+tools.artifactHeadBytes	出力の上限	先頭の残す量 (KB)	退避時に本文へ残す先頭の量
+tools.outputMaxColumns	出力の上限	1 行の桁数上限	行が長すぎるときに切り詰める桁数
+tools.artifactTailLines	出力の上限	末尾の残す行数	退避時に本文へ残す末尾の行数
+tools.artifactMaxBytes	出力の上限	退避ファイルの上限 (MB)	保存する退避ファイルの最大サイズ
+images.questionTimeoutMs	実行	画像質問の待ち時間	?q= の画像質問を待つ上限
+tools.intentTracing	実行	意図の説明	ツールを動かす前に意図を書かせる
+tools.abortOnFabricatedResult	実行	偽の結果で中止	結果を捏造し始めたら生成を止める
+tools.speculativeExecution.enabled	実行	投機実行 (実験的)	読み取りだけを先に走らせて待ち時間を減らす
+tools.speculativeExecution.maxInFlight	実行	投機実行の同時数	先に走らせる読み取りの数
+tools.maxTimeout	実行	ツールの待ち上限	ツールに設定できるタイムアウトの上限
+async.enabled	実行	非同期実行	bash やタスクを裏で走らせる
+async.printWake	実行	ジョブ結果で再開	出力モードでも裏のジョブの結果を待って続ける
+async.widgets	実行	ジョブの表示	実行中のジョブを図や状態で見せる
+tools.commands	検出と MCP	コマンド化	たまに使うツールを bash コマンドとして載せる
+tools.commandDocs	検出と MCP	ヘルプの載せ方	どのコマンドの --help をプロンプトに書くか
+tools.commandInline	検出と MCP	追加で載せるヘルプ	名前が合うコマンドのヘルプも本文に書く
+tools.commandNotices	検出と MCP	載せ替えの通知	ツールがコマンドとして増減したら知らせる
+mcp.enableProjectConfig	検出と MCP	MCP のプロジェクト設定	プロジェクト直下の .mcp.json を読む
+mcp.startupTimeoutMs	検出と MCP	MCP の起動待ち	最初のツール検出を待つミリ秒
+mcp.shared	検出と MCP	MCP サーバの共有	デーモン経由で 1 つのプロセスを共有する
+mcp.idleStopMinutes	検出と MCP	MCP の放置停止	この分数使わなければサーバを止める
+mcp.evalNamespaces	検出と MCP	MCP を eval に出す	各サーバを eval のグローバルとして使う
+mcp.builtinTransforms	検出と MCP	MCP の組み込み変換	自前のツールが置き換えるサーバを飛ばす
+mcp.renderMarkdownResults	検出と MCP	MCP を Markdown で	文字の結果を Markdown として表示する
+mcp.notifications	検出と MCP	MCP の更新通知	リソースの更新を会話に差し込む
+mcp.notificationDebounceMs	検出と MCP	MCP 通知の間隔	差し込む前にまとめるミリ秒
+extensionHandlers.toolCallTimeoutMs	拡張	ツール処理の待ち (ms)	拡張のツール処理を待つ上限
+extensionHandlers.modeControl	拡張	モードの操作	拡張が計画や目標などのモードを切り替えられる
+extensionRenderers.assistantText	拡張	返信の描画	拡張が応答の見た目を変えられる
+extensionRenderers.transcriptPresenters	拡張	履歴の描画	拡張が履歴の塊を独自に描ける
+dev.autoqa	開発者	自動の不具合報告	ツールの問題を自動で報告する
+dev.autoqaPush.endpoint	開発者	報告の送信先	自動の報告を送る URL
+spotlight.experiment.enabled	開発者	Spotlight の実験	出力の整形と検索結果の並べ替えを試す
+plan.enabled	モード	計画モード	実行前に読むだけで調べて計画する
+plan.defaultOnStartup	モード	計画モードで開始	新しいセッションを計画モードで始める
+plan.autosave	モード	計画の自動保存	承認した計画を終了時にファイルへ残す
+plan.autosaveDir	モード	計画の保存先	自動保存する計画の置き場所
+goal.enabled	モード	目標モード	セッションごとの目標を設定できる
+goal.statusInFooter	モード	目標を下部に表示	ステータス行に目標と残りの予算を出す
+goal.continuationModes	モード	目標の自動継続	目標が続くモードで次のターンへ自動で進む
+title.generator	モード	タイトルの作り手	最初のメッセージから名前を付ける仕組み
+title.refreshOnReplan	モード	再計画で名前を更新	計画の作り直しに合わせて名前を付け直す
+title.refreshAfterPrompts	モード	名前の見直し間隔	この回数の入力ごとに名前が合うか調べる
+task.eager	サブエージェント	委譲を優先	作業をサブエージェントに任せる強さ
+task.autoParallel	サブエージェント	自動の並列化	同時に進められる部分を判定して並べる
+task.batch	サブエージェント	まとめて依頼	1 回の呼び出しで複数の作業をまとめて渡す
+task.steps	サブエージェント	段階的な手順	1 件の依頼を順番に進める手順として渡す
+task.structured	サブエージェント	構造化した結果	決めた形に沿った結果を受け取る
+task.speculativeLaunch	サブエージェント	先行して起動	届いた項目から順にサブエージェントを起動する
+task.enableEffort	サブエージェント	作業ごとの思考	起動ごとに思考の深さを指定できる
+task.perCallModel	サブエージェント	呼び出しごとのモデル	呼び出しごとにモデルを選べる
+task.perCallModelAllow	サブエージェント	選べるモデルの一覧	呼び出しで選べるモデルを絞る
+task.maxConcurrency	サブエージェント	同時に動かす数	一度に動かすサブエージェントの上限
+task.workerThreads	サブエージェント	作業スレッド数	サブエージェントを動かすスレッドの上限
+task.enableLsp	サブエージェント	サブエージェントの LSP	サブエージェントの編集も整形と診断にかける
+task.crossInstance	サブエージェント	別インスタンスとの連絡	同じフォルダの別プロセスとやり取りできる
+task.maxRecursionDepth	サブエージェント	入れ子の深さ	サブエージェントが更にサブエージェントを呼べる深さ
+task.maxRuntimeMs	サブエージェント	実行時間の上限	サブエージェント 1 件の制限時間 (ms)
+task.completionProbe	サブエージェント	進み具合の確認	作業中のサブエージェントに完成度を見積もらせる
+task.agentIdleTtlMs	サブエージェント	待機の保持時間	空いたサブエージェントをメモリに残す時間 (ms)
+task.softRequestBudget	サブエージェント	依頼回数の目安	この回数を超えたら切り上げを促す
+task.softRequestBudgetNotice	サブエージェント	切り上げの促し	目安を超えたときに 1 度だけ声をかける
+task.maxEffort	サブエージェント	思考の上限	サブエージェントに許す最大の思考の深さ
+task.prewalk	サブエージェント	汎用タスクの事前走査	汎用の task でも最初の編集で速いモデルへ渡す
+task.isolation.enabled	分離	分離したサブエージェント	作業ごとに隔離した場所で動かせる
+isolation.backend	分離	隔離の仕組み	分離や複製に使う仕組み
+worktree.clone	分離	作業ツリーを複製	無視されるビルド成果物ごと複製して始める
+worktree.cleanSource	分離	元の作業ツリーを片付ける	/wt の後、元の変更を戻して不要なファイルを消す
+worktree.onStart	分離	開始時の作業ツリー	新しいセッションを作業ツリーで始める
+worktree.onExit	分離	終了時の作業ツリー	作った作業ツリーを終了時にどうするか
+task.isolation.apply	分離	分離した変更を反映	成功した分離作業の変更を元のツリーに当てる
+ovnfs.path	分離	ovnfs の実行ファイル	チェックアウトに使う ovnfs の場所
+task.isolation.merge	分離	分離の取り込み方	差分を当てるか枝を統合するか
+task.isolation.commits	分離	コミットの書き方	入れ子のリポジトリに付けるメッセージの作り方
+worktree.base	分離	作業ツリーの置き場所	エージェントが作る作業ツリーの親フォルダ
+skills.enableSkillCommands	コマンドとスキル	スキルのコマンド	スキルを /skill:名前 で呼べる
+commands.enableClaudeUser	コマンドとスキル	Claude の個人コマンド	~/.claude/commands/ から読み込む
+commands.enableClaudeProject	コマンドとスキル	Claude のプロジェクトコマンド	.claude/commands/ から読み込む
+commands.enableOpencodeUser	コマンドとスキル	OpenCode の個人コマンド	~/.config/opencode/commands/ から読み込む
+commands.enableOpencodeProject	コマンドとスキル	OpenCode のプロジェクトコマンド	.opencode/commands/ から読み込む
+auth.unpausedProviders	サービス	停止した提供元を戻す	止めた提供元のログインと更新を再び有効にする
+providers.maxInFlightRequests	サービス	同時リクエスト数	提供元ごとに同時に送るリクエストの上限
+providers.webSearchTimeoutSeconds	サービス	検索の待ち時間	検索を待つ秒数、過ぎたら次の手段へ
+providers.antigravityEndpoint	サービス	Antigravity の接続先	google-antigravity の接続先の選び方
+providers.fetch	サービス	URL 取得の仕組み	URL を読むときの取得方法の優先順
+providers.webKeyless	サービス	鍵なしの外部サービス	自分の鍵なしで外部の検索や閲覧を使う
+codexResets.minBlockedMinutes	サービス	Codex 自動回復の待ち	Codex の制限が自然に解けるまでこの分数以上あるときだけ使う
+codexResets.keepCredits	サービス	Codex 回復の取り置き	自動で使わずに残す回復回数
+codexResets.salvageHorizonHours	サービス	Codex の期限前回復	期限が近い Codex の回復を使う時間
+claudeResets.minBlockedMinutes	サービス	Claude 自動回復の待ち	Claude の制限が自然に解けるまでこの分数以上あるときだけ使う
+claudeResets.keepCredits	サービス	Claude 回復の取り置き	自動で使わずに残す回復回数
+claudeResets.salvageHorizonHours	サービス	Claude の期限前回復	期限が近い Claude の回復を使う時間
+exa.enabled	サービス	Exa	Exa のウェブ検索を有効にする
+exa.searchDelayMs	サービス	Exa の間隔	Exa への検索の最小間隔 (ms)
+searxng.endpoint	サービス	SearXNG の接続先	自前で立てた SearXNG の URL
+tts.localVoice	サービス	ローカル TTS の声	端末内の音声合成で使う声
+tts.localSpeed	サービス	ローカル TTS の速さ	端末内の音声合成の速さ、1 が標準
+speech.enabled	サービス	読み上げ	応答を流しながら音声で読み上げる
+speech.mode	サービス	読み上げの範囲	何を読むか
+speech.enhanced	サービス	読み上げ用に整える	読み上げ向けの自然な文に書き換える
+speech.voice	サービス	読み上げの声	応答を読み上げるときの声
+speech.speed	サービス	読み上げの速さ	応答を読み上げる速さ、1 が標準
+live.voice	サービス	音声会話の声	リアルタイム音声で使う声
+live.endpoint	サービス	音声会話の接続先	OpenAI Realtime 互換サーバの URL
+live.apiKey	サービス	音声会話の API 鍵	接続先にだけ送る認証キー
+providers.fireworksTier	Fireworks	Fireworks の階層	Fireworks の既定の処理経路
+providers.tinyModelDevice	Tiny モデル	Tiny モデルの実行先	小さいモデルを動かす仕組み
+providers.tinyModelDtype	Tiny モデル	Tiny モデルの精度	小さいモデルの量子化の精度
+providers.kimiApiFormat	プロトコル	Kimi の API 形式	Kimi Code が使う API の形式
+providers.openaiWebsockets	プロトコル	Codex の WebSocket	
+providers.openaiResponsesWebsockets	プロトコル	Responses の WebSocket	対応モデルで WebSocket を使う
+providers.openaiLiveSteering	プロトコル	OpenAI の即時割り込み	生成中でも入力したメッセージをそのまま届ける
+providers.cacheRetention	プロトコル	キャッシュの保持	提供元に伝えるプロンプトキャッシュの保持期間
+providers.cacheWarming	プロトコル	キャッシュの温め	期限が切れる前にキャッシュを更新する
+providers.cacheWarmingStrategy	プロトコル	温めの続け方	更新が効かなくなったときの橋渡し
+providers.cacheWarmingCompactPercent	プロトコル	圧縮で橋渡しする割合	長いツール実行を圧縮でつなぐ境目の割合
+providers.cacheWarmingCompactTokens	プロトコル	圧縮で橋渡しする量	長いツール実行を圧縮でつなぐ境目のトークン数
+providers.openrouterVariant	プロトコル	OpenRouter の経路	OpenRouter のモデル ID に足す既定の経路
+provider.appendOnlyContext	プロトコル	追記のみの文脈	前置きを固定してキャッシュを最大限に効かせる
+providers.streamFirstEventTimeoutSeconds	タイムアウト	最初の応答の待ち	最初の受信を待つ秒数、-1 で既定
+providers.streamIdleTimeoutSeconds	タイムアウト	無音の許容時間	途中で何も来ない状態を許す秒数
+secrets.enabled	プライバシー	秘密を隠す	認証情報を伏せてから提供元へ送る
+telemetry.otlpExportEnabled	プライバシー	OTLP の送信	OTEL の接続先へ計測情報を送る

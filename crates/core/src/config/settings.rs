@@ -4,12 +4,17 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde_json::Value as Json;
 use std::path::{Path, PathBuf};
 
-mod omp;
+pub(crate) mod omp;
+pub use omp::{ui_settings, Native, UiSetting, UI_TABS};
+#[cfg(test)]
+pub(crate) use omp::translate;
+#[cfg(test)]
+pub(crate) use omp::translate as translate_omp;
 
 const REDACTED: &str = "<redacted>";
 const PROVIDER_FIELDS: &[&str] = &["kind", "base_url", "api_key_env", "api_key", "models"];
 /// Maps whose values are scalars or arrays, so everything after the map name is one key (`prices.openai/gpt-4.1`).
-const FLAT_MAPS: &[&str] = &["model_roles", "model_compact_at", "prices", "task.agent_model_overrides"];
+const FLAT_MAPS: &[&str] = &["model_roles", "model_compact_at", "prices", "task.agent_model_overrides", "system_prompt_templates", "max_in_flight", "retry.fallback_chains"];
 
 pub fn describe(global: &Path, overlays: &[PathBuf]) -> String {
     std::iter::once(global).chain(overlays.iter().map(PathBuf::as_path)).map(|p| p.display().to_string()).collect::<Vec<_>>().join(" + ")
@@ -24,9 +29,12 @@ fn read_table(path: &Path, required: bool) -> Result<toml::Value> {
     toml::from_str(&text).map_err(|e: toml::de::Error| anyhow!("{}: {}", path.display(), e.message()))
 }
 
-pub(super) fn decode(value: toml::Value) -> Result<Config> {
+pub(crate) fn decode(value: toml::Value) -> Result<Config> {
     let cfg: Config = value.try_into().map_err(|e: toml::de::Error| anyhow!("{}", e.message()))?;
     cfg.task.validate().map_err(|e| anyhow!("{e}"))?;
+    cfg.assist_opts.advisor.validate().map_err(|e| anyhow!("{e}"))?;
+    cfg.assist_opts.prewalk.validate().map_err(|e| anyhow!("{e}"))?;
+    cfg.loop_opts.validate()?;
     for selector in cfg.model_compact_at.keys() {
         ensure!(selector.split_once('/').is_some_and(|(provider, model)| !provider.is_empty() && !model.is_empty())
             && !selector.strip_suffix('*').unwrap_or(selector).contains('*')
@@ -35,6 +43,8 @@ pub(super) fn decode(value: toml::Value) -> Result<Config> {
     ensure!(cfg.context_files_extra.iter().all(|name| crate::context::valid_extra_name(name)),
         "context_files_extra must contain only non-built-in filenames, not paths");
     ensure!((3..=20).contains(&cfg.tui.autocomplete_max_visible), "tui.autocomplete_max_visible must be 3..=20");
+    cfg.services_opts.validate()?;
+    cfg.services_extra_opts.validate()?;
     Ok(cfg)
 }
 
@@ -60,7 +70,8 @@ pub fn merged(global: &Path, overlays: &[PathBuf]) -> Result<toml::Value> {
 }
 
 fn is_secret_key(k: &str) -> bool {
-    matches!(k, "api_key" | "password" | "token" | "secret") || k.ends_with("_token") || k.ends_with("_secret")
+    matches!(k, "api_key" | "password" | "token" | "secret")
+        || ["_api_key", "_password", "_token", "_secret"].iter().any(|suffix| k.ends_with(suffix))
 }
 
 /// Masks credentials, provider URLs (they can embed them) and backend env values anywhere in the tree.
@@ -133,12 +144,39 @@ fn lookup<'a>(v: &'a Json, segs: &[String]) -> Option<&'a Json> {
     }
 }
 
-fn flatten(prefix: &str, v: &Json, set: &Json, out: &mut Vec<String>) {
+/// One leaf of the effective config, as `config list` shows it.
+pub struct Row {
+    pub key: String,
+    pub value: Json,
+    /// Set in a config file rather than a built-in default.
+    pub set: bool,
+    /// `config set` accepts it (credentials and backend environments are edited elsewhere).
+    pub writable: bool,
+}
+
+/// The global config's leaves with credentials redacted, for settings UIs.
+pub fn rows() -> Result<Vec<Row>> {
+    let global = crate::home().join("config.toml");
+    let merged = merged(&global, &[])?;
+    let raw = serde_json::to_value(&merged)?;
+    let mut tree = serde_json::to_value(decode(merged).with_context(|| global.display().to_string())?)?;
+    redact(&mut tree, &[]);
+    let mut out = vec![];
+    flatten("", &tree, &raw, &mut out);
+    Ok(out)
+}
+
+fn flatten(prefix: &str, v: &Json, set: &Json, out: &mut Vec<Row>) {
     match v {
         Json::Object(o) if !o.is_empty() => {
             for (k, c) in o { flatten(&if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") }, c, set.get(k).unwrap_or(&Json::Null), out); }
         }
-        _ => out.push(format!("{prefix} = {v}{}", if set.is_null() { "  (default)" } else { "" })),
+        _ => out.push(Row {
+            writable: check_writable(&normalize(prefix)).is_ok(),
+            key: prefix.to_string(),
+            value: v.clone(),
+            set: !set.is_null(),
+        }),
     }
 }
 
@@ -225,7 +263,7 @@ pub fn reset_text(text: &str, key: &str) -> Result<Option<String>> {
 }
 
 /// Replaces the file atomically, keeping its permissions and following a symlink to the real file.
-fn write_atomic(path: &Path, text: &str) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, text: &str) -> Result<()> {
     let path = if path.is_symlink() { std::fs::canonicalize(path)? } else { path.to_owned() };
     if let Some(dir) = path.parent() { std::fs::create_dir_all(dir)?; }
     let tmp = path.with_extension(format!("toml.tmp{}", std::process::id()));
@@ -313,8 +351,9 @@ pub fn cli(args: &[String]) -> Result<()> {
             if action == "list" {
                 ensure!(pos.len() <= 1, "list takes no key");
                 if json { println!("{}", serde_json::to_string_pretty(&tree)?) } else {
-                    let mut lines = vec![];
-                    flatten("", &tree, &raw, &mut lines);
+                    let mut rows = vec![];
+                    flatten("", &tree, &raw, &mut rows);
+                    let lines: Vec<_> = rows.iter().map(|r| format!("{} = {}{}", r.key, r.value, if r.set { "" } else { "  (default)" })).collect();
                     println!("{}", lines.join("\n"));
                 }
             } else {

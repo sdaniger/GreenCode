@@ -576,6 +576,7 @@ impl Workspace {
                 ),
             );
         }
+        card = self.repo_rows(card, pal, cx);
         let p1 = project_str.clone();
         let p2 = project_str;
         card = card

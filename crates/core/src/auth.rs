@@ -353,3 +353,116 @@ pub fn remove_account(provider: &str, account: &str) -> Result<()> {
     if empty { map.remove(provider); }
     write(&map)
 }
+
+/// Providers paused after an account-risk reply (`account_deactivated`, `invalid_grant`, ...), and the
+/// risk the user accepts when turning them back on. `auth.unpaused_providers` lifts a pause.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Pause {
+    pub provider: String,
+    pub risk: String,
+}
+
+fn pause_path() -> PathBuf { crate::home().join("paused-providers.json") }
+
+/// The current pauses, newest last. A broken file pauses nothing rather than blocking every provider.
+pub fn pauses() -> Vec<Pause> {
+    let text = match std::fs::read_to_string(pause_path()) {
+        Ok(text) => text,
+        Err(_) => return Vec::new(),
+    };
+    serde_json::from_str::<Map<String, Value>>(&text)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(provider, risk)| Pause { provider, risk: risk.as_str().unwrap_or("account risk").to_string() })
+        .collect()
+}
+
+fn write_pauses(list: &[Pause]) -> Result<()> {
+    let map: Map<String, Value> = list.iter().map(|p| (p.provider.clone(), json!(p.risk))).collect();
+    std::fs::create_dir_all(crate::home())?;
+    std::fs::write(pause_path(), serde_json::to_string_pretty(&map)?)?;
+    Ok(())
+}
+
+/// Records an account-risk pause. The next login/refresh/credential use is refused until unpaused.
+pub fn pause(provider: &str, risk: &str) -> Result<()> {
+    let mut list = pauses();
+    list.retain(|p| p.provider != provider);
+    list.push(Pause { provider: provider.into(), risk: risk.into() });
+    write_pauses(&list)
+}
+
+/// Lifts one pause; false when the provider was not paused.
+pub fn unpause(provider: &str) -> Result<bool> {
+    let mut list = pauses();
+    let before = list.len();
+    list.retain(|p| p.provider != provider);
+    if list.len() == before { return Ok(false) }
+    write_pauses(&list)?;
+    Ok(true)
+}
+
+/// The pause that blocks `provider`, unless `cfg` lists it in `auth.unpaused_providers`.
+pub fn active_pause(cfg: &Config, provider: &str) -> Option<Pause> {
+    if cfg.services_extra_opts.auth.unpaused_providers.iter().any(|p| p == provider) {
+        return None;
+    }
+    pauses().into_iter().find(|p| p.provider == provider)
+}
+
+/// Refuses a paused provider with the risk the user accepted when pausing it.
+pub fn ensure_not_paused(cfg: &Config, provider: &str) -> Result<()> {
+    match active_pause(cfg, provider) {
+        Some(p) => bail!(
+            "{provider} は停止中です（受け入れたリスク: {}）。再開するには auth.unpaused_providers に {provider} を追加してください",
+            p.risk
+        ),
+        None => Ok(()),
+    }
+}
+
+/// The account-risk the reply describes, if it is one a pause should record.
+pub fn account_risk(message: &str) -> Option<&'static str> {
+    let text = message.to_ascii_lowercase();
+    for (needle, risk) in [
+        ("account_deactivated", "account_deactivated: the provider deactivated this account"),
+        ("account has been deactivated", "account_deactivated: the provider deactivated this account"),
+        ("invalid_grant", "invalid_grant: the stored credential was revoked"),
+        ("account is suspended", "suspended: the provider suspended this account"),
+    ] {
+        if text.contains(needle) {
+            return Some(risk);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod pause_tests {
+    use super::*;
+
+    #[test]
+    fn pause_blocks_until_the_config_unpauses_it() {
+        let home = tempfile::tempdir().unwrap();
+        crate::set_test_home(Some(home.path()));
+        let mut cfg = Config::default();
+        assert!(ensure_not_paused(&cfg, "anthropic").is_ok());
+        pause("anthropic", "account_deactivated: gone").unwrap();
+        let err = ensure_not_paused(&cfg, "anthropic").unwrap_err().to_string();
+        assert!(err.contains("account_deactivated: gone"), "{err}");
+        cfg.services_extra_opts.auth.unpaused_providers = vec!["anthropic".into()];
+        assert!(ensure_not_paused(&cfg, "anthropic").is_ok());
+        cfg.services_extra_opts.auth.unpaused_providers.clear();
+        assert!(unpause("anthropic").unwrap());
+        assert!(!unpause("anthropic").unwrap());
+        assert!(ensure_not_paused(&cfg, "anthropic").is_ok());
+        crate::set_test_home(None);
+    }
+
+    #[test]
+    fn only_account_risk_replies_pause() {
+        assert!(account_risk("HTTP 403: {\"error\":\"account_deactivated\"}").is_some());
+        assert!(account_risk("invalid_grant").is_some());
+        assert!(account_risk("rate limit reached").is_none());
+    }
+}

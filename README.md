@@ -22,6 +22,30 @@ Pi/OMP session handoff from the GUI is not available there. GreenCode's built-in
 ChatGPT subscription credential storage and CLI login import require macOS or Linux.
 In-app updates remain macOS-only.
 
+### Update channels (macOS)
+
+`stable` follows tagged GitHub Releases. `main` follows the commit builds published
+by GitHub Actions in the [`main-build` prerelease](https://github.com/sdaniger/GreenCode/releases/tag/main-build).
+The updater shows the published commit, not a newer commit that is still building.
+
+```sh
+greencode-cli update --check --channel main  # show the available commit without installing
+greencode-cli update --channel main          # switch to the main build
+greencode-cli update                         # follow the installed channel
+greencode-cli update --channel stable        # switch back, even if stable is older
+```
+
+In the desktop app, click **アップデート** in the top-right toolbar.
+Choose a channel, then click **更新を確認** to check without installing or
+**今すぐ更新** to install. The result appears below the buttons.
+The composer also accepts `/update check main`, `/update main`, and `/update stable`.
+An update replaces only the executable you invoked, after verifying the archive's
+SHA-256. Restart that executable after updating. Settings, sessions, and Git checkouts
+are not changed. Builds without channel support need a one-time manual install from
+the downloads above. The update source defaults to `sdaniger/GreenCode`; to use a
+trusted fork, set `update_repo` in `config.toml`, `GREENCODE_UPDATE_REPO`, or CLI
+`--repo OWNER/REPO`.
+
 ## Native terminal UI
 
 ```sh
@@ -186,7 +210,7 @@ The reasoning column offers model-specific native effort levels, Pi/OMP thinking
 
 Settings → 接続 shows providers and agents in a two-pane list with status, sign-in, runtime details and enable controls.
 
-The same from a terminal: `greencode-cli auth login [provider]`, `auth list`, `auth logout PROVIDER`. `greencode-cli update --check` checks the configured GitHub Release; `greencode-cli update` downloads and verifies the matching macOS asset before replacing the current binary. Set `update_repo = "OWNER/REPO"` in `~/.greencode/config.toml`, or use `GREENCODE_UPDATE_REPO` / `--repo OWNER/REPO`. Keep several accounts per provider with `auth save PROVIDER NAME` / `auth switch PROVIDER NAME` (or the palette's アカウント切替).
+The same from a terminal: `greencode-cli auth login [provider]`, `auth list`, `auth logout PROVIDER`. Keep several accounts per provider with `auth save PROVIDER NAME` / `auth switch PROVIDER NAME` (or the palette's アカウント切替).
 Precedence for one provider: `api_key` written in config.toml > auth.json > subscription > environment variable.
 Using a subscription token from a third-party client may conflict with the provider's terms; the account risk is yours.
 
@@ -205,7 +229,8 @@ The listener is local only; a public URL requires your own tunnel, such as `clou
   The native `lsp` tool queries installed Rust, Go, TypeScript/JavaScript and Python language servers.
   The lazy `ext` tool adds OMP-style tools listed by name only: `hread`/`hedit`, `ast`, `eval`, `debug`, `advisor`, `learn`, `ask`,
   `checkpoint`/`rewind`, `new_context`, `recall`, `wait`, `manage_skill`, `find` (files ranked by how many words of a plain-language
-  query they contain) and `github` (read-only `gh`: issues, PRs, diffs, checks, searches, Actions runs and failed logs). Each can be turned off in Settings (`ext_off` in `ui.json`).
+  query they contain), `github` (read-only `gh`: issues, PRs, diffs, checks, searches, Actions runs and failed logs) and
+  `tts` (speech into a file: on-device `say` for .wav/.aiff/.m4a/.caf, xAI Grok Voice for other formats). Each can be turned off in Settings (`ext_off` in `ui.json`).
 - **Approvals**: new threads start in `full` (YOLO): nothing asks. Pick `ask`, `auto-edit` or `plan` per thread (⇧⌘A) or as the default in Settings. In the other modes, reads inside the project and shell commands that only look (`ls`, `cat`, `grep`, `find`, `git status|diff|log`, … joined by `|`, `&&`, `;`, with no redirection, `$()` or paths outside the project) never ask, in every mode. Anything else asks unless the mode or an "always allow" rule covers it. Writes to `.git/` always ask, because git hooks and config run commands.
 - **Plan mode** is read-only: tools that change anything are refused until you switch modes.
 - **Undo** (`/undo`, ⇧⌘Z) removes the last turn, restores files changed by `write`/`edit` (not by `bash`), and puts the prompt
@@ -337,7 +362,7 @@ Everything lives in `~/.greencode` (override with `GREENCODE_HOME`).
 
 ```toml
 # ~/.greencode/config.toml
-update_repo = "OWNER/REPO"       # GitHub Releases used by /update and greencode-cli update
+update_repo = "sdaniger/GreenCode"  # optional; trusted GitHub source for stable and main updates
 models = ["anthropic/claude-sonnet-5-5", "openrouter/openai/gpt-5"]  # extra picker entries
 mode = "full"                             # full (default, nothing asks) | auto-edit | ask | plan
 effort = "high"                           # Anthropic output_config.effort; unset = API default
@@ -409,13 +434,40 @@ greencode-cli config import-omp ~/.omp/agent/config.yml > omp-settings.toml
 greencode-cli --config omp-settings.toml
 ```
 
-The converter writes only to stdout and imports only these explicitly set OMP keys:
-`autoResume`, `autocompleteMaxVisible`, `hideThinkingBlock`,
-`display.{hideToolActivity,showTokenUsage,showTurnTime}`, `composer.recallClearedDrafts`, `tui.tight`,
-`terminal.showProgress`, `contextFiles.extra`,
-`compaction.{enabled,midTurnEnabled,thresholdTokens,modelThresholds,modelThresholdsEnabled}`,
-`skills.enabled`, `mcp.enableProjectConfig`, `async.enabled` (native background tasks only), and
-`task.{maxConcurrency,maxRecursionDepth,maxRuntimeMs,disabledAgents,structured,isolation.enabled,perCallModel,perCallModelAllow,agentModelOverrides}`.
+The converter writes only to stdout and imports only explicitly set OMP keys that have a native
+equivalent: about 250 of OMP 19.1.1's 644 settings, covering the areas below. Every mapped key
+is a normal native TOML setting, so `config list/get/set` show them too (`/settings` edits the `[tui]` ones).
+In the desktop app, 設定 → 詳細設定 lists every `config.toml` setting with search and does the same
+set/reset (invalid values are refused, and the app reloads the config on save); credentials and backend
+environments stay under 接続.
+設定 → OMP 設定 shows OMP 19.1.1's `/settings` screen with the same 10 tabs, groups, labels and descriptions
+(470 entries). Each entry with a GreenCode counterpart edits that native setting in place: on/off switches,
+OMP's listed choices where the native key accepts them, or a value field; tool switches (`grep.enabled`,
+`astEdit.enabled`, …) turn the native tool off through `tools` or `ext_off`. Entries without a counterpart
+are listed as such. `config import-omp` also imports those tool switches.
+
+| Area | Native tables / keys |
+|---|---|
+| Models and providers | `enabled_models`, `enabled_providers`, `disabled_providers`, `model_provider_order`, `models_offline`, `max_in_flight`, `[retry]`, `[sampling]`, `text_verbosity`, `[thinking]` budgets, `[cost]` warn/max, `[web.searxng]`, `[web.exa]` |
+| Agent loop | `steering_mode`, `interrupt_mode`, `[power] sleep_prevention`, `[loop_guard]`, `[tool_call_loop_guard]`, `include_model_in_prompt`, `include_workspace_tree`, `encourage_edits`, `personality`, `[system_prompt_templates]`, `features.unexpected_stop_detection` |
+| Shell and tool output | `[artifact]` spill budgets, `output_max_columns`, `approval`, `restricted_folders`, `intent_tracing`, `max_timeout`, `shell_path`, `[bash]` (compound commands, git guard, patterns, env, direnv, auto-background), `[bash_interceptor]`, `[todo]`, `[async]`, `[out]` |
+| Files | `[images] block_images`, `[edit]` fuzzy match/threshold, generated-file guard, seen-line guard, `[read]` line numbers/default limit, `[grep]` context |
+| Integrations | `[lsp]` lazy/format/diagnostics/timeout, `[mcp]` startup/idle stop, `[eval]`, `[python]`, `[skills]`/`[commands]` sources, `extensions`, `disabled_extensions`, `[autolearn]`, `[commit]`, `[computer]` capture size |
+| Compaction | `[maintenance]` method order, percent/reserve thresholds (with `context_window`), recent-history budget, idle compaction, handoff file, read supersede and empty-search pruning; `[snapcompact] shape` |
+| Sub-agents and worktrees | `[task]` batch, eager, effort and its ceiling, LSP, advisor, soft request budgets, compaction overrides, `[task.isolation]` apply/merge/commits; `[worktree]` base, clone, on_start, on_exit |
+| Terminal UI | `[tui]` symbols, dark/light theme, color-blind palette, cycle order, git status, composer shape/predictions/token rate, title and spinner, FPS/motion, streaming, `/loop`, double Escape, bare commands, paste menu, notifications, ask timeout, update check/channel, plan autosave, title generator |
+
+Where native behavior already existed, defaults keep it rather than OMP's value (for example the
+8 KB tool-output preview, 400-line read window, no auto-backgrounding, MCP servers kept for the
+session, isolated task changes left in their worktree, `unicode` symbols, no composer predictions,
+no automatic update install); the OMP value applies when the imported file sets it.
+Settings for OMP-only services (accounts, marketplace, memory backends, browser, hosted
+search providers) and subsystems native lacks (status line, inline images, mouse, branch sessions,
+prewalk, speculative task launch, filesystem clone backends) are not imported.
+Speech and realtime voice are native: `speech.*`/`tts.*` drive the `tts` tool and spoken output,
+`live.*` configures `greencode-cli live`, and `providers.tinyModel*` maps to `tiny_model.device|dtype`
+for `tiny/<repo>` and `local/<repo>` models.
+`extensions` entries load only `.lua` files from absolute or `~/` paths (OMP's TypeScript extensions are skipped).
 It does not copy credentials, providers, or executable configuration. To layer
 explicit YAML files, pass them in order; later values replace earlier ones.
 OMP `compaction.thresholdTokens: -1` maps to GreenCode's default of 250,000.
@@ -534,6 +586,22 @@ An individual task can override the model default with `{"tasks":[{"prompt":"Ins
 Order: task override → thread default → parent model. Cross-provider choices use the selected provider's configured credentials;
 missing credentials or unknown providers return a tool error, with no fallback to a different model.
 Pi/OMP/Hermes and other external backends manage their own sub-agent settings; this selector does not change them.
+
+## Cross-harness delegation
+
+A thread on any backend can hand work to a child agent on another backend or model, as T3 Code's `delegate_task` does.
+Each child is a thread of its own (titled `↳ NAME: …`), runs with that harness's own tools, login and history, and starts with only the task text.
+
+- Native threads: add `backend` to a `task` item, for example `{"prompt": "Review the diff", "backend": "codex", "model": "gpt-6"}`. `model` is then that backend's model id; `schema` is not available there. The call waits for the child like any sub-agent.
+- ACP threads (Codex, Claude, OpenCode, Gemini, …) receive a `greencode` MCP server (HTTP when the agent supports it, otherwise a `greencode-cli mcp-relay` stdio bridge); Pi and OMP threads receive the same tools through an extension. The tools follow T3 Code's orchestrator:
+  - `orchestrator_capabilities`, `delegate_task` (`target.backend`, `target.model`, `target.mode`, `target.environmentId`, `isolation: "worktree"`, `mode: "async" | "wait"`), `task_status`, `task_cancel`. An async child's completion wakes its idle parent with the result as a new turn.
+  - `create_threads`, `thread_list`, `thread_read`, `thread_update` (rename), `thread_send` (`auto` / `queue` / `steer` / `restart`), `thread_wait`, `thread_interrupt`: other threads, shown in the sidebar as they are created.
+  - `request_secret`: a masked card asks the user; the value is saved under `~/.greencode/secrets/NAME` and never sent to the model.
+  - `schedule_task`, `list_scheduled_tasks`, `delete_scheduled_task`: interval or fixed-time (`HH:MM`, optional weekdays) prompts, the same list as `/schedule`; they run while the desktop app is open (the TUI and CLI refuse them).
+  - `background_wait` keeps the thread marked as working in the sidebar; `workflow_runs` / `workflow_stop` reach Labs workflows; `environment_links` / `environment_link` / `environment_unlink` link other machines running `greencode-cli serve` (the token is asked in a private card) so tasks and threads can run there.
+- The Agent Hub card lists delegated children: 開く shows the child thread live, 指示 and `/to NAME` steer it, 停止 cancels it, also after the parent's turn ended. Child threads are indented under their parent in the sidebar. A running child's thread does not accept prompts of its own.
+- Children inherit the parent's permission mode or a narrower `target.mode`; a broader one is refused. Their approvals and questions appear in the parent (or in the child thread once opened). Children cannot delegate further. Task records are saved owner-only in `~/.greencode/delegations.json`; a task that was running when GreenCode stopped reports `interrupted`, and results that finished unseen wake the parent when it runs again.
+- `greencode-cli -p` keeps running until async children have reported back and the parent's wake turn ended.
 
 ## Extra native tools (`ext`)
 

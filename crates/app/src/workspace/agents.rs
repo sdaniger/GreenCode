@@ -23,7 +23,7 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             if let Ok(versions) = task.await {
                 this.update(cx, |this, cx| {
-                    if this.agent_versions_generation == generation && this.settings.is_some() {
+                    if this.agent_versions_generation == generation && (this.settings.is_some() || this.welcome.is_some()) {
                         this.agent_versions = versions;
                         cx.notify();
                     }

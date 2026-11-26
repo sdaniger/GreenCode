@@ -335,6 +335,19 @@ async fn external_model_selection_reports_backend_start_failure() {
 }
 
 #[test]
+fn reset_hides_history_from_the_agent_but_not_from_the_view() {
+    let meta = Meta::new(dir("reset"), "test".into(), "native".into());
+    let session = Session::create(&meta).unwrap();
+    session.append(&Message::user("before")).unwrap();
+    Session::reset(&meta.id).unwrap();
+    session.append(&Message::user("after")).unwrap();
+    assert_eq!(Session::load(&meta.id).unwrap().1.len(), 1);
+    let (_, all, resets) = Session::load_all(&meta.id).unwrap();
+    assert_eq!((all.len(), resets), (2, vec![1]));
+    assert_eq!(Session::handoff(&meta.id, 10_000).unwrap().0.len(), 1);
+}
+
+#[test]
 fn handoff_keeps_recent_complete_text_without_tool_state() {
     let meta = Meta::new(dir("handoff"), "test".into(), "native".into());
     let session = Session::create(&meta).unwrap();
@@ -419,6 +432,26 @@ fn agent(name: &str, mode: Mode, mock: &Arc<Mock>) -> (Agent, Meta) {
         "m".into(),
     );
     (a, meta)
+}
+
+#[tokio::test]
+async fn inline_edit_payloads_written_as_text_run_as_edit_calls() {
+    let dir = dir("recover-inline");
+    let path = dir.join("a.txt");
+    std::fs::write(&path, "first\n").unwrap();
+    let mock = Mock::new(vec![
+        vec![text("```json\n{\"path\":\"a.txt\",\"old_string\":\"first\",\"new_string\":\"second\"}\n```")],
+        vec![text("done")],
+    ]);
+    let meta = Meta::new(dir, "mock/m".into(), "native".into());
+    let mut cfg = Config::default();
+    cfg.learning.auto = false;
+    let owner = meta.id.clone();
+    let mut a = Agent::with_provider(Arc::new(cfg), &meta, Arc::new(Perms::new(Mode::Full)), mock.clone(), "m".into());
+    let (result, events) = run(&mut a, "apply that", Decision::Allow).await;
+    result.unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "second\n");
+    assert!(results(&events).iter().any(|(output, error)| !error && output.contains("replaced 1")));
 }
 
 #[tokio::test]
@@ -730,7 +763,7 @@ fn openai_cache_writes_are_not_uncached_input() {
 /// The native prompt is sent on every request, so keep it lean.
 #[test]
 fn native_prompt_stays_lean() {
-    let system_len = greencode_core::context::system_prompt().len();
+    let system_len = greencode_core::context::base_prompt().len();
     let tools = tools::defs(false, &[]);
     let schemas: usize = tools
         .iter()
@@ -740,8 +773,9 @@ fn native_prompt_stays_lean() {
         system_len < 1_200,
         "system prompt grew to {system_len} bytes"
     );
-    assert!(schemas < 6_000, "tool schemas grew to {schemas} bytes");
-    assert!(system_len + schemas < 7_000);
+    // Default tools include `browser` everywhere and `computer` on macOS (about 2.4 KB together).
+    assert!(schemas < 8_000, "tool schemas grew to {schemas} bytes");
+    assert!(system_len + schemas < 9_000);
 }
 
 #[tokio::test]
@@ -893,6 +927,7 @@ fn deepseek_requests_clamp_output_and_read_cache_hits() {
         key: String::new(),
         copilot: false,
         effort: None,
+        wire: Default::default(),
     };
     let messages = vec![Message::user("hi")];
     let tools = tools::defs(false, &[]);
@@ -902,6 +937,7 @@ fn deepseek_requests_clamp_output_and_read_cache_hits() {
         messages: &messages,
         tools: &tools,
         max_tokens: 64_000,
+        live: None,
     };
     let body = api.body(&req);
     assert_eq!(
@@ -940,6 +976,7 @@ fn openai_cache_controls_do_not_leak_to_compatible_servers() {
         key: String::new(),
         copilot: false,
         effort: None,
+        wire: Default::default(),
     };
     let messages = vec![Message::user("hi")];
     let tools = tools::defs(false, &[]);
@@ -950,6 +987,7 @@ fn openai_cache_controls_do_not_leak_to_compatible_servers() {
             messages: &messages,
             tools: &tools,
             max_tokens: 123,
+            live: None,
         };
         let body = api.body(&req);
         assert_eq!(body["prompt_cache_options"]["mode"], "implicit");
@@ -967,6 +1005,7 @@ fn openai_cache_controls_do_not_leak_to_compatible_servers() {
         messages: &messages,
         tools: &tools,
         max_tokens: 123,
+        live: None,
     };
     let legacy = api.body(&req);
     assert!(legacy.get("prompt_cache_options").is_none());
@@ -1451,6 +1490,47 @@ async fn subagent_returns_only_its_answer() {
     let seen = mock.seen.lock().unwrap();
     assert!(seen[1].1.contains("look around") && !seen[1].1.contains("delegate"));
     assert_eq!(*mock.models.lock().unwrap(), ["m", "m", "m"]);
+}
+
+#[tokio::test]
+async fn task_with_backend_runs_as_a_child_thread_on_that_harness() {
+    if std::process::Command::new("python3").arg("--version").output().is_err() {
+        return;
+    }
+    let d = dir("task-backend");
+    std::fs::write(d.join("child.py"), r#"
+import json, sys
+def send(m): print(json.dumps(m), flush=True)
+for line in sys.stdin:
+    m = json.loads(line)
+    meth = m.get("method")
+    if meth == "initialize": send({"jsonrpc": "2.0", "id": m["id"], "result": {"protocolVersion": 1}})
+    elif meth == "session/new": send({"jsonrpc": "2.0", "id": m["id"], "result": {"sessionId": "c"}})
+    elif meth == "session/prompt":
+        text = m["params"]["prompt"][0]["text"]
+        send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "c", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "child saw " + text.rsplit("\n", 1)[-1]}}}})
+        send({"jsonrpc": "2.0", "id": m["id"], "result": {"stopReason": "end_turn"}})
+"#).unwrap();
+    let mock = Mock::new(vec![
+        vec![call("t1", "task", json!({"tasks":[{"prompt": "count files", "backend": "child", "name": "kid"}]}))],
+        vec![text("final")],
+    ]);
+    let mut cfg = Config::default();
+    cfg.learning.auto = false;
+    cfg.backends.push(greencode_core::config::AcpCfg { name: "child".into(), command: vec!["python3".into(), "child.py".into()], env: Default::default(), protocol: Default::default() });
+    let meta = Meta::new(d, "mock/m".into(), "native".into());
+    let mut a = Agent::with_provider(Arc::new(cfg), &meta, Arc::new(Perms::new(Mode::Full)), mock.clone(), "m".into());
+    let (r, events) = run(&mut a, "delegate", Decision::Deny).await;
+    r.unwrap();
+    assert_eq!(results(&events), vec![("child saw count files".to_string(), false)]);
+    let child = events.iter().find_map(|e| match e {
+        Event::Remote { command, data } if command == "subagent" => data["task"].as_str().map(str::to_string),
+        _ => None,
+    }).expect("a delegated row names its child thread");
+    let (child_meta, _) = Session::load(&child).unwrap();
+    assert_eq!((child_meta.parent, child_meta.backend.as_str()), (Some(meta.id.clone()), "child"));
+    // Only the parent's two requests went to the native model.
+    assert_eq!(mock.seen.lock().unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -2664,6 +2744,7 @@ fn anthropic_body_is_cacheable() {
         key: String::new(),
         oauth: None,
         effort: None,
+        wire: Default::default(),
     };
     let tools = tools::defs(false, &[]);
     let msgs = vec![Message::user("hi")];
@@ -2673,13 +2754,14 @@ fn anthropic_body_is_cacheable() {
         messages: &msgs,
         tools: &tools,
         max_tokens: 10,
+        live: None,
     });
     assert_eq!(body["cache_control"]["type"], "ephemeral");
     assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
     assert_eq!(body["fallbacks"], "default");
     assert_eq!(
         body["tools"].as_array().unwrap().len(),
-        13 + cfg!(target_os = "macos") as usize
+        14 + cfg!(target_os = "macos") as usize
     );
     assert_eq!(
         body["messages"][0],
@@ -2709,6 +2791,7 @@ fn anthropic_body_is_cacheable() {
         messages: &large,
         tools: &tools,
         max_tokens: 10,
+        live: None,
     });
     assert_eq!(
         body["messages"][0]["content"][0]["cache_control"]["type"],
@@ -3574,14 +3657,15 @@ async fn computer_helper_builds_and_answers_without_touching_any_app() {
     {
         return;
     }
-    let (apps, image) = tools::computer::run(&json!({"action":"list_apps"}))
+    let cfg = greencode_core::config::Config::default();
+    let (apps, image) = tools::computer::run(&cfg, &json!({"action":"list_apps"}))
         .await
         .unwrap();
     assert!(image.is_none(), "{apps}");
     // Errors come back as tool errors and the helper stays usable.
-    let e = tools::computer::run(&json!({})).await.unwrap_err();
+    let e = tools::computer::run(&cfg, &json!({})).await.unwrap_err();
     assert!(e.to_string().contains("`action` is required"), "{e}");
-    assert!(tools::computer::run(&json!({"action":"list_apps"}))
+    assert!(tools::computer::run(&cfg, &json!({"action":"list_apps"}))
         .await
         .is_ok());
 }
@@ -3676,6 +3760,7 @@ async fn deepseek_stream_keeps_reasoning_and_cache_hits() {
                 messages: &messages,
                 tools: &tools,
                 max_tokens: 64_000,
+                live: None,
             },
             &|_| {},
         )
@@ -3763,6 +3848,7 @@ async fn anthropic_oauth_request_uses_subscription_identity() {
         key: "unused".into(),
         oauth: Some(path),
         effort: None,
+        wire: Default::default(),
     };
     let msgs = vec![
         Message::user("hi"),
@@ -3788,6 +3874,7 @@ async fn anthropic_oauth_request_uses_subscription_identity() {
                 messages: &msgs,
                 tools: &tools,
                 max_tokens: 10,
+                live: None,
             },
             &|_| {},
         )
@@ -4320,6 +4407,49 @@ async fn ask_returns_the_users_answers_and_settings_can_turn_it_off() {
 }
 
 #[tokio::test]
+async fn secret_tool_stores_the_value_outside_the_transcript() {
+    let mock = Mock::new(vec![
+        vec![call(
+            "s",
+            "ext",
+            ext("secret", json!({"name": "DEPLOY_TOKEN", "reason": "deploy"})),
+        )],
+        vec![text("done")],
+    ]);
+    let (mut a, meta) = agent("ext-secret", Mode::Full, &mock);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let fut = a.prompt("go".into(), &tx);
+    tokio::pin!(fut);
+    let mut output = None;
+    loop {
+        tokio::select! {
+            r = &mut fut => { r.unwrap(); break; }
+            Some(ev) = rx.recv() => match ev {
+                Event::Dialog { request, reply } => {
+                    assert_eq!(request["method"], "secret");
+                    assert!(request["title"].as_str().unwrap().contains("DEPLOY_TOKEN"));
+                    reply.send(json!({"value": "hunter2"})).unwrap();
+                }
+                Event::ToolEnd { output: o, is_error, .. } => { assert!(!is_error, "{o}"); output = Some(o); }
+                _ => {}
+            },
+        }
+    }
+    while let Ok(ev) = rx.try_recv() {
+        if let Event::ToolEnd { output: o, .. } = ev { output = Some(o); }
+    }
+    let output = output.unwrap();
+    assert!(output.contains("$DEPLOY_TOKEN") && output.contains("secrets/DEPLOY_TOKEN"), "{output}");
+    assert!(!output.contains("hunter2"), "{output}");
+    assert_eq!(
+        greencode_core::secrets::env(),
+        vec![("DEPLOY_TOKEN".to_string(), "hunter2".to_string())]
+    );
+    let saved = serde_json::to_string(&Session::load(&meta.id).unwrap().1).unwrap();
+    assert!(!saved.contains("hunter2"), "{saved}");
+}
+
+#[tokio::test]
 async fn hashline_edit_applies_and_rejects_stale_tag() {
     let d = dir("hashline");
     let file = d.join("f.txt");
@@ -4801,4 +4931,409 @@ async fn ast_reports_missing_binary_or_matches() {
             "baz(1);\nbar(2);\n"
         );
     }
+}
+
+#[tokio::test]
+async fn acp_sends_image_blocks_mcp_servers_usage_and_non_text_placeholders() {
+    if std::process::Command::new("python3").arg("--version").output().is_err() {
+        return; // the fake agent below needs python3
+    }
+    let d = dir("acp-image");
+    std::fs::write(d.join("dot.png"), b"PNG").unwrap();
+    std::fs::write(
+        d.join(".mcp.json"),
+        r#"{"mcpServers":{"calc":{"command":"python3","args":["calc.py"],"env":{"A":"1"}},"web":{"url":"http://x"}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        d.join("agent.py"),
+        r#"
+import json, sys
+def send(m): print(json.dumps(m), flush=True)
+def update(u): send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1", "update": u}})
+for line in sys.stdin:
+    m = json.loads(line)
+    meth = m.get("method")
+    if meth == "initialize":
+        send({"jsonrpc": "2.0", "id": m["id"], "result": {"protocolVersion": 1,
+              "agentCapabilities": {"promptCapabilities": {"image": True}}}})
+    elif meth == "session/new":
+        open("new.json", "w").write(json.dumps(m["params"]))
+        send({"jsonrpc": "2.0", "id": m["id"], "result": {"sessionId": "s1"}})
+    elif meth == "session/prompt":
+        open("prompt.json", "w").write(json.dumps(m["params"]["prompt"]))
+        update({"sessionUpdate": "usage_update", "used": 42, "size": 200000, "cost": {"amount": 0.5, "currency": "USD"}})
+        update({"sessionUpdate": "agent_message_chunk", "content": {"type": "image", "data": "aGk=", "mimeType": "image/png"}})
+        update({"sessionUpdate": "agent_message_chunk", "content": {"type": "resource_link", "uri": "file:///tmp/x.txt", "name": "x"}})
+        update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "done"}})
+        send({"jsonrpc": "2.0", "id": m["id"], "result": {"stopReason": "end_turn"}})
+"#,
+    )
+    .unwrap();
+    let meta = Meta::new(d.clone(), String::new(), "fake".into());
+    let mut acp = greencode_core::acp::Acp::start(
+        &["python3".to_string(), "agent.py".to_string()],
+        &Default::default(),
+        &meta,
+        Arc::new(Perms::new(Mode::Ask)),
+    )
+    .await
+    .unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let events = {
+        let fut = acp.prompt("look dot.png".into(), &tx);
+        tokio::pin!(fut);
+        let mut events = Vec::new();
+        loop {
+            tokio::select! {
+                r = &mut fut => { r.unwrap(); break }
+                Some(ev) = rx.recv() => events.push(ev),
+            }
+        }
+        while let Ok(ev) = rx.try_recv() { events.push(ev); }
+        events
+    };
+    // The image path becomes a base64 block only because the agent advertised image prompts.
+    let prompt: Value = serde_json::from_str(&std::fs::read_to_string(d.join("prompt.json")).unwrap()).unwrap();
+    assert_eq!(
+        prompt,
+        json!([{"type": "text", "text": "look dot.png"}, {"type": "image", "data": "UE5H", "mimeType": "image/png"}])
+    );
+    // Only the stdio server is handed to the agent; the HTTP one stays behind (no mcpCapabilities.http advertised).
+    let params: Value = serde_json::from_str(&std::fs::read_to_string(d.join("new.json")).unwrap()).unwrap();
+    assert_eq!(
+        params["mcpServers"],
+        json!([{"name": "calc", "command": "python3", "args": ["calc.py"], "env": [{"name": "A", "value": "1"}]}])
+    );
+    // Non-text output is not dropped; usage arrives as a Remote update the app can show.
+    let texts: Vec<&str> = events.iter().filter_map(|e| if let Event::Text(t) = e { Some(t.as_str()) } else { None }).collect();
+    assert_eq!(texts, ["[画像]", "[リンク: x](file:///tmp/x.txt)", "done"]);
+    assert!(events.iter().any(|e| matches!(
+        e,
+        Event::Remote { command, data }
+            if command == "usage_update" && data["used"].as_u64() == Some(42) && data["size"].as_u64() == Some(200_000)
+    )));
+}
+
+#[tokio::test]
+async fn acp_keeps_image_paths_as_text_without_image_capability() {
+    if std::process::Command::new("python3").arg("--version").output().is_err() {
+        return;
+    }
+    let d = dir("acp-no-image");
+    std::fs::write(d.join("dot.png"), b"PNG").unwrap();
+    std::fs::write(
+        d.join("agent.py"),
+        r#"
+import json, sys
+def send(m): print(json.dumps(m), flush=True)
+for line in sys.stdin:
+    m = json.loads(line)
+    meth = m.get("method")
+    if meth == "initialize":
+        send({"jsonrpc": "2.0", "id": m["id"], "result": {"protocolVersion": 1,
+              "agentCapabilities": {"promptCapabilities": {"image": False}}}})
+    elif meth == "session/new":
+        open("new.json", "w").write(json.dumps(m["params"]))
+        send({"jsonrpc": "2.0", "id": m["id"], "result": {"sessionId": "s1"}})
+    elif meth == "session/prompt":
+        open("prompt.json", "w").write(json.dumps(m["params"]["prompt"]))
+        send({"jsonrpc": "2.0", "id": m["id"], "result": {"stopReason": "end_turn"}})
+"#,
+    )
+    .unwrap();
+    let meta = Meta::new(d.clone(), String::new(), "fake".into());
+    let mut acp = greencode_core::acp::Acp::start(
+        &["python3".to_string(), "agent.py".to_string()],
+        &Default::default(),
+        &meta,
+        Arc::new(Perms::new(Mode::Ask)),
+    )
+    .await
+    .unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let fut = acp.prompt("look dot.png".into(), &tx);
+    tokio::pin!(fut);
+    loop {
+        tokio::select! {
+            r = &mut fut => { r.unwrap(); break }
+            Some(_) = rx.recv() => {}
+        }
+    }
+    let prompt: Value = serde_json::from_str(&std::fs::read_to_string(d.join("prompt.json")).unwrap()).unwrap();
+    assert_eq!(prompt, json!([{"type": "text", "text": "look dot.png"}]));
+    let params: Value = serde_json::from_str(&std::fs::read_to_string(d.join("new.json")).unwrap()).unwrap();
+    assert_eq!(params["mcpServers"], json!([]));
+}
+
+/// Streams scripted chunks with a pause between them, so a rule can match while the request is in flight.
+struct Streamer {
+    calls: Mutex<Vec<Vec<&'static str>>>,
+    texts: Mutex<Vec<String>>,
+    completed: std::sync::atomic::AtomicUsize,
+}
+
+impl Streamer {
+    fn new(calls: Vec<Vec<&'static str>>) -> Arc<Streamer> {
+        Arc::new(Streamer {
+            calls: Mutex::new(calls),
+            texts: Mutex::new(Vec::new()),
+            completed: Default::default(),
+        })
+    }
+}
+
+impl Provider for Streamer {
+    fn complete<'a>(
+        &'a self,
+        req: Request<'a>,
+        on_text: &'a (dyn Fn(&str) + Send + Sync),
+    ) -> BoxFut<'a, anyhow::Result<Reply>> {
+        Box::pin(async move {
+            self.texts.lock().unwrap().push(serde_json::to_string(req.messages).unwrap());
+            let chunks = self.calls.lock().unwrap().remove(0);
+            let mut all = String::new();
+            for chunk in chunks {
+                on_text(chunk);
+                all.push_str(chunk);
+                tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            }
+            self.completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(Reply { blocks: vec![text(&all)], ..Default::default() })
+        })
+    }
+}
+
+fn rule_dir(name: &str, rule: &str, file: &str) -> PathBuf {
+    let d = dir(name);
+    std::fs::create_dir_all(d.join(".greencode/rules")).unwrap();
+    std::fs::write(d.join(".greencode/rules").join(file), rule).unwrap();
+    d
+}
+
+fn agent_cfg(name: &str, cfg: Config, provider: Arc<dyn Provider>) -> Agent {
+    let meta = Meta::new(dir(name), "mock/m".into(), "native".into());
+    Agent::with_provider(Arc::new(cfg), &meta, Arc::new(Perms::new(Mode::Full)), provider, "m".into())
+}
+
+#[tokio::test]
+async fn ttsr_cancels_the_stream_and_discards_the_partial_reply() {
+    rule_dir(
+        "ttsr-stream",
+        "---\ntrigger: unwrap\\(\\)\n---\nPrefer ? over unwrap().\n",
+        "no-unwrap.md",
+    );
+    let streamer = Streamer::new(vec![
+        vec!["I will call ", "unwrap()", " here"],
+        vec!["no unwrap after all"],
+    ]);
+    let mut cfg = Config::default();
+    cfg.learning.auto = false;
+    let mut a = agent_cfg("ttsr-stream", cfg, streamer.clone());
+    let (r, events) = run(&mut a, "go", Decision::Deny).await;
+    r.unwrap();
+    assert_eq!(
+        streamer.completed.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "the interrupted request must never return its reply"
+    );
+    let texts = streamer.texts.lock().unwrap();
+    assert_eq!(texts.len(), 2);
+    assert!(texts[1].contains("Rule \\\"no-unwrap\\\" applies"), "{}", texts[1]);
+    assert!(texts[1].contains("Prefer ? over unwrap()."), "{}", texts[1]);
+    assert_eq!(
+        events.iter().filter(|e| matches!(e, Event::Notify(n) if n.contains("ルール適用"))).count(),
+        1
+    );
+    assert!(
+        a.messages.iter().all(|m| match m.content.first() {
+            Some(Block::Text { text }) => !text.contains("unwrap() here"),
+            _ => true,
+        }),
+        "`contextMode = discard` must not commit the partial reply"
+    );
+}
+
+#[tokio::test]
+async fn ttsr_keep_commits_the_partial_reply_before_the_warning() {
+    rule_dir("ttsr-keep", "---\ntrigger: boom\n---\nbody\n", "boom.md");
+    let streamer = Streamer::new(vec![vec!["half a sen", "boom"], vec!["all clear now"]]);
+    let mut cfg = Config::default();
+    cfg.learning.auto = false;
+    cfg.ttsr_opts.ttsr.context_mode = greencode_core::config::ttsr::ContextMode::Keep;
+    let mut a = agent_cfg("ttsr-keep", cfg, streamer.clone());
+    let (r, _) = run(&mut a, "go", Decision::Deny).await;
+    r.unwrap();
+    assert!(
+        a.messages.iter().any(|m| matches!(m.content.first(), Some(Block::Text { text }) if text.contains("half a sen"))),
+        "`keep` must commit what streamed before the interrupt"
+    );
+    let texts = streamer.texts.lock().unwrap();
+    assert!(texts[1].contains("Rule \\\"boom\\\" applies"), "{}", texts[1]);
+}
+
+#[tokio::test]
+async fn ttsr_tool_only_blocks_the_matching_call_and_runs_the_prose() {
+    rule_dir(
+        "ttsr-tool",
+        "---\ntrigger: reset --hard\nscope: tool:bash\ninterruptMode: tool-only\n---\nNever discard work.\n",
+        "no-reset.md",
+    );
+    let mock = Mock::new(vec![
+        vec![call("t1", "bash", json!({"command": "git reset --hard"}))],
+        vec![text("done")],
+    ]);
+    let mut cfg = Config::default();
+    cfg.learning.auto = false;
+    let mut a = agent_cfg("ttsr-tool", cfg, mock);
+    let (r, events) = run(&mut a, "go", Decision::Deny).await;
+    r.unwrap();
+    let ended = events
+        .iter()
+        .find_map(|e| match e {
+            Event::ToolEnd { output, is_error, .. } => Some((output.clone(), *is_error)),
+            _ => None,
+        })
+        .expect("the blocked call still answers the model");
+    assert!(ended.1, "the matching tool call must not run: {ended:?}");
+    assert!(ended.0.contains("Never discard work."), "{}", ended.0);
+}
+
+#[tokio::test]
+async fn ttsr_disabled_leaves_streams_and_calls_alone() {
+    rule_dir("ttsr-off", "---\ntrigger: unwrap\n---\nbody\n", "no-unwrap.md");
+    let streamer = Streamer::new(vec![vec!["calling unwrap now"]]);
+    let mut cfg = Config::default();
+    cfg.learning.auto = false;
+    cfg.ttsr_opts.ttsr.enabled = false;
+    let mut a = agent_cfg("ttsr-off", cfg, streamer.clone());
+    let (r, _) = run(&mut a, "go", Decision::Deny).await;
+    r.unwrap();
+    assert_eq!(streamer.completed.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert!(streamer.texts.lock().unwrap().len() == 1, "no retry when rules are off");
+}
+
+#[tokio::test]
+async fn antigravity_auto_restarts_the_runtime_on_the_sandbox_after_a_connection_failure() {
+    if std::process::Command::new("python3").arg("--version").output().is_err() {
+        return; // the fake agent below needs python3
+    }
+    let d = dir("antigravity-endpoint");
+    std::fs::write(
+        d.join("agent.py"),
+        r#"
+import json, os, sys
+host = os.environ.get("CODE_ASSIST_ENDPOINT", "")
+open("calls.log", "a").write(host + " " + os.environ.get("CODE_ASSIST_ENDPOINT_FALLBACK", "") + "\n")
+if "sandbox" not in host:
+    # A production endpoint that is unreachable: the runtime dies during `initialize`.
+    sys.exit(1)
+def send(m): print(json.dumps(m), flush=True)
+for line in sys.stdin:
+    m = json.loads(line)
+    meth = m.get("method")
+    if meth == "initialize": send({"jsonrpc": "2.0", "id": m["id"], "result": {"protocolVersion": 1}})
+    elif meth == "session/new": send({"jsonrpc": "2.0", "id": m["id"], "result": {"sessionId": "s1"}})
+    elif meth == "session/prompt": send({"jsonrpc": "2.0", "id": m["id"], "result": {"stopReason": "end_turn"}})
+"#,
+    )
+    .unwrap();
+    let meta = Meta::new(d.clone(), String::new(), "fake".into());
+    let mut env = std::collections::BTreeMap::new();
+    greencode_core::antigravity::endpoint_env(
+        greencode_core::config::services_extra::AntigravityEndpoint::Auto,
+        &mut env,
+    );
+    let mut acp = greencode_core::acp::Acp::start(
+        &["python3".to_string(), "agent.py".to_string()],
+        &env,
+        &meta,
+        Arc::new(Perms::new(Mode::Ask)),
+    )
+    .await
+    .unwrap();
+    let calls = std::fs::read_to_string(d.join("calls.log")).unwrap();
+    let hosts: Vec<&str> = calls.lines().map(|line| line.split_once(' ').unwrap().0).collect();
+    assert_eq!(hosts.len(), 2, "production runs first, then the sandbox: {calls}");
+    assert!(hosts[0].contains("daily-cloudcode-pa.googleapis.com") && !hosts[0].contains("sandbox"), "{calls}");
+    assert!(hosts[1].contains("sandbox"), "{calls}");
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let fut = acp.prompt("hello".into(), &tx);
+    tokio::pin!(fut);
+    loop {
+        tokio::select! {
+            r = &mut fut => { r.unwrap(); break }
+            Some(_) = rx.recv() => {}
+        }
+    }
+}
+
+#[tokio::test]
+async fn task_agent_idle_ttl_parks_a_named_subagent_and_revives_it_on_the_next_message() {
+    let mock = Mock::routed(
+        vec![
+            vec![call(
+                "t1",
+                "task",
+                json!({"tasks":[{"name":"keeper","prompt":"first-marker"}]}),
+            )],
+            vec![text("first done")],
+            vec![call(
+                "t2",
+                "task",
+                json!({"tasks":[{"name":"keeper","prompt":"second-marker"}]}),
+            )],
+            vec![text("second done")],
+        ],
+        vec![("marker", vec![vec![text("note-one")], vec![text("note-two")]])],
+    );
+    let (mut a, _) = agent("idle-ttl", Mode::Full, &mock);
+    let (r, _) = run(&mut a, "delegate", Decision::Deny).await;
+    r.unwrap();
+    let (r, events) = run(&mut a, "delegate again", Decision::Deny).await;
+    r.unwrap();
+    assert!(results(&events)[0].0.contains("note-two"));
+    // The second run of the same name starts from the parked transcript instead of an empty one.
+    let seen = mock.seen.lock().unwrap();
+    let second = seen
+        .iter()
+        .filter(|(_, m)| m.contains("# Role: keeper") && m.contains("second-marker"))
+        .map(|(_, m)| m.clone())
+        .next()
+        .expect("second sub-agent request");
+    assert!(second.contains("first-marker") && second.contains("note-one"), "{second}");
+
+    // A zero TTL parks nothing on disk but keeps the transcript in memory, so the same name still continues.
+    let mock = Mock::routed(
+        vec![
+            vec![call("t1", "task", json!({"tasks":[{"name":"keeper","prompt":"first-marker"}]}))],
+            vec![text("first done")],
+            vec![call("t2", "task", json!({"tasks":[{"name":"keeper","prompt":"second-marker"}]}))],
+            vec![text("second done")],
+        ],
+        vec![("marker", vec![vec![text("note-one")], vec![text("note-two")]])],
+    );
+    let meta_dir = dir("idle-ttl-off");
+    let meta = Meta::new(meta_dir, "mock/m".into(), "native".into());
+    let mut cfg = Config::default();
+    cfg.learning.auto = false;
+    cfg.task.agent_idle_ttl_ms = 0;
+    let owner = meta.id.clone();
+    let mut a = Agent::with_provider(Arc::new(cfg), &meta, Arc::new(Perms::new(Mode::Full)), mock.clone(), "m".into());
+    run(&mut a, "delegate", Decision::Deny).await.0.unwrap();
+    run(&mut a, "delegate again", Decision::Deny).await.0.unwrap();
+    let seen = mock.seen.lock().unwrap();
+    let second = seen
+        .iter()
+        .find(|(_, m)| m.contains("# Role: keeper") && m.contains("second-marker"))
+        .map(|(_, m)| m.clone())
+        .expect("second sub-agent request");
+    assert!(second.contains("first-marker") && second.contains("note-one"), "{second}");
+    assert!(
+        !std::fs::read_dir(greencode_core::home().join("parked").join(&owner))
+            .map(|d| d.count())
+            .unwrap_or(0)
+            .gt(&0),
+        "a zero TTL must not park anything on disk"
+    );
 }

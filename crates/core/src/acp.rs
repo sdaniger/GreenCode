@@ -26,18 +26,51 @@ pub struct Acp {
     commands: Option<Value>,
     /// Messages taken off the wire (by `idle`, or requests seen during startup) awaiting `handle_idle`.
     idle_inc: std::collections::VecDeque<Incoming>,
+    /// The agent accepts images in prompts (`promptCapabilities.image`).
+    images: bool,
+    /// GreenCode's MCP server was attached and its usage guide is not sent yet; it goes before the next prompt.
+    guide: bool,
 }
 
 impl Acp {
     pub async fn start(command: &[String], env: &std::collections::BTreeMap<String, String>, meta: &Meta, perms: Arc<Perms>) -> Result<Acp> {
         let saved = Session::runtime_for_backend(&meta.id, &meta.backend)?;
-        let (rpc, incoming, mut out_rx) = Rpc::spawn_with_output(command, &env.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>(), &meta.cwd)?;
+        // `auto` names the sandbox as the runtime's fallback; GreenCode also restarts the runtime on it when
+        // production fails while the thread opens. `production`/`sandbox` never fall back.
+        let Some(sandbox) = env.get("CODE_ASSIST_ENDPOINT_FALLBACK") else {
+            return Self::start_env(command, env, &saved, meta, perms).await;
+        };
+        let mut backup = env.clone();
+        backup.insert("CODE_ASSIST_ENDPOINT".into(), sandbox.clone());
+        backup.remove("CODE_ASSIST_ENDPOINT_FALLBACK");
+        let first = match Self::start_env(command, env, &saved, meta, perms.clone()).await {
+            Ok(acp) => return Ok(acp),
+            Err(err) => err,
+        };
+        if !endpoint_failure(&first) {
+            return Err(first);
+        }
+        Self::start_env(command, &backup, &saved, meta, perms)
+            .await
+            .map_err(|err| err.context(format!("production endpoint failed first: {first:#}")))
+    }
+
+    async fn start_env(command: &[String], env: &std::collections::BTreeMap<String, String>, saved: &Value, meta: &Meta, perms: Arc<Perms>) -> Result<Acp> {
+        // `op://` values in `[[backends]] env` are read here so an error names the backend.
+        let who = format!("backend {}", meta.backend);
+        let env = env.iter().map(|(k, v)| Ok((k.clone(), crate::secrets::resolve(v, &who)?))).collect::<Result<Vec<_>>>()?;
+        let (rpc, incoming, mut out_rx) = Rpc::spawn_with_output(command, &env, &meta.cwd)?;
         let init = rpc.request("initialize", json!({
             "protocolVersion": 1,
             "clientCapabilities": {"fs": {"readTextFile": true, "writeTextFile": true}},
         }))
         .await?;
-        let (session_id, r) = match open_session(&rpc, &saved, &init, meta).await {
+        let images = init["agentCapabilities"]["promptCapabilities"]["image"] == true;
+        let mut mcp = stdio_mcp_servers(&meta.cwd);
+        let delegation = crate::delegate::acp_server(meta, &init).await;
+        let guide = delegation.is_some();
+        mcp.extend(delegation);
+        let (session_id, r) = match open_session(&rpc, saved, &init, meta, &mcp).await {
             Ok(opened) => {
                 if crate::antigravity::is_alias(&meta.backend) {
                     let _ = crate::antigravity::mark_signed_in(true, None);
@@ -86,12 +119,12 @@ impl Acp {
                 if crate::antigravity::is_alias(&meta.backend) {
                     let _ = crate::antigravity::mark_signed_in(true, Some(&method_id));
                 }
-                open_session(&rpc, &saved, &init, meta).await?
+                open_session(&rpc, saved, &init, meta, &mcp).await?
             }
             Err(err) => return Err(err),
         };
         Session::save_runtime(&meta.id, &json!({"backend":meta.backend,"sessionId":session_id}))?;
-        let mut acp = Acp { rpc, incoming, session_id, cwd: meta.cwd.clone(), perms, meta: meta.clone(), log: vec![], state: r, prompt_text:None, commands:None, idle_inc:Default::default() };
+        let mut acp = Acp { rpc, incoming, session_id, cwd: meta.cwd.clone(), perms, meta: meta.clone(), log: vec![], state: r, prompt_text:None, commands:None, idle_inc:Default::default(), images, guide };
         // Agents advertise slash commands in a notification sent right after the session/new|load response, and
         // session/load also replays its transcript (which the UI already has). Collect until the stream goes
         // quiet so those updates are neither missed nor mistaken for the first turn's output; keep only state.
@@ -118,6 +151,22 @@ impl Acp {
         }
     }
 
+    /// The prompt as ACP content blocks: image paths become image blocks only when the agent advertised support;
+    /// otherwise the path stays in the text, as before.
+    fn prompt_content(&self, text: &str) -> Vec<Value> {
+        let mut blocks = vec![json!({"type": "text", "text": text})];
+        if !self.images {
+            return blocks;
+        }
+        for block in crate::context::attachments(text, &self.cwd) {
+            let Block::Other(v) = &block else { continue };
+            if let (Some(data), Some(mime)) = (v["source"]["data"].as_str(), v["source"]["media_type"].as_str()) {
+                blocks.push(json!({"type": "image", "data": data, "mimeType": mime}));
+            }
+        }
+        blocks
+    }
+
     async fn handle(&mut self, inc: Incoming, tx: &EventTx) {
         match inc {
             Incoming::Notification { method, params } if method == "session/update" => {
@@ -127,6 +176,9 @@ impl Acp {
                         if let Some(t) = u["content"]["text"].as_str() {
                             self.text(t);
                             let _ = tx.send(Event::Text(t.into()));
+                        } else if let Some(placeholder) = placeholder(&u["content"]) {
+                            self.text(&placeholder);
+                            let _ = tx.send(Event::Text(placeholder));
                         }
                     }
                     "agent_thought_chunk" => {
@@ -162,7 +214,7 @@ impl Acp {
                                 .flatten()
                                 .filter_map(|c| match c["type"].as_str() {
                                     Some("diff") => Some(format!("edited {}", c["path"].as_str().unwrap_or(""))),
-                                    _ => c["content"]["text"].as_str().map(String::from),
+                                    _ => c["content"]["text"].as_str().map(String::from).or_else(|| placeholder(&c["content"])),
                                 })
                                 .collect();
                             let (output, is_error) = (parts.join("\n"), status == "failed");
@@ -201,14 +253,19 @@ impl Acp {
         let file = params["path"].as_str().filter(|p| !p.is_empty()).ok_or("missing file path")?;
         let tool = if method == "fs/read_text_file" { "read" } else { "write" };
         if tool == "write" && self.perms.mode() == Mode::Plan { return Err("plan mode is on: writes are refused".into()); }
-        if let Some(key) = self.perms.check(tool, params, &self.cwd) {
-            let (reply, rx) = oneshot::channel();
-            let _ = tx.send(Event::Permission { tool:tool.into(), summary:file.into(), reply });
-            match rx.await.unwrap_or(Decision::Deny) {
-                Decision::Allow => {}
-                Decision::Always => self.perms.always(key),
-                Decision::Deny => return Err("the user denied this file access".into()),
+        match self.perms.verdict(tool, params, &self.cwd) {
+            crate::permission::Verdict::Deny(reason) => return Err(reason),
+            crate::permission::Verdict::Ask(ask) => {
+                let (reply, rx) = oneshot::channel();
+                let _ = tx.send(Event::Permission { tool:tool.into(), summary:file.into(), reply });
+                match rx.await.unwrap_or(Decision::Deny) {
+                    Decision::Allow => {}
+                    Decision::Always if ask.remember => self.perms.always(ask.key),
+                    Decision::Always => {}
+                    Decision::Deny => return Err("the user denied this file access".into()),
+                }
             }
+            crate::permission::Verdict::Allow => {}
         }
         match method {
                     "fs/read_text_file" => {
@@ -245,9 +302,10 @@ impl Acp {
         let decision = if self.perms.mode() == Mode::Plan && !matches!(tool, "read") {
             Decision::Deny
         } else {
-            match self.perms.check(tool, &input, &self.cwd) {
-                None => Decision::Allow,
-                Some(key) => {
+            match self.perms.verdict(tool, &input, &self.cwd) {
+                crate::permission::Verdict::Allow => Decision::Allow,
+                crate::permission::Verdict::Deny(_) => Decision::Deny,
+                crate::permission::Verdict::Ask(ask) => {
                     let (reply, rx) = oneshot::channel();
                     let _ = tx.send(Event::Permission {
                         tool: call["title"].as_str().unwrap_or("tool").into(),
@@ -255,7 +313,7 @@ impl Acp {
                         reply,
                     });
                     match rx.await.unwrap_or(Decision::Deny) {
-                        Decision::Always => { self.perms.always(key); Decision::Always }
+                        Decision::Always if ask.remember => { self.perms.always(ask.key); Decision::Always }
                         d => d,
                     }
                 }
@@ -279,7 +337,10 @@ impl Acp {
         let session = match Session::open(&self.meta.id) {
             Some(s) => s,
             None => {
-            self.meta.title = prompt.chars().take(60).collect();
+            // Delegated children arrive titled `↳ NAME: …`; only untitled threads take the prompt.
+            if self.meta.title.is_empty() {
+                self.meta.title = prompt.chars().take(60).collect();
+            }
             Session::create(&self.meta)?
             }
         };
@@ -300,7 +361,12 @@ impl Backend for Acp {
             let _ = tx.send(Event::Remote { command: "acp_state".into(), data: self.state.clone() });
             if let Some(data) = &self.commands { let _ = tx.send(Event::Remote { command: "get_commands".into(), data: data.clone() }); }
             let rpc = self.rpc.clone();
-            let params = json!({"sessionId": self.session_id, "prompt": [{"type": "text", "text": text}]});
+            let mut prompt = self.prompt_content(&text);
+            // Agents that defer MCP tools would not otherwise know delegation exists; once per agent process.
+            if !text.starts_with('/') && std::mem::take(&mut self.guide) {
+                prompt.insert(0, json!({"type": "text", "text": crate::delegate::INSTRUCTIONS}));
+            }
+            let params = json!({"sessionId": self.session_id, "prompt": prompt});
             let fut = rpc.request("session/prompt", params);
             tokio::pin!(fut);
             let result = loop {
@@ -399,19 +465,61 @@ fn is_state_update(inc: &Incoming) -> bool {
         && matches!(params["update"]["sessionUpdate"].as_str(), Some("available_commands_update" | "config_option_update")))
 }
 
-async fn open_session(rpc: &Arc<Rpc>, saved: &Value, init: &Value, meta: &Meta) -> Result<(String, Value)> {
+async fn open_session(rpc: &Arc<Rpc>, saved: &Value, init: &Value, meta: &Meta, mcp: &[Value]) -> Result<(String, Value)> {
     if let Some(id) = saved["sessionId"].as_str() {
         if init["agentCapabilities"]["loadSession"] != true {
             anyhow::bail!("this ACP agent cannot resume sessions; start a new thread rather than silently losing context");
         }
-        let r = rpc.request("session/load", json!({"sessionId":id,"cwd":meta.cwd,"mcpServers":[]})).await?;
+        let r = rpc.request("session/load", json!({"sessionId":id,"cwd":meta.cwd,"mcpServers":mcp})).await?;
         Ok((id.to_string(), r))
     } else {
         if Session::open(&meta.id).is_some() {
             anyhow::bail!("this thread predates saved ACP session handles; start a new thread to preserve its transcript");
         }
-        let r = rpc.request("session/new", json!({"cwd": meta.cwd, "mcpServers": []})).await?;
+        let r = rpc.request("session/new", json!({"cwd": meta.cwd, "mcpServers": mcp})).await?;
         let id = r["sessionId"].as_str().ok_or_else(|| anyhow!("agent returned no sessionId"))?.to_string();
         Ok((id, r))
     }
+}
+
+/// A failure worth retrying on another Antigravity endpoint: connection trouble, a 5xx, or a dead runtime.
+fn endpoint_failure(err: &anyhow::Error) -> bool {
+    let text = format!("{err:#}").to_ascii_lowercase();
+    ["process exited", "connection", "connect", "eof", "timed out", "timeout", "unavailable"]
+        .iter()
+        .any(|needle| text.contains(needle))
+        || (500..=599).any(|code| text.contains(&format!(" {code}")) || text.contains(&format!("{code} ")))
+}
+
+/// A non-text content block as something the transcript can show; images and audio have no text form.
+fn placeholder(content: &Value) -> Option<String> {
+    Some(match content["type"].as_str()? {
+        "image" => "[画像]".into(),
+        "audio" => "[音声]".into(),
+        "resource_link" => format!(
+            "[リンク: {}]({})",
+            content["name"].as_str().or(content["title"].as_str()).unwrap_or("リソース"),
+            content["uri"].as_str().unwrap_or("")
+        ),
+        "resource" => content["resource"]["uri"].as_str().map_or_else(|| "[リソース]".into(), |uri| format!("[リソース: {uri}]")),
+        _ => return None,
+    })
+}
+
+/// GreenCode's stdio MCP servers (`mcp.json` and the project's `.mcp.json`) in ACP's `mcpServers` shape.
+/// HTTP servers are left out: ACP agents only receive them when they advertise `mcpCapabilities.http`.
+fn stdio_mcp_servers(cwd: &std::path::Path) -> Vec<Value> {
+    let mut out: Vec<Value> = vec![];
+    for path in [crate::home().join("mcp.json"), cwd.join(".mcp.json")] {
+        let Ok(text) = std::fs::read_to_string(&path) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
+        for (name, server) in v["mcpServers"].as_object().into_iter().flatten() {
+            let Some(command) = server["command"].as_str() else { continue };
+            let args: Vec<&str> = server["args"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+            let env: Vec<Value> = server["env"].as_object().into_iter().flatten().map(|(k, v)| json!({"name": k, "value": v.as_str().unwrap_or("")})).collect();
+            out.retain(|s| s["name"] != name.as_str());
+            out.push(json!({"name": name, "command": command, "args": args, "env": env}));
+        }
+    }
+    out
 }
