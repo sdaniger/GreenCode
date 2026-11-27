@@ -2990,9 +2990,12 @@ impl Workspace {
                     Ok(result) if result.available => UpdateStatus::Checked(format!(
                         "更新あり：{} → {}", result.current, result.latest
                     ).into()),
-                    Ok(result) => UpdateStatus::Checked(format!(
-                        "更新なし：現在のバージョンは {} です。", result.current
-                    ).into()),
+                    Ok(result) => {
+                        let note = result.note.as_deref().map(|note| format!(" {note}")).unwrap_or_default();
+                        UpdateStatus::Checked(format!(
+                            "更新なし：現在のバージョンは {} です。{note}", result.current
+                        ).into())
+                    }
                     Err(error) => {
                         let action = if check_only { "更新の確認" } else { "更新" };
                         UpdateStatus::Failed(format!("{action}に失敗しました。{error}").into())

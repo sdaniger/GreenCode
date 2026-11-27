@@ -44,6 +44,25 @@ pub struct UpdateResult {
     pub url: String,
     pub available: bool,
     pub installed: bool,
+    /// Why a published build was not offered, when the running build cannot be placed on its history.
+    pub note: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Standing {
+    Current,
+    Newer,
+    Unrelated,
+    Unknown,
+}
+
+fn standing(commit: Option<&str>, latest: &str, ancestors: &[String]) -> Standing {
+    match commit {
+        Some(current) if latest.eq_ignore_ascii_case(current) => Standing::Current,
+        Some(current) if ancestors.iter().any(|ancestor| ancestor.eq_ignore_ascii_case(current)) => Standing::Newer,
+        Some(_) => Standing::Unrelated,
+        None => Standing::Unknown,
+    }
 }
 
 #[derive(Deserialize)]
@@ -61,6 +80,14 @@ fn valid_commit(sha: &str) -> bool {
 
 fn main_commit() -> Option<&'static str> {
     option_env!("GREENCODE_MAIN_COMMIT").filter(|sha| valid_commit(sha))
+}
+
+/// The commit this binary was built from. CI records the channel commit explicitly;
+/// a source checkout records its HEAD through `build.rs`.
+fn build_commit() -> Option<&'static str> {
+    main_commit()
+        .or_else(|| option_env!("GREENCODE_RELEASE_COMMIT").filter(|sha| valid_commit(sha)))
+        .or_else(|| option_env!("GREENCODE_BUILD_COMMIT").filter(|sha| valid_commit(sha)))
 }
 
 pub fn repository(configured: Option<&str>, override_repo: Option<&str>) -> Result<String> {
@@ -97,9 +124,28 @@ pub async fn run(repo: &str, channel: Channel, executable: Option<&Path>) -> Res
         .timeout(Duration::from_secs(120))
         .build()?;
     let main = main_commit();
-    let commit = main.or_else(|| option_env!("GREENCODE_RELEASE_COMMIT").filter(|sha| valid_commit(sha)));
+    let commit = build_commit();
     let current = main.map_or_else(|| CURRENT_VERSION.into(), |sha| format!("main@{}", &sha[..12]));
-    update_from(&client, "https://github.com", &repo, channel, current, commit, executable).await
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match update_from(&client, "https://github.com", &repo, channel, current.clone(), commit, executable).await {
+            Ok(result) => return Ok(result),
+            // The rolling main release replaces its archives one at a time, so a reader can
+            // see a manifest and an archive from different runs. Retry that publish race.
+            Err(error) if executable.is_some() && attempt < 3 && transient(&error) => {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn transient(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}");
+    ["could not read the update manifest", "could not download the update archive", "checksum mismatch"]
+        .iter()
+        .any(|message| text.contains(message))
 }
 
 async fn update_from(
@@ -131,12 +177,13 @@ async fn update_from(
                 .cmp_precedence(&semver::Version::parse(CURRENT_VERSION)?).is_gt();
             if !newer {
                 let latest = version.to_owned();
-                return Ok(UpdateResult { current, latest, url: url.into(), available: false, installed: false });
+                return Ok(UpdateResult { current, latest, url: url.into(), available: false, installed: false, note: None });
             }
             Some((tag.to_owned(), version.to_owned(), url.to_string()))
         }
         Channel::Main => None,
     };
+    let stable_build = stable.is_some();
     let tag = stable.as_ref().map_or("main-build", |(tag, _, _)| tag.as_str());
     let archive_url = format!("{releases}/download/{tag}");
     let bytes = download(client, &format!("{archive_url}/update.json"), MAX_FEED_BYTES).await
@@ -148,9 +195,18 @@ async fn update_from(
         Some((_, version, url)) => (version, url),
         None => (format!("main@{}", &sha[..12]), format!("{github}/{repo}/commit/{sha}")),
     };
-    let available = commit.is_some_and(|current| {
-        !sha.eq_ignore_ascii_case(current)
-            && feed.ancestors.iter().any(|ancestor| ancestor.eq_ignore_ascii_case(current))
+    let standing = standing(commit, sha, &feed.ancestors);
+    let available = match channel {
+        // The version check above is the safety gate for tagged releases. A build from
+        // main is not an ancestor of an older tag, so ancestry cannot apply here.
+        Channel::Stable => stable_build,
+        // A build without a recorded commit (an old archive or a source build) cannot
+        // prove ancestry. The user picked this channel explicitly and the archive is
+        // checksum-verified, so install the published build instead of dead-ending.
+        Channel::Main => matches!(standing, Standing::Newer | Standing::Unknown),
+    };
+    let note = (channel == Channel::Main && standing == Standing::Unrelated).then(|| {
+        "公開ビルドは現在のビルドの子孫ではないため、更新を保留しました。".to_string()
     });
     let digest = available.then(|| {
         feed.sha256.get(&name).and_then(|value| parse_digest(value))
@@ -166,7 +222,7 @@ async fn update_from(
     } else {
         false
     };
-    Ok(UpdateResult { current, latest, url, available, installed })
+    Ok(UpdateResult { current, latest, url, available, installed, note })
 }
 
 async fn download(client: &Client, url: &str, limit: usize) -> Result<Vec<u8>> {
@@ -290,24 +346,41 @@ mod tests {
         let server = tokio::spawn(async move {
             let feed_path = "/acme/green/releases/download/main-build/update.json";
             let stable_path = "/acme/green/releases/tag/v99.0.0";
+            let stable_feed_path = "/acme/green/releases/download/v99.0.0/update.json";
             let redirect = format!("302 Found\r\nLocation: {stable_path}");
             let same_version_path = format!("/acme/green/releases/tag/v{CURRENT_VERSION}");
             let same_version = format!("302 Found\r\nLocation: {same_version_path}");
             for (path, status, body) in [
+                // Stable with the running version: no feed is read.
                 ("/acme/green/releases/latest", same_version.as_str(), b"".as_slice()),
                 (same_version_path.as_str(), "200 OK", b"".as_slice()),
+                // Stable newer than the running version.
                 ("/acme/green/releases/latest", redirect.as_str(), b"".as_slice()),
                 (stable_path, "200 OK", b"".as_slice()),
-                ("/acme/green/releases/download/v99.0.0/update.json", "200 OK", feed.as_slice()),
+                (stable_feed_path, "200 OK", feed.as_slice()),
+                // Main: a manifest without ancestry cannot prove an upgrade.
                 (feed_path, "200 OK", legacy_feed.as_slice()),
+                // Main: the published build is older than the running build.
                 (feed_path, "200 OK", stale_feed.as_slice()),
+                // Main: the running commit is unrelated.
                 (feed_path, "200 OK", feed.as_slice()),
+                // Main: no recorded commit installs the published build (check only).
                 (feed_path, "200 OK", feed.as_slice()),
+                // Main: already on the published commit.
                 (feed_path, "200 OK", feed.as_slice()),
+                // Main: the running commit is an ancestor.
                 (feed_path, "200 OK", feed.as_slice()),
+                // Stable from a main commit: the newer version is offered even though
+                // that main commit is not an ancestor of the tag.
+                ("/acme/green/releases/latest", redirect.as_str(), b"".as_slice()),
+                (stable_path, "200 OK", b"".as_slice()),
+                (stable_feed_path, "200 OK", feed.as_slice()),
+                // Invalid manifest.
                 (feed_path, "200 OK", b"{}"),
+                // A half-published archive fails the checksum.
                 (feed_path, "200 OK", feed.as_slice()),
                 (archive_path.as_str(), "200 OK", b"incomplete upload"),
+                // A complete archive installs both binaries.
                 (feed_path, "200 OK", feed.as_slice()),
                 (archive_path.as_str(), "200 OK", archive.as_slice()),
             ] {
@@ -335,32 +408,59 @@ mod tests {
         assert_eq!(stable.latest, "99.0.0");
         assert_eq!(stable.url, format!("{base}/acme/green/releases/tag/v99.0.0"));
 
-        let update = |commit, executable| update_from(&client, &base, "acme/green", Channel::Main, "main@aaaa".into(), commit, executable);
-        for commit in [Some(older), Some(sha), Some(unrelated), None] {
-            let blocked = update(commit, Some(&executable)).await.unwrap();
-            assert!(!blocked.available && !blocked.installed);
-            assert_eq!(output(), b"original");
-            assert_eq!(run(&gui), b"gui-original");
-        }
-        let check = update(Some(older), None).await.unwrap();
-        assert!(check.available && !check.installed);
-        assert_eq!(check.latest, "main@0123456789ab");
-        assert_eq!(check.url, format!("{base}/acme/green/commit/{sha}"));
+        let check = |commit| update_from(&client, &base, "acme/green", Channel::Main, "main@aaaa".into(), commit, None);
+        let legacy = check(Some(older)).await.unwrap();
+        assert!(!legacy.available && legacy.note.is_some());
+        let stale = check(Some(sha)).await.unwrap();
+        assert!(!stale.available && stale.note.is_some());
+        let unrelated = check(Some(unrelated)).await.unwrap();
+        assert!(!unrelated.available && unrelated.note.is_some());
+        let unknown = check(None).await.unwrap();
+        assert!(unknown.available && !unknown.installed);
+        let unchanged = check(Some(sha)).await.unwrap();
+        assert!(!unchanged.available && unchanged.note.is_none());
+        let newer = check(Some(older)).await.unwrap();
+        assert!(newer.available && !newer.installed);
+        assert_eq!(newer.latest, "main@0123456789ab");
+        assert_eq!(newer.url, format!("{base}/acme/green/commit/{sha}"));
 
-        let unchanged = update(Some(sha), Some(&executable)).await.unwrap();
-        assert!(!unchanged.available && !unchanged.installed);
-        let error = update(Some(older), Some(&executable)).await.unwrap_err();
+        // Stable from a main commit: the version gate applies, not main's ancestry.
+        let switch = update_from(&client, &base, "acme/green", Channel::Stable, "main@aaaa".into(), Some(sha), None).await.unwrap();
+        assert!(switch.available && !switch.installed);
+        assert_eq!(switch.latest, "99.0.0");
+
+        let error = update_from(&client, &base, "acme/green", Channel::Main, "main@aaaa".into(), Some(older), Some(&executable)).await.unwrap_err();
         assert!(error.to_string().contains("invalid update manifest"));
         assert_eq!(output(), b"original");
         assert_eq!(run(&gui), b"gui-original");
-        let error = update(Some(older), Some(&executable)).await.unwrap_err();
+        let error = update_from(&client, &base, "acme/green", Channel::Main, "main@aaaa".into(), Some(older), Some(&executable)).await.unwrap_err();
         assert!(error.to_string().contains("checksum mismatch"));
         assert_eq!(output(), b"original");
         assert_eq!(run(&gui), b"gui-original");
 
-        assert!(update(Some(older), Some(&executable)).await.unwrap().installed);
+        assert!(update_from(&client, &base, "acme/green", Channel::Main, "main@aaaa".into(), Some(older), Some(&executable)).await.unwrap().installed);
         assert_eq!(output(), b"updated");
         assert_eq!(run(&gui), b"gui-updated", "the GUI next to the CLI moves to the same build");
         server.await.unwrap();
+    }
+
+    #[test]
+    fn commit_standing_distinguishes_current_newer_and_unrelated() {
+        let older = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let unrelated = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let ancestors = vec![older];
+        assert_eq!(standing(Some(sha), sha, &ancestors), Standing::Current);
+        assert_eq!(standing(Some(&ancestors[0]), sha, &ancestors), Standing::Newer);
+        assert_eq!(standing(Some(unrelated), sha, &ancestors), Standing::Unrelated);
+        assert_eq!(standing(None, sha, &ancestors), Standing::Unknown);
+    }
+
+    #[test]
+    fn publish_races_are_retried() {
+        assert!(transient(&anyhow::anyhow!("could not read the update manifest; retry once the build is published")));
+        assert!(transient(&anyhow::anyhow!("could not download the update archive")));
+        assert!(transient(&anyhow::anyhow!("update checksum mismatch; retry after the release finishes publishing")));
+        assert!(!transient(&anyhow::anyhow!("invalid update manifest")));
     }
 }

@@ -573,7 +573,8 @@ fn main() -> anyhow::Result<()> {
             println!("Updated GreenCode {} → {}; restart GreenCode to use it.", result.current, result.latest);
         } else {
             let status = if result.available { "update available" } else { "no update available" };
-            println!("current {} · latest {} · {status} · {}", result.current, result.latest, result.url);
+            let note = result.note.as_deref().map(|note| format!(" · {note}")).unwrap_or_default();
+            println!("current {} · latest {} · {status}{note} · {}", result.current, result.latest, result.url);
         }
         return Ok(());
     }

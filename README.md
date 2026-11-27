@@ -28,11 +28,12 @@ In-app updates remain macOS-only.
 `stable` follows tagged GitHub Releases. `main` follows the commit builds published
 by GitHub Actions in the [`main-build` prerelease](https://github.com/sdaniger/GreenCode/releases/tag/main-build).
 No GitHub sign-in, token, or `gh` command is needed. Both channels read a public `update.json`
-with the published commit, its Git ancestry, and archive checksums. The updater only offers
-builds descended from the running build. `stable` also requires a higher release version.
-It never downloads archives for older or unrelated builds, including when switching channels.
-If the running build has no embedded commit ID or the manifest has no ancestry, the updater
-cannot verify the upgrade. Use a trusted release archive for a manual upgrade.
+with the published commit, its Git ancestry, and archive checksums.
+`stable` installs a newer tagged release. `main` installs a published build descended from
+the running build, so an older or unrelated build is never installed silently. Source builds
+record the commit they were built from, and a build without a recorded commit can install the
+published `main` build when you choose that channel explicitly. If the running build is
+unrelated to the published history, the updater explains why instead of installing it.
 
 ```sh
 greencode-cli update --check --channel main  # show the available commit without installing
