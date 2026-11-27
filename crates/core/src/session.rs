@@ -77,6 +77,13 @@ pub struct View {
     pub pinned: bool,
     #[serde(default)]
     pub archived: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unread: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_color: Option<u32>,
+    /// Overrides the sidebar group without changing the agent's working directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_project: Option<PathBuf>,
     #[serde(default)]
     pub mode: Mode,
     /// Hidden from the thread list until this Unix time; 0 = not snoozed.

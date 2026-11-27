@@ -290,6 +290,9 @@ The listener is local only; a public URL requires your own tunnel, such as `clou
   stashes/restores the draft, ⌥↑ edits the last queued message, and ⌘⏎ on a new thread opens the next draft
   after sending. **設定 → 入力と会話** controls the send key, follow-up delivery and work history.
 - **Threads**: `/rename`, snooze, and threads without a project (⌥⌘N, in `~/.greencode/scratch`).
+  Right-click a thread to open it in a tab or a live, read-only window, open a terminal in its working directory,
+  rename, pin, mark unread, choose a color, copy its ID, fork, export, archive, or delete it.
+  Moving to another project changes its sidebar group, not its working directory.
   Choose the current permissions using **権限** under the composer; ⇧⌘A cycles them. Project-specific defaults are available in settings.
 - **Git**: the header shows the branch; the palette switches branches, commits through the agent, pushes and opens a pull request
   with `gh`. `/branch NAME`, `/push`, `/pr` do the same.

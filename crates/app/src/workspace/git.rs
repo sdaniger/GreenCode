@@ -9,11 +9,12 @@ use std::{
 };
 
 /// A value the palette is currently asking for in its search box.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub(super) enum TextPrompt {
     Clone,
     OpenProject,
     NewProject,
+    RenameThread(String),
     WorktreePrefix,
     TitleInstructions,
     VoiceCleanupModel,
@@ -22,11 +23,12 @@ pub(super) enum TextPrompt {
 }
 
 impl TextPrompt {
-    pub(super) fn hint(self) -> &'static str {
+    pub(super) fn hint(&self) -> &'static str {
         match self {
             Self::Clone => "クローンするリポジトリ（owner/name または URL）を入力して ⏎",
             Self::OpenProject => "開くフォルダのパスを入力して ⏎",
             Self::NewProject => "プロジェクト名を入力して ⏎",
+            Self::RenameThread(_) => "スレッド名を入力して ⏎",
             Self::WorktreePrefix => "ワークツリーのブランチ接頭辞。空欄にすると付けません",
             Self::TitleInstructions => "タイトル生成の追加指示。空欄で解除します",
             Self::VoiceCleanupModel => "整形に使うモデル ID。空欄でスレッドのモデルを使います",
@@ -35,7 +37,7 @@ impl TextPrompt {
         }
     }
 
-    pub(super) fn action(self) -> &'static str {
+    pub(super) fn action(&self) -> &'static str {
         match self {
             Self::Clone => "クローン",
             Self::OpenProject => "開く",
@@ -45,9 +47,9 @@ impl TextPrompt {
     }
 
     /// The `ui.json` key a settings prompt edits.
-    fn key(self) -> &'static str {
+    fn key(&self) -> &'static str {
         match self {
-            Self::Clone | Self::NewProject => "",
+            Self::Clone | Self::NewProject | Self::RenameThread(_) => "",
             Self::WorktreePrefix => "worktree_prefix",
             Self::TitleInstructions => "title_instructions",
             Self::VoiceCleanupModel => "voice_cleanup_model",
@@ -480,6 +482,11 @@ impl Workspace {
                 }
             }
             TextPrompt::NewProject => self.start_new_project(text, window, cx),
+            TextPrompt::RenameThread(id) => {
+                if let Some(ix) = self.threads.iter().position(|t| t.meta.id == id) {
+                    self.rename_thread(ix, &text, cx);
+                }
+            }
             TextPrompt::WorktreePrefix => {
                 let prefix = git::branch_prefix(&text);
                 self.ui["worktree_prefix"] = json!(prefix);
@@ -547,9 +554,9 @@ impl Workspace {
                 .detach();
             }
             Act::EditText(prompt) => {
-                self.text_prompt = Some(prompt);
                 let default = if prompt == TextPrompt::WorktreePrefix { "greencode/" } else { "" };
                 let current = self.ui[prompt.key()].as_str().unwrap_or(default).to_string();
+                self.text_prompt = Some(prompt);
                 self.open_palette(&current, window, cx);
             }
             Act::CycleWorktreeSubmodules => {

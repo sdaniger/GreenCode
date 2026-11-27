@@ -27,6 +27,7 @@ mod storage;
 mod suggest;
 mod terminal;
 mod textgen;
+mod thread_menu;
 mod themes;
 mod usage;
 mod voice;
@@ -43,6 +44,7 @@ use gpui_kit::component::{
     ActiveTheme, Theme,
 };
 use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::*;
 use greencode_core::{
     config::{Config, ProviderCfg},
@@ -55,7 +57,7 @@ use greencode_core::{
 use login::{method_label, AccountForm, DeviceForm, DeviceKind, KeyForm};
 use models::ModelPicker;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 #[cfg(unix)]
 use std::os::{
     fd::{FromRawFd, OwnedFd},
@@ -157,6 +159,9 @@ struct Thread {
     perms: Arc<Perms>,
     pinned: bool,
     archived: bool,
+    unread: bool,
+    sidebar_color: Option<u32>,
+    sidebar_project: Option<PathBuf>,
     /// Unix time until which the thread is hidden from the sidebar.
     snoozed: u64,
     auto_settle: AutoSettle,
@@ -502,6 +507,9 @@ impl Thread {
             queue: vec![],
             pinned: false,
             archived: false,
+            unread: false,
+            sidebar_color: None,
+            sidebar_project: None,
             mode,
             snoozed: 0,
             auto_settle: AutoSettle::Follow,
@@ -544,6 +552,9 @@ impl Thread {
             perms: Arc::new(Perms::new(view.mode)),
             pinned: view.pinned,
             archived: view.archived,
+            unread: view.unread,
+            sidebar_color: view.sidebar_color,
+            sidebar_project: view.sidebar_project,
             snoozed: view.snoozed,
             auto_settle: view.auto_settle,
             linked_pr: view.linked_pr,
@@ -592,6 +603,9 @@ impl Thread {
             && self.bg_wait.is_none()
             && !self.pinned
             && !self.archived
+            && !self.unread
+            && self.sidebar_color.is_none()
+            && self.sidebar_project.is_none()
             && self.snoozed == 0
             && self.auto_settle == AutoSettle::Follow
             && self.linked_pr.is_none()
@@ -606,6 +620,9 @@ impl Thread {
             && self.queue.is_empty()
             && !self.pinned
             && !self.archived
+            && !self.unread
+            && self.sidebar_color.is_none()
+            && self.sidebar_project.is_none()
             && self.snoozed == 0
             && self.auto_settle == AutoSettle::Follow
             && self.linked_pr.is_none()
@@ -623,6 +640,9 @@ impl Thread {
             queue: self.queue.iter().cloned().collect(),
             pinned: self.pinned,
             archived: self.archived,
+            unread: self.unread,
+            sidebar_color: self.sidebar_color,
+            sidebar_project: self.sidebar_project.clone(),
             mode: self.perms.mode(),
             snoozed: self.snoozed,
             auto_settle: self.auto_settle,
@@ -932,6 +952,8 @@ pub struct Workspace {
     cfg: Arc<Config>,
     cfg_error: Option<String>,
     threads: Vec<Thread>,
+    thread_tabs: Vec<String>,
+    thread_windows: HashMap<String, AnyWindowHandle>,
     active: usize,
     input: Entity<TextareaState>,
     list: ListState,
@@ -1989,6 +2011,8 @@ impl Workspace {
             rt,
             list: ListState::new(threads[0].items.len(), ListAlignment::Bottom, px(600.)),
             threads,
+            thread_tabs: Vec::new(),
+            thread_windows: HashMap::new(),
             active: 0,
             focus: cx.focus_handle(),
             sidebar_focus: cx.focus_handle(),
@@ -3315,12 +3339,7 @@ impl Workspace {
                 }
             }
             "side" | "btw" if !arg.is_empty() => self.run(Act::Side(arg.into()), window, cx),
-            "rename" if !arg.is_empty() => {
-                self.threads[self.active].meta.title = arg.chars().take(60).collect();
-                if let Err(e) = self.thread().save() {
-                    self.fail(e);
-                }
-            }
+            "rename" if !arg.is_empty() => self.rename_thread(self.active, arg, cx),
             "snooze" => self.run(
                 Act::Snooze(arg.parse::<u64>().unwrap_or(1) * 3600),
                 window,
@@ -3509,17 +3528,9 @@ impl Workspace {
         self.active = ix;
         // Items are reloaded or replaced here; the grouping cache may no longer match.
         *self.groups_cache.get_mut() = Default::default();
+        self.threads[ix].load_items();
+        self.mark_thread_read(ix, cx);
         let t = &mut self.threads[ix];
-        if !t.loaded {
-            // A thread that was never prompted has no session file yet.
-            if Session::open(&t.meta.id).is_some() {
-                match thread_view::session_items(&t.meta.id) {
-                    Ok(items) => t.items = items,
-                    Err(e) => t.items = vec![Item::Error(e.into())],
-                }
-            }
-            t.loaded = true;
-        }
         self.list.reset(t.items.len());
         self.commands = command_list(&self.cfg, t);
         self.refresh_git(cx);
@@ -3539,7 +3550,11 @@ impl Workspace {
     }
 
     fn select(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if ix >= self.threads.len() || ix == self.active {
+        if ix >= self.threads.len() {
+            return;
+        }
+        if ix == self.active {
+            self.mark_thread_read(ix, cx);
             return;
         }
         let from = self.threads[self.active].meta.id.clone();
@@ -3554,7 +3569,7 @@ impl Workspace {
         if let Err(e) = saved {
             self.fail(e);
         }
-        if self.threads[active].status == Status::Idle {
+        if self.threads[active].status == Status::Idle && !self.thread_windows.contains_key(&from) {
             self.threads[active].items = Vec::new();
             self.threads[active].loaded = false;
         }
@@ -3566,7 +3581,7 @@ impl Workspace {
         let Some(t) = self.threads.get(ix) else {
             return;
         };
-        if t.status != Status::Idle {
+        if self.thread_busy(t) {
             self.fail("実行を停止してからスレッドを削除してください");
             cx.notify();
             return;
@@ -3574,6 +3589,10 @@ impl Workspace {
         let removed_active = ix == self.active;
         let t = self.threads.remove(ix);
         Session::delete(&t.meta.id);
+        self.thread_tabs.retain(|id| id != &t.meta.id);
+        if let Some(detached) = self.thread_windows.remove(&t.meta.id) {
+            let _ = detached.update(cx, |_, window, _| window.remove_window());
+        }
         if self.threads.is_empty() {
             let mut meta = Meta::new(t.project(), t.meta.model, "native".into());
             meta.subagent_model = self.cfg.subagent_model.clone();
@@ -5603,7 +5622,7 @@ impl Workspace {
             .map(|(p, _)| p.read(cx).value().to_lowercase())
             .unwrap_or_default();
         // A palette prompt is a text box: its only row submits the current value.
-        if let Some(prompt) = self.text_prompt {
+        if let Some(prompt) = &self.text_prompt {
             return vec![(format!("⏎ {}: {}", prompt.action(), q), Act::SubmitText)];
         }
         // The commit picker lists the whole first-parent history, not the usual twelve rows.
@@ -6117,24 +6136,8 @@ impl Workspace {
                     self.save_ui();
                 }
             }
-            Act::Pin => {
-                let t = &mut self.threads[self.active];
-                t.pinned = !t.pinned;
-                let action = nav::SidebarAction::Pin {
-                    id: t.meta.id.clone(),
-                    value: !t.pinned,
-                };
-                self.undo.record(action);
-            }
-            Act::Archive => {
-                let t = &mut self.threads[self.active];
-                t.archived = !t.archived;
-                let action = nav::SidebarAction::Archive {
-                    id: t.meta.id.clone(),
-                    value: !t.archived,
-                };
-                self.undo.record(action);
-            }
+            Act::Pin => self.toggle_thread_pin(self.active),
+            Act::Archive => self.toggle_thread_archive(self.active),
             Act::ToggleArchived => self.show_archived = !self.show_archived,
             Act::ResumeQueue => {
                 self.threads[self.active].queue_held = false;
@@ -6906,35 +6909,8 @@ impl Workspace {
                     (_, None) => self.fail("持ち帰る回答がまだありません"),
                 }
             }
-            Act::Fork => {
-                let t = &self.threads[self.active];
-                match (t.meta.backend == "native" && Session::open(&t.meta.id).is_some())
-                    .then(|| Session::fork(&t.meta.id))
-                {
-                    Some(Ok(meta)) => {
-                        self.threads
-                            .insert(0, Thread::new(meta, false, self.cfg.mode));
-                        self.active += 1;
-                        self.select(0, window, cx);
-                    }
-                    Some(Err(e)) => self.fail(format!("複製できません: {e:#}")),
-                    None => self.fail("複製できるのは、会話のあるネイティブスレッドだけです"),
-                }
-            }
-            Act::Export => {
-                let id = self.thread().meta.id.clone();
-                let dir = greencode_core::home().join("exports");
-                let path = dir.join(format!("{id}.md"));
-                match Session::markdown(&id).and_then(|md| {
-                    Ok(std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, md))?)
-                }) {
-                    Ok(()) => {
-                        self.notice(format!("エクスポートしました: {}", path.display()));
-                        spawn_external("/usr/bin/open", &["-R", &path.to_string_lossy()]);
-                    }
-                    Err(e) => self.fail(format!("エクスポートできません: {e:#}")),
-                }
-            }
+            Act::Fork => self.fork_thread(self.active, window, cx),
+            Act::Export => self.export_thread(self.active),
             Act::Attach => {
                 let rx = cx.prompt_for_paths(PathPromptOptions {
                     files: true,
@@ -7909,7 +7885,7 @@ impl Workspace {
     // ---- rendering ----
 
     /// One sidebar row. `offset` (the local UTC offset) switches to the dated look: a status dot and the day of month.
-    fn thread_row(&self, i: usize, offset: Option<i64>, pal: Pal, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn thread_row(&self, i: usize, offset: Option<i64>, pal: Pal, cx: &mut Context<Self>) -> impl IntoElement + Styled {
         let t = &self.threads[i];
         let id = t.meta.id.clone();
         let title: SharedString = if t.meta.title.is_empty() {
@@ -7923,8 +7899,11 @@ impl Workspace {
             Status::Idle if t.bg_wait.is_some() => Some(pal.accent),
             Status::Idle => None,
         };
+        let menu = thread_menu::builder(id.clone(), cx);
+        let select_id = id.clone();
+        let color = t.sidebar_color.map(|color| rgb(color));
         div()
-            .id(("thread", i))
+            .id((ElementId::from("thread"), SharedString::from(id.clone())))
             .group("thread-row")
             .flex()
             .items_center()
@@ -7935,14 +7914,18 @@ impl Workspace {
             .cursor_pointer()
             .when(i == self.active, |d| d.bg(pal.selected))
             .when(i != self.active, |d| d.hover(|s| s.bg(pal.hover)))
-            .on_click(
-                cx.listener(move |this, _: &ClickEvent, window, cx| this.select(i, window, cx)),
-            )
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.run(Act::Thread(select_id.clone()), window, cx)
+            }))
             .child(match offset {
                 Some(_) => div().size_1p5().flex_shrink_0().rounded_full().bg(dot.unwrap_or(pal.muted.opacity(0.5))),
-                None => avatar(&project_name(&t.project()), pal),
+                None => avatar(&project_name(t.sidebar_project()), pal),
             })
-            .child(div().flex_1().truncate().text_sm().child(title))
+            .children(color.map(|color| div().w(px(3.)).h(px(13.)).flex_shrink_0().rounded_full().bg(color)))
+            .child(div().flex_1().truncate().text_sm()
+                .when(t.unread, |d| d.font_weight(FontWeight::SEMIBOLD))
+                .child(title))
+            .when(t.unread, |d| d.child(div().size_1p5().flex_shrink_0().rounded_full().bg(pal.accent)))
             .children(
                 t.linked_pr_manual
                     .as_ref()
@@ -8001,6 +7984,7 @@ impl Workspace {
                     .text_color(pal.muted)
                     .child(SharedString::from(age(t.meta.created))),
             })
+            .context_menu(menu)
     }
 
     fn sidebar(&self, pal: Pal, cx: &mut Context<Self>) -> impl IntoElement {
@@ -8020,14 +8004,14 @@ impl Workspace {
                 settled.push(i);
                 continue;
             }
-            let p = t.project();
+            let p = t.sidebar_project();
             // An archived project drops out of the sidebar; the thread being viewed stays reachable.
-            if self.project_archived(&p) && i != self.active {
+            if self.project_archived(p) && i != self.active {
                 continue;
             }
-            match groups.iter_mut().find(|(g, _)| *g == p) {
+            match groups.iter_mut().find(|(g, _)| g == p) {
                 Some((_, v)) => v.push(i),
-                None => groups.push((p, vec![i])),
+                None => groups.push((p.to_path_buf(), vec![i])),
             }
         }
         let pinned = self.pinned_projects();
@@ -9650,6 +9634,7 @@ impl Workspace {
                         )),
                     ),
             )
+            .children(self.thread_tabs(pal, cx))
             .when(self.show_update_panel, |d| {
                 d.child(div().px_6().py_3().border_b_1().border_color(pal.line).bg(pal.card)
                     .child(self.update_controls(pal, cx)))
@@ -9852,7 +9837,7 @@ impl Workspace {
                         .when(self.registry_entries.is_some(), |d| {
                             d.child(div().px_3().pt_3().child("ACP レジストリ"))
                         })
-                        .when_some(self.text_prompt, |d, prompt| {
+                        .when_some(self.text_prompt.as_ref(), |d, prompt| {
                             d.child(div().px_3().pt_3().child(prompt.hint()))
                         })
                         .when(self.picking_commit, |d| {

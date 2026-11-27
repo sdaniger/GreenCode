@@ -3685,6 +3685,9 @@ fn thread_view_persists_without_putting_ui_state_in_model_history() {
         queue: vec!["held follow-up".into()],
         pinned: true,
         archived: true,
+        unread: true,
+        sidebar_color: Some(0x5599dd),
+        sidebar_project: Some(dir("thread-sidebar-project")),
         mode: Mode::AutoEdit,
         snoozed: 0,
         auto_settle: Default::default(),
@@ -3703,6 +3706,10 @@ fn thread_view_persists_without_putting_ui_state_in_model_history() {
     assert_eq!(loaded.draft, "unsent draft");
     assert_eq!(loaded.queue, ["held follow-up"]);
     assert!(loaded.pinned && loaded.archived);
+    assert!(loaded.unread);
+    assert_eq!(loaded.sidebar_color, view.sidebar_color);
+    assert_eq!(loaded.sidebar_project, view.sidebar_project);
+    assert_eq!(loaded.meta.cwd, view.meta.cwd);
     assert_eq!(loaded.mode, Mode::AutoEdit);
     for id in ["../outside", "", "/absolute"] {
         assert!(Session::load(id).is_err());
