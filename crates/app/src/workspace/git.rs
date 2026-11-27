@@ -12,6 +12,7 @@ use std::{
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum TextPrompt {
     Clone,
+    OpenProject,
     NewProject,
     WorktreePrefix,
     TitleInstructions,
@@ -24,6 +25,7 @@ impl TextPrompt {
     pub(super) fn hint(self) -> &'static str {
         match self {
             Self::Clone => "クローンするリポジトリ（owner/name または URL）を入力して ⏎",
+            Self::OpenProject => "開くフォルダのパスを入力して ⏎",
             Self::NewProject => "プロジェクト名を入力して ⏎",
             Self::WorktreePrefix => "ワークツリーのブランチ接頭辞。空欄にすると付けません",
             Self::TitleInstructions => "タイトル生成の追加指示。空欄で解除します",
@@ -36,6 +38,7 @@ impl TextPrompt {
     pub(super) fn action(self) -> &'static str {
         match self {
             Self::Clone => "クローン",
+            Self::OpenProject => "開く",
             Self::NewProject => "作成",
             _ => "保存",
         }
@@ -50,6 +53,7 @@ impl TextPrompt {
             Self::VoiceCleanupModel => "voice_cleanup_model",
             Self::VoiceCorrection => "voice_correction",
             Self::VoiceInstructions => "voice_cleanup_instructions",
+            Self::OpenProject => "",
         }
     }
 }
@@ -459,6 +463,22 @@ impl Workspace {
     ) {
         match prompt {
             TextPrompt::Clone => self.start_clone(text, cx),
+            TextPrompt::OpenProject => {
+                if text.is_empty() {
+                    return;
+                }
+                let path = Path::new(&text);
+                let path = if let Ok(rest) = path.strip_prefix("~") {
+                    greencode_core::user_home().join(rest)
+                } else {
+                    self.thread().project().join(path)
+                };
+                match path.canonicalize() {
+                    Ok(path) if path.is_dir() => self.new_thread(path, false, window, cx),
+                    Ok(_) => self.fail(format!("フォルダではありません: {}", path.display())),
+                    Err(e) => self.fail(format!("フォルダを開けません: {}: {e}", path.display())),
+                }
+            }
             TextPrompt::NewProject => self.start_new_project(text, window, cx),
             TextPrompt::WorktreePrefix => {
                 let prefix = git::branch_prefix(&text);

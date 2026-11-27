@@ -53,6 +53,11 @@ fn main() {
     let app = gpui_kit::application();
     app.on_open_urls(move |urls| urls.into_iter().for_each(|u| drop(links.send(u))));
     app.with_assets(Assets).run(move |cx| {
+        #[cfg(target_os = "linux")]
+        if cx.compositor_name() == "headless" {
+            eprintln!("GreenCode GUI needs a Wayland or X11 display. On WSL, enable WSLg or use greencode-cli.");
+            std::process::exit(1);
+        }
         gpui_kit::init(cx);
         // ⌘Q goes through Workspace::on_key so `quit_mode` can require a hold or two presses.
         // The menu's Quit action, if a menu is installed, still quits directly.
@@ -69,7 +74,10 @@ fn main() {
         };
         let (links_cfg, links_error) = (cfg.clone(), cfg_error.clone());
         let (mut window, mut workspace) = gpui_kit::open_window(options(cx), cx, |window, cx| cx.new(|cx| workspace::Workspace::new(cfg, cfg_error, window, cx)))
-            .expect("failed to open window");
+            .unwrap_or_else(|err| {
+                eprintln!("GreenCode could not open its window: {err:#}");
+                std::process::exit(1);
+            });
         cx.spawn(async move |cx| {
             while let Some(link) = inbox.recv().await {
                 // A link can arrive after the window was closed; reopen it rather than dropping the link.

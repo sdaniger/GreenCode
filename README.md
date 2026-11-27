@@ -23,6 +23,37 @@ Pi/OMP session handoff from the GUI is not available there. GreenCode's built-in
 ChatGPT subscription credential storage and CLI login import require macOS or Linux.
 In-app updates remain macOS-only.
 
+### Windows Subsystem for Linux
+
+On x86-64 Ubuntu 24.04 in WSL, use the **Linux** archive, not the Windows
+`.exe` files. Keep both binaries in the same directory. From Ubuntu:
+
+```sh
+sudo apt update
+sudo apt install git ca-certificates
+tar -xzf greencode-linux-x86_64.tar.gz
+./greencode-cli
+```
+
+The TUI does not need a display. Browser sign-in tries the Windows default
+browser through WSL interop; if it does not open, use the URL printed in the terminal.
+
+For the desktop app, enable [WSLg](https://learn.microsoft.com/en-us/windows/wsl/tutorials/gui-apps)
+in WSL 2 (Windows 11 or Windows 10 build 19044+). In Ubuntu, install the
+runtime libraries and open a Linux-side project folder:
+
+```sh
+sudo apt install libfontconfig1 libwayland-client0 libx11-xcb1 libxkbcommon-x11-0 \
+  libvulkan1 mesa-vulkan-drivers
+./greencode-cli app /path/to/project
+```
+
+Keep active Git worktrees under your WSL home directory rather than under
+`/mnt/c` for Linux filesystem performance and permissions. If the folder picker
+cannot open, the app accepts a typed path instead. If Wayland fails but WSLg's
+`DISPLAY` is set, try `env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET ./greencode`
+to use X11. Without WSLg, use the TUI.
+
 ### Update channels (macOS)
 
 `stable` follows tagged GitHub Releases. `main` follows the commit builds published

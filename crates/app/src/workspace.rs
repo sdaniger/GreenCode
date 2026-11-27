@@ -6051,14 +6051,19 @@ impl Workspace {
                     prompt: None,
                 });
                 cx.spawn_in(window, async move |this, cx| {
-                    if let Ok(Ok(Some(paths))) = rx.await {
-                        if let Some(p) = paths.into_iter().next() {
-                            this.update_in(cx, |this, window, cx| {
-                                this.new_thread(p, false, window, cx)
-                            })
-                            .ok();
+                    let selection = rx.await.map_err(|e| e.to_string())
+                        .and_then(|paths| paths.map_err(|e| format!("{e:#}")));
+                    this.update_in(cx, |this, window, cx| match selection {
+                        Ok(paths) => {
+                            if let Some(path) = paths.and_then(|paths| paths.into_iter().next()) {
+                                this.new_thread(path, false, window, cx);
+                            }
                         }
-                    }
+                        Err(err) => {
+                            this.fail(format!("フォルダ選択を開けません: {err}"));
+                            this.run(Act::EditText(git::TextPrompt::OpenProject), window, cx);
+                        }
+                    }).ok();
                 })
                 .detach();
             }
@@ -14597,6 +14602,41 @@ mod tests {
             assert_eq!(ws.ui["voice_correction"], "訂正");
             assert!(ws.palette.is_none() && ws.settings.is_some());
         });
+    }
+
+    #[gpui_kit::test]
+    async fn project_picker_cancel_and_manual_folder_path(cx: &mut TestAppContext) {
+        let (ws, cx) = open(cx);
+        let project = greencode_core::home().join("My Project");
+        std::fs::create_dir_all(&project).unwrap();
+        let project = project.canonicalize().unwrap();
+        let file = project.join("not a folder");
+        std::fs::write(&file, "").unwrap();
+        let original = ws.read_with(cx, |ws, _| ws.thread().meta.id.clone());
+
+        cx.simulate_keystrokes("cmd-o");
+        cx.simulate_path_prompt_response(|_| None);
+        cx.run_until_parked();
+        ws.read_with(cx, |ws, _| {
+            assert!(ws.palette.is_none());
+            assert_eq!(ws.thread().meta.id, original);
+        });
+
+        for path in [&file, &project] {
+            cx.update(|window, cx| ws.update(cx, |ws, cx| {
+                ws.run(super::Act::EditText(super::git::TextPrompt::OpenProject), window, cx)
+            }));
+            cx.simulate_input(&path.to_string_lossy());
+            cx.simulate_keystrokes("enter");
+            ws.read_with(cx, |ws, _| {
+                if path == &file {
+                    assert_eq!(ws.thread().meta.id, original);
+                    assert!(matches!(ws.thread().items.last(), Some(Item::Error(_))));
+                } else {
+                    assert_eq!(ws.thread().meta.cwd, project);
+                }
+            });
+        }
     }
 
     #[gpui_kit::test]

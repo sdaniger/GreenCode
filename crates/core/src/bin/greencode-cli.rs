@@ -180,8 +180,7 @@ fn auth(cfg: &mut Config, args: &[String]) -> anyhow::Result<()> {
                         let auth_url = pending.url.clone();
                         eprintln!("Open {auth_url} and sign in with Google.");
                         eprintln!("Waiting for approval (if 127.0.0.1 cannot load in a remote browser, paste the redirect URL here)…");
-                        #[cfg(target_os = "macos")]
-                        let _ = std::process::Command::new("/usr/bin/open").arg(&auth_url).status();
+                        let _ = open::that_detached(&auth_url);
                         let done = rt.block_on(async {
                             let mut finish = tokio::spawn(greencode_core::antigravity::finish_login(pending, cwd));
                             if std::io::stdin().is_terminal() {
@@ -238,8 +237,7 @@ fn auth(cfg: &mut Config, args: &[String]) -> anyhow::Result<()> {
                 let sign_in = rt.block_on(greencode_core::provider::mistral::start())?;
                 eprintln!("Open {} and approve Mistral Vibe access.", sign_in.url);
                 eprintln!("Waiting for approval…");
-                #[cfg(target_os = "macos")]
-                let _ = std::process::Command::new("/usr/bin/open").arg(&sign_in.url).status();
+                let _ = open::that_detached(&sign_in.url);
                 let key = rt.block_on(greencode_core::provider::mistral::finish(sign_in))?;
                 auth::set_key(cfg, "mistral", &key)?;
                 println!("Signed in to mistral with Mistral Vibe.");
@@ -258,8 +256,7 @@ fn auth(cfg: &mut Config, args: &[String]) -> anyhow::Result<()> {
                         Some(code) => eprintln!("Open {} and enter the code: {code}", start.url),
                         None => eprintln!("Open this URL in a browser:\n{}", start.url),
                     }
-                    #[cfg(target_os = "macos")]
-                    let _ = std::process::Command::new("/usr/bin/open").arg(&start.url).status();
+                    let _ = open::that_detached(&start.url);
                     if let Some(paste) = start.paste.clone() {
                         eprintln!("If the browser cannot return here, paste the URL it ended on and press Enter.");
                         // Left blocked on stdin when the browser does return; the process exits right after.
@@ -287,8 +284,7 @@ fn auth(cfg: &mut Config, args: &[String]) -> anyhow::Result<()> {
                 let device = rt.block_on(greencode_core::provider::codex::start())?;
                 eprintln!("Open {} and enter the code: {}", device.verification_uri, device.user_code);
                 eprintln!("Waiting for approval…");
-                #[cfg(target_os = "macos")]
-                let _ = std::process::Command::new("/usr/bin/open").arg(&device.verification_uri).status();
+                let _ = open::that_detached(&device.verification_uri);
                 let tokens = rt.block_on(greencode_core::provider::codex::finish(device))?;
                 greencode_core::provider::codex::save(&greencode_core::provider::codex::path(), &tokens)?;
                 println!("Signed in to chatgpt.");
@@ -299,8 +295,7 @@ fn auth(cfg: &mut Config, args: &[String]) -> anyhow::Result<()> {
                 let device = rt.block_on(greencode_core::provider::copilot::start())?;
                 eprintln!("Open {} and enter the code: {}", device.verification_uri, device.user_code);
                 eprintln!("Waiting for approval…");
-                #[cfg(target_os = "macos")]
-                let _ = std::process::Command::new("/usr/bin/open").arg(&device.verification_uri).status();
+                let _ = open::that_detached(&device.verification_uri);
                 let token = rt.block_on(greencode_core::provider::copilot::finish(device))?;
                 auth::set_token(cfg, "github-copilot", &token)?;
                 println!("Signed in to github-copilot.");
@@ -315,7 +310,7 @@ fn auth(cfg: &mut Config, args: &[String]) -> anyhow::Result<()> {
                 {
                     let login = greencode_core::provider::anthropic_oauth::Login::new()?;
                     let url = login.url();
-                    let _ = std::process::Command::new("/usr/bin/open").arg(&url).status();
+                    let _ = open::that_detached(&url);
                     eprintln!("Open this URL in a browser:\n{url}");
                     let code = read_line("Paste the authorization code: ")?;
                     anyhow::ensure!(!code.is_empty(), "no authorization code provided");

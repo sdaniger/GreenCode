@@ -67,6 +67,11 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           export GREENCODE_HOME="$RUNNER_TEMP/greencode-smoke"
+          status=0
+          output=$(timeout 5s env -u DISPLAY -u WAYLAND_DISPLAY -u WAYLAND_SOCKET ./target/release/greencode 2>&1) || status=$?
+          printf '%s\n' "$output"
+          test "$status" -eq 1
+          grep -F "GreenCode GUI needs a Wayland or X11 display." <<< "$output"
           mkdir -p "$XDG_RUNTIME_DIR"
           timeout 40s xvfb-run -a bash -eu -c '
             ./target/release/greencode &
