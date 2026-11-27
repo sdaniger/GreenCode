@@ -1810,10 +1810,9 @@ impl App<'_> {
         format!("{glyph} {name} — GreenCode")
     }
 
-    /// `goal.continuation_modes`: an open goal starts the next interactive turn here.
+    /// `goal.continuation_modes`: an open goal starts the next interactive turn here, up to `goal.max_turns`.
     fn goal_continuation(&self) -> Option<String> {
-        let goal = greencode_core::goal::Goal::load(&self.meta.id)?;
-        goal.continues(&self.cfg.modes, greencode_core::config::modes::RunMode::Interactive)
+        greencode_core::goal::next_turn(&self.meta.id, &self.cfg.modes, greencode_core::config::modes::RunMode::Interactive)
     }
 
     fn loop_after_turn(&mut self) -> Result<()> {
@@ -2226,7 +2225,7 @@ impl App<'_> {
                         let session = self.meta.id.clone();
                         let mut goal = greencode_core::goal::Goal::load(&session)
                             .or_else(|| self.history.last().map(|objective| greencode_core::goal::Goal {
-                                objective: objective.clone(), status: Default::default(), tokens_used: 0, token_budget: None,
+                                objective: objective.clone(), status: Default::default(), tokens_used: 0, token_budget: None, turns: 0,
                             }))
                             .context("no goal yet: set one with the `goal` tool first")?;
                         goal.token_budget = (budget > 0).then_some(budget);

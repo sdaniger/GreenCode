@@ -29,7 +29,40 @@ fn root() -> PathBuf {
     } else { home }
 }
 
+pub fn is_backend(name: &str) -> bool {
+    name == "hermes" || name.starts_with("hermes:")
+}
+
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Interactive setup command for `hermes` or an imported `hermes:<profile>` backend.
+pub fn setup_command(backend: &str) -> String {
+    if let Some(name) = backend.strip_prefix("hermes:") {
+        if let Ok(profiles) = imported() {
+            if let Some(profile) = profiles.into_iter().find(|p| p.name == name) {
+                if let Ok((root, selector)) = profile.root_and_selector() {
+                    if let Some(root) = root.to_str() {
+                        return format!("HERMES_HOME={} hermes --profile {} acp --setup", shell_quote(root), shell_quote(selector));
+                    }
+                }
+            }
+        }
+        return format!("hermes --profile {} acp --setup", shell_quote(name));
+    }
+    "hermes acp --setup".into()
+}
+
 impl Profile {
+    fn root_and_selector(&self) -> Result<(&Path, &str)> {
+        self.validate()?;
+        match self.home.parent().filter(|p| p.file_name().is_some_and(|n| n == "profiles")) {
+            Some(parent) => Ok((parent.parent().unwrap(), self.home.file_name().unwrap().to_str().context("non-UTF-8 Hermes profile path")?)),
+            None => Ok((self.home.as_path(), "default")),
+        }
+    }
+
     fn validate(&self) -> Result<()> {
         anyhow::ensure!(valid_name(&self.name), "invalid Hermes profile name `{}`", self.name);
         anyhow::ensure!(self.home.is_absolute(), "Hermes profile home must be absolute");
@@ -47,12 +80,8 @@ impl Profile {
     }
 
     pub fn backend(&self) -> Result<AcpCfg> {
-        self.validate()?;
+        let (root, selector) = self.root_and_selector()?;
         let hermes = crate::config::executable("hermes").unwrap_or_else(|| "hermes".into());
-        let (root, selector) = match self.home.parent().filter(|p| p.file_name().is_some_and(|n| n == "profiles")) {
-            Some(parent) => (parent.parent().unwrap(), self.home.file_name().unwrap().to_str().context("non-UTF-8 Hermes profile path")?),
-            None => (self.home.as_path(), "default"),
-        };
         // Explicit selector prevents Hermes' sticky active_profile from redirecting this connection.
         Ok(AcpCfg {
             name: format!("hermes:{}", self.name), protocol: Protocol::Acp,
@@ -178,5 +207,16 @@ mod tests {
         assert_eq!(std::fs::read(dest.join("coder.json")).unwrap(), bytes);
         assert!(save(&Profile { name:"../escape".into(), home:root }, &dest).is_err());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn backend_matching_and_setup_commands() {
+        assert!(is_backend("hermes"));
+        assert!(is_backend("hermes:default"));
+        assert!(is_backend("hermes:coder"));
+        assert!(!is_backend("hermes_other"));
+        assert!(!is_backend("opencode"));
+        assert_eq!(setup_command("hermes"), "hermes acp --setup");
+        assert_eq!(setup_command("hermes:missing"), "hermes --profile 'missing' acp --setup");
     }
 }

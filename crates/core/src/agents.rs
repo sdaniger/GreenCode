@@ -15,6 +15,7 @@ pub const AGENTS: &[AgentInfo] = &[
     AgentInfo { name: "claude", binary: "claude", install: "curl -fsSL https://claude.ai/install.sh | bash", docs: "https://code.claude.com/docs/" },
     AgentInfo { name: "kiro", binary: "kiro-cli", install: "curl -fsSL https://cli.kiro.dev/install | bash", docs: "https://kiro.dev/docs/cli/" },
     AgentInfo { name: "grok", binary: "grok", install: "", docs: "https://github.com/superagent-ai/grok-cli" },
+    AgentInfo { name: "hermes", binary: "hermes", install: "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash", docs: "https://hermes-agent.nousresearch.com/docs/" },
 ];
 
 /// Find the first version-shaped sequence in a command's output.
@@ -46,7 +47,7 @@ mod tests {
 
     #[test]
     fn parses_versions_and_registry_names_are_unique() {
-        for (text, expected) in [("opencode 2.2.6", "2.2.6"), ("1.5.2", "1.5.2"), ("codex-cli 0.167.2", "0.167.2"), ("claude 2.1.322 (Claude Code)", "2.1.322")] {
+        for (text, expected) in [("opencode 2.2.6", "2.2.6"), ("1.5.2", "1.5.2"), ("codex-cli 0.167.2", "0.167.2"), ("claude 2.1.322 (Claude Code)", "2.1.322"), ("Hermes Agent v0.23.1+4166.g72c8803 (2026.9.24)", "0.23.1")] {
             assert_eq!(parse_version(text).as_deref(), Some(expected));
         }
         assert_eq!(parse_version("garbage"), None);

@@ -584,7 +584,9 @@ fn read_only_segment(seg: &str, cwd: &Path) -> bool {
 /// One line describing a tool call for the approval prompt.
 /// Tools that cannot change anything, and so stay available in plan mode.
 pub fn read_only(tool: &str, input: &Value) -> bool {
-    matches!(tool, "read" | "grep" | "glob" | "web_fetch" | "web_search" | "todo" | "task" | "lsp" | "advisor" | "think") || (tool == "mcp" && input["action"] == "search")
+    matches!(tool, "read" | "grep" | "glob" | "web_fetch" | "web_search" | "todo" | "task" | "advisor" | "think")
+        || (tool == "lsp" && input["action"] != "rename")
+        || (tool == "mcp" && input["action"] == "search")
 }
 
 impl Perms {

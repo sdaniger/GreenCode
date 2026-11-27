@@ -39,6 +39,15 @@ enum Reset {
     Fresh(String),
 }
 
+/// System text, tool schemas and messages as one request sends them, plus what reading the reply needs.
+struct Wire {
+    system: String,
+    tools: Vec<ToolDef>,
+    messages: Vec<Message>,
+    dialect: Option<&'static str>,
+    obf: Option<crate::secrets::Obfuscator>,
+}
+
 struct JobOutcome {
     name: String,
     agent: String,
@@ -1090,16 +1099,10 @@ impl Agent {
             && self.allowed.as_ref().is_none_or(|allowed| allowed.iter().any(|name| name == "read"))
     }
 
-    /// Summary and sub-agent calls count toward usage, not the main thread's displayed context.
-    async fn request(
-        &self,
-        messages: &[Message],
-        summarize: bool,
-        tx: &EventTx,
-    ) -> Result<provider::Reply> {
-        let (tools, descriptors) = if summarize {
-            (Vec::new(), None)
-        } else {
+    /// What a request sends. Summaries use the same system, tools and leading messages as the turn, so
+    /// compaction reads the conversation from the provider's prompt cache instead of paying for it again.
+    async fn wire(&self, messages: &[Message], tx: &EventTx) -> Result<Wire> {
+        let (tools, descriptors) = {
             let mut tools = self.tools();
             let inline = self.cfg.provider_opts.inline_tool_descriptors.enabled(
                 self.meta.model.split_once('/').map_or("", |(p, _)| p),
@@ -1114,27 +1117,26 @@ impl Agent {
                 (tools, None)
             }
         };
-        // Workspace snapshots must not become part of the generated summary.
         let mut all = Vec::with_capacity(messages.len() + 1);
-        if !summarize && !self.prompt_context.is_empty() {
+        if !self.prompt_context.is_empty() {
             all.push(Message::user(self.prompt_context.clone()));
         }
         all.extend(context::model_messages(messages, &self.cfg.file_opts)?);
-        let start = usize::from(!summarize && !self.prompt_context.is_empty());
+        let start = usize::from(!self.prompt_context.is_empty());
         for notice in crate::image::prepare(&self.cfg, &self.meta.model, &mut all[start..]).await {
             let _ = tx.send(Event::Notify(notice));
         }
         // `tool_commands`: mounted commands appear in the prompt per `tools.commandDocs`.
-        let mount_docs = (!summarize && crate::discovery::mounts(&self.cfg))
+        let mount_docs = crate::discovery::mounts(&self.cfg)
             .then(|| crate::discovery::docs_section(&self.cfg, &self.mounted_commands()))
             .unwrap_or_default();
         let system_text = format!("{}{mount_docs}", self.system);
-        let recovery_prompt = (!summarize && self.can_preview_old_reads()
+        let recovery_prompt = (self.can_preview_old_reads()
             && context::preview_old_reads(&mut all[start..]))
             .then(|| format!("{}{READ_PREVIEW_GUIDE}", self.system));
         // An owned tool-call dialect (`tools_format`) replaces provider-native tools: the catalog and
         // syntax go into the prompt, and the reply's textual calls are parsed back below.
-        let dialect = (!summarize && !tools.is_empty()).then(|| self.dialect()).flatten();
+        let dialect = (!tools.is_empty()).then(|| self.dialect()).flatten();
         // `inlineToolDescriptors`: descriptor text ships once, in the prompt, not in the schemas.
         let inline_body = descriptors.map(|list| {
             format!(
@@ -1162,7 +1164,7 @@ impl Agent {
             }
         }
         // The dialect model reads the catalog from the prompt, so the wire carries no tool schemas.
-        let tools: &[ToolDef] = if dialect.is_some() { &[] } else { &tools };
+        let tools = if dialect.is_some() { Vec::new() } else { tools };
         // `snapcompact.toolResults`: accumulated large tool output ships as frames, newest included.
         if self.cfg.compaction_opts.snapcompact.tool_results {
             if let Some(edge) = self.snap_edge() {
@@ -1175,12 +1177,23 @@ impl Agent {
         // `secrets.enabled`: configured secrets and credential-shaped tokens never leave for the provider.
         let obf = self.cfg.services_extra_opts.secrets.enabled.then(|| crate::secrets::Obfuscator::from_config(&self.cfg));
         let system = match &obf {
-            Some(obf) => std::borrow::Cow::Owned(obf.obfuscate(&system)),
-            None => std::borrow::Cow::Borrowed(system.as_str()),
+            Some(obf) => obf.obfuscate(&system),
+            None => system,
         };
         if let Some(obf) = &obf {
             obf.obfuscate_messages(&mut all);
         }
+        Ok(Wire { system, tools, messages: all, dialect, obf })
+    }
+
+    /// Summary and sub-agent calls count toward usage, not the main thread's displayed context.
+    async fn request(
+        &self,
+        messages: &[Message],
+        summarize: bool,
+        tx: &EventTx,
+    ) -> Result<provider::Reply> {
+        let Wire { system, tools, messages: all, dialect, obf } = self.wire(messages, tx).await?;
         self.dump_request(&system, &tools, &all);
         let spent = *self.spent.lock().unwrap();
         if let Some(reason) = self.cfg.provider_opts.cost.refusal(spent) {
@@ -1592,21 +1605,23 @@ Continue the work from this summary and the messages that follow it.\n\n<compact
     }
 
     /// Starts a background summary of the old span, covering the same split the foreground path uses.
-    fn start_speculative(&mut self) {
+    async fn start_speculative(&mut self, tx: &EventTx) -> Result<()> {
         let split = crate::snap::split_point(&self.messages, self.cfg.compaction_opts.maintenance.keep_chars());
         if split == 0 {
-            return;
+            return Ok(());
         }
         let mut messages = self.messages[..split].to_vec();
         messages.push(Message::user(COMPACT_PROMPT));
+        let wire = self.wire(&messages, tx).await?;
         let provider = self.provider.clone();
         let model = self.model.clone();
-        let system = self.system.clone();
-        let tools = self.tools();
         let max_tokens = self.cfg.max_tokens;
         let handle = tokio::spawn(async move {
-            let req = Request { model: &model, system: &system, messages: &messages, tools: &tools, max_tokens, live: None };
-            let reply = provider.complete(req, &|_: &str| {}).await?;
+            let req = Request { model: &model, system: &wire.system, messages: &wire.messages, tools: &wire.tools, max_tokens, live: None };
+            let mut reply = provider.complete(req, &|_: &str| {}).await?;
+            if let Some(obf) = &wire.obf {
+                obf.deobfuscate_reply(&mut reply);
+            }
             let document = reply
                 .blocks
                 .iter()
@@ -1622,6 +1637,7 @@ Continue the work from this summary and the messages that follow it.\n\n<compact
             Ok(document)
         });
         self.speculative = Some(Speculative { handle, split });
+        Ok(())
     }
 
     fn rebase_context(&mut self) {
@@ -1714,6 +1730,9 @@ Continue the work from this summary and the messages that follow it.\n\n<compact
         let mut cut_retries = 0u8;
         // `smart`: the reply to a stop nudge is the final answer, so it is not judged again.
         let mut stop_nudged = false;
+        // `verify.command`: set when a round changed a file, cleared when the check runs.
+        let mut verify_pending = false;
+        let mut verify_retries = 0u32;
         let request: String = prompt.chars().take(2000).collect();
         self.repair();
         self.todo_reminders = 0;
@@ -1842,7 +1861,7 @@ Continue the work from this summary and the messages that follow it.\n\n<compact
                 && self.speculative.is_none()
                 && self.context * 5 >= compact_at * 4
             {
-                self.start_speculative();
+                self.start_speculative(tx).await?;
             }
             if self.cfg.compaction_enabled && (self.cfg.compaction_mid_turn || self.subagent)
                 && self.context > compact_at
@@ -2085,6 +2104,19 @@ Continue the work from this summary and the messages that follow it.\n\n<compact
                     let _ = tx.send(Event::Text("\n\n".into()));
                     continue;
                 }
+                if verify_pending && self.agent.is_none() && !self.cfg.loop_opts.verify.command.trim().is_empty() {
+                    verify_pending = false;
+                    if let Some(failure) = self.verify(tx).await {
+                        if verify_retries < self.cfg.loop_opts.verify.max_retries {
+                            verify_retries += 1;
+                            self.push(Message::user(failure));
+                            self.save_context()?;
+                            let _ = tx.send(Event::Text("\n\n".into()));
+                            continue;
+                        }
+                        let _ = tx.send(Event::Notify("Verification still fails after verify.max_retries; ending the turn.".into()));
+                    }
+                }
                 // Sub-agents report to their parent, and plan mode cannot save memory anyway.
                 if self.cfg.learning.enabled
                     && !self.cfg.no_tools
@@ -2229,6 +2261,7 @@ Continue the work from this summary and the messages that follow it.\n\n<compact
             let wrote = results.iter().any(|block| {
                 matches!(block, Block::ToolResult { tool_use_id, is_error: false, .. } if changed_file(tool_use_id))
             });
+            verify_pending |= wrote;
             self.push(Message {
                 role: Role::User,
                 content: results,
@@ -2298,7 +2331,8 @@ Continue the work from this summary and the messages that follow it.\n\n<compact
             input: input.clone(),
         });
         let started = crate::telemetry::millis();
-        let result = self.exec_inner(name, &mut input, tx, warmed).await;
+        // Background jobs started by this call report back to this session's loop.
+        let result = tools::JOB_OWNER.scope(self.meta.id.clone(), self.exec_inner(name, &mut input, tx, warmed)).await;
         self.notes(tx);
         let (output, is_error) = match result {
             Ok(s) => (s, false),
@@ -2561,7 +2595,17 @@ Continue the work from this summary and the messages that follow it.\n\n<compact
     }
 
     async fn deliver(&mut self, wait: bool) -> bool {
-        let first = if wait {
+        // Finished shell jobs this session started. Running ones are never waited for: a dev server never exits.
+        let shell = tools::take_jobs(&self.meta.id);
+        let limits = context::Limits::new(&self.cfg);
+        for job in &shell {
+            let output = std::fs::read_to_string(&job.log).unwrap_or_default();
+            let id = job.log.file_stem().and_then(|s| s.to_str()).unwrap_or("job").to_string();
+            let (output, _) = context::preview_with(output, &id, context::OUTPUT_PREVIEW, &limits);
+            let status = job.status.map_or("by signal".into(), |code| code.to_string());
+            self.push(Message::user(format!("Background command `{}` exited {status}:\n{output}", job.command)));
+        }
+        let first = if wait && shell.is_empty() {
             let waiting = !self.jobs.lock().unwrap().is_empty();
             let woke = self
                 .lend_slot(waiting, async {
@@ -2580,7 +2624,7 @@ Continue the work from this summary and the messages that follow it.\n\n<compact
             self.jobs.lock().unwrap().try_join_next()
         };
         let mut next = first;
-        let mut delivered = false;
+        let mut delivered = !shell.is_empty();
         while let Some(outcome) = next {
             delivered = true;
             let message = match outcome {
@@ -2600,6 +2644,23 @@ Continue the work from this summary and the messages that follow it.\n\n<compact
             next = self.jobs.lock().unwrap().try_join_next();
         }
         delivered
+    }
+
+    /// Runs `verify.command` the way `bash` does; `Some(message)` for the model when it fails, nothing on success.
+    async fn verify(&self, tx: &EventTx) -> Option<String> {
+        let command = self.cfg.loop_opts.verify.command.clone();
+        let _ = tx.send(Event::Notify(format!("Verifying: {command}")));
+        let mut cfg = (*self.cfg).clone();
+        // A check moved to the background would read as a pass.
+        cfg.bash_opts.bash.auto_background.enabled = false;
+        // shortcut: fixed 10-minute limit; add verify.timeout when a project needs a longer check.
+        let output = match tools::run_with("bash", &json!({"command": command, "timeout": 600}), &self.cwd, &cfg).await {
+            Ok(_) => return None,
+            Err(error) => format!("{error:#}"),
+        };
+        let id = format!("{}-verify", crate::telemetry::millis());
+        let (output, _) = context::preview_with(output, &id, context::OUTPUT_PREVIEW, &context::Limits::new(&self.cfg));
+        Some(format!("<system-reminder>The verification command `{command}` failed:\n{output}\nFix the cause before finishing.</system-reminder>"))
     }
 
     /// Matches the completed reply against the rules, queues warnings and reports them. Returns the tool
@@ -3672,6 +3733,8 @@ impl Backend for Agent {
     fn live(&self) -> Option<mpsc::UnboundedSender<Value>> {
         Some(self.steer_tx.clone())
     }
+
+    fn live_commands(&self) -> bool { true }
 
     /// Waits out the idle timeout once the thread sits above the idle token threshold.
     fn idle<'a>(&'a mut self) -> BoxFut<'a, Result<()>> {

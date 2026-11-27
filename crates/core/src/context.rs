@@ -236,9 +236,14 @@ pub fn session_context(cwd: &Path, cfg: &crate::config::Config) -> String {
     // `memory.backend = off` means no memory at all, including the curated `MEMORY.md` files.
     if cfg.memory_opts.memory.backend != crate::config::memory::MemoryBackend::Off {
         for (scope, path) in memory_files(cwd) {
-            if let Ok(m) = std::fs::read_to_string(path) {
-                if !m.trim().is_empty() {
-                    s.push_str(&format!("# Memory ({scope})\n{}\n\n", m.trim()));
+            if let Ok(m) = std::fs::read_to_string(&path) {
+                let m = m.trim();
+                if m.len() > MEMORY_LIMIT {
+                    // Hand edits can grow the file past the write-time cap; this text rides on every request.
+                    let end = (0..=MEMORY_LIMIT).rev().find(|&i| m.is_char_boundary(i)).unwrap_or(0);
+                    s.push_str(&format!("# Memory ({scope})\n{}\n(truncated; full file: {})\n\n", &m[..end], path.display()));
+                } else if !m.is_empty() {
+                    s.push_str(&format!("# Memory ({scope})\n{m}\n\n"));
                 }
             }
         }
@@ -249,12 +254,17 @@ pub fn session_context(cwd: &Path, cfg: &crate::config::Config) -> String {
         Vec::new()
     };
     if !skills.is_empty() {
+        const MAX_DESCRIPTION: usize = 120;
         s.push_str("# Skills\n");
         for k in skills {
+            // First line only, bounded, like the sub-agent listing.
+            let first = k.description.lines().next().unwrap_or("").trim();
+            let short: String = first.chars().take(MAX_DESCRIPTION).collect();
             s.push_str(&format!(
-                "- {}: {} ({})\n",
+                "- {}: {}{} ({})\n",
                 k.name,
-                k.description,
+                short,
+                if short.len() < first.len() { "…" } else { "" },
                 k.path.display()
             ));
         }
@@ -812,6 +822,18 @@ mod tests {
         cfg.provider_opts.skillful = false;
         assert!(!session_context(root.path(), &cfg).contains("demo: Demo skill"));
         assert!(cfg.skills_enabled);
+    }
+
+    #[test]
+    fn session_context_bounds_memory_and_skill_descriptions() {
+        let root = tempfile::tempdir().unwrap();
+        let skill = root.path().join(".greencode/skills/long");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), format!("---\nname: long\ndescription: {}\n---\nbody", "x".repeat(300))).unwrap();
+        std::fs::write(root.path().join(".greencode/MEMORY.md"), format!("{}END", "日本".repeat(1_000))).unwrap();
+        let text = session_context(root.path(), &crate::config::Config::default());
+        assert!(text.contains(&format!("- long: {}… (", "x".repeat(120))), "{text}");
+        assert!(text.contains("(truncated; full file:") && !text.contains("END"), "{text}");
     }
 
     #[test]

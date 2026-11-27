@@ -1,13 +1,13 @@
 use super::{def as tool_def, str_arg, OUTPUT_CHARS};
 use crate::{
-    config::{integrations::LspCfg, Config},
+    config::{integrations::{LspCfg, LspServerCfg}, Config},
     permission::resolve,
     ToolDef,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
@@ -23,7 +23,7 @@ use tokio::{
 };
 
 pub fn def() -> ToolDef {
-    tool_def("lsp", "Language server query. Path selects a file; line and column are 1-based. Symbols uses query.", json!({"action":{"enum":["diagnostics","definition","references","hover","symbols"]},"path":{"type":"string"},"line":{"type":"integer"},"column":{"type":"integer"},"query":{"type":"string"}}), &["action"])
+    tool_def("lsp", "Language server query. Path selects a file; line and column are 1-based. Symbols uses query; rename uses query as the new name.", json!({"action":{"enum":["diagnostics","definition","references","hover","symbols","rename"]},"path":{"type":"string"},"line":{"type":"integer"},"column":{"type":"integer"},"query":{"type":"string"}}), &["action"])
 }
 
 /// `lsp.requestTimeout` in seconds; servers are process-wide, so the timeout is too.
@@ -32,25 +32,42 @@ static REQUEST_TIMEOUT: AtomicU64 = AtomicU64::new(20);
 /// `lsp.shared`: reach servers through the per-project broker instead of spawning a private child.
 static SHARED: AtomicBool = AtomicBool::new(false);
 
+/// `lsp.servers`: user-configured servers, consulted before the built-in table.
+static CUSTOM: LazyLock<Mutex<BTreeMap<String, LspServerCfg>>> = LazyLock::new(Default::default);
+
 /// Applies `[lsp]` before a session uses the servers; later sessions win.
 pub fn configure(cfg: &Config) {
     REQUEST_TIMEOUT.store(cfg.integration_opts.lsp.request_timeout.clamp(1, 600), Ordering::Relaxed);
     SHARED.store(cfg.integration_opts.lsp.shared, Ordering::Relaxed);
+    *CUSTOM.lock().unwrap() = cfg.integration_opts.lsp.servers.clone();
 }
 
 fn request_timeout() -> Duration {
     Duration::from_secs(REQUEST_TIMEOUT.load(Ordering::Relaxed))
 }
 
-fn server_for(path: &Path) -> Option<(&'static str, Vec<&'static str>)> {
-    let (name, args) = match path.extension()?.to_str()? {
-        "rs" => ("rust-analyzer", vec![]),
-        "go" => ("gopls", vec!["serve"]),
-        "ts" | "tsx" | "js" | "jsx" => ("typescript-language-server", vec!["--stdio"]),
-        "py" => ("pyright-langserver", vec!["--stdio"]),
-        _ => return None,
-    };
-    crate::config::executable(name).map(|_| (name, args))
+const BUILTIN: &[(&[&str], &str, &[&str])] = &[
+    (&["rs"], "rust-analyzer", &[]),
+    (&["go"], "gopls", &["serve"]),
+    (&["ts", "tsx", "js", "jsx"], "typescript-language-server", &["--stdio"]),
+    (&["py"], "pyright-langserver", &["--stdio"]),
+];
+
+/// The server (executable name, args) for a file extension, installed or not: `lsp.servers` first, then built-ins.
+fn server_spec(ext: &str) -> Option<(String, Vec<String>)> {
+    let custom = CUSTOM.lock().unwrap();
+    if let Some((name, s)) = custom.iter().find(|(_, s)| s.extensions.iter().any(|e| e.trim_start_matches('.') == ext)) {
+        return Some((name.clone(), s.args.clone()));
+    }
+    BUILTIN
+        .iter()
+        .find(|(exts, ..)| exts.contains(&ext))
+        .map(|(_, name, args)| (name.to_string(), args.iter().map(|a| a.to_string()).collect()))
+}
+
+fn server_for(path: &Path) -> Option<(String, Vec<String>)> {
+    let (name, args) = server_spec(path.extension()?.to_str()?)?;
+    crate::config::executable(&name).map(|_| (name, args))
 }
 
 pub(super) async fn write_frame(w: &mut (impl AsyncWrite + Unpin), value: &Value) -> Result<()> {
@@ -454,12 +471,7 @@ fn workspace_file(root: &Path) -> Option<PathBuf> {
         entries.sort_by_key(|e| e.file_name());
         for entry in entries {
             let path = entry.path();
-            if path.is_file()
-                && matches!(
-                    path.extension().and_then(|e| e.to_str()),
-                    Some("rs" | "go" | "ts" | "tsx" | "js" | "jsx" | "py")
-                )
-            {
+            if path.is_file() && path.extension().and_then(|e| e.to_str()).is_some_and(|e| server_spec(e).is_some()) {
                 return Some(path);
             }
             if depth > 0
@@ -483,16 +495,10 @@ fn workspace_file(root: &Path) -> Option<PathBuf> {
 async fn acquire(root: &Path, selection: &Path) -> Result<Arc<Server>> {
     let ext = selection.extension().and_then(|s| s.to_str()).unwrap_or("");
     let (name, args) = server_for(selection).ok_or_else(|| {
-        let name = match ext {
-            "rs" => "rust-analyzer",
-            "go" => "gopls",
-            "ts" | "tsx" | "js" | "jsx" => "typescript-language-server",
-            "py" => "pyright-langserver",
-            _ => "a language server",
-        };
+        let name = server_spec(ext).map_or("a language server".into(), |(name, _)| name);
         anyhow!("no language server for {ext}; install {name}")
     })?;
-    let key = (root.to_path_buf(), name.to_string());
+    let key = (root.to_path_buf(), name.clone());
     let mut all = SERVERS.lock().await;
     if all
         .get(&key)
@@ -503,7 +509,7 @@ async fn acquire(root: &Path, selection: &Path) -> Result<Arc<Server>> {
     if let Some(s) = all.get(&key) {
         return Ok(s.clone());
     }
-    let s = start(root, name, &args).await?;
+    let s = start(root, &name, &args.iter().map(String::as_str).collect::<Vec<_>>()).await?;
     all.insert(key, s.clone());
     Ok(s)
 }
@@ -516,15 +522,16 @@ pub async fn run(cwd: &Path, input: &Value) -> Result<String> {
         "references",
         "hover",
         "symbols",
+        "rename",
     ]
     .contains(&action)
     {
         bail!("unknown lsp action `{action}`");
     }
-    if action == "symbols" {
+    if action == "symbols" || action == "rename" {
         str_arg(input, "query")?;
     }
-    let pos = if ["definition", "references", "hover"].contains(&action) {
+    let pos = if ["definition", "references", "hover", "rename"].contains(&action) {
         Some(position(input)?)
     } else {
         None
@@ -610,6 +617,11 @@ pub async fn run(cwd: &Path, input: &Value) -> Result<String> {
             if action == "references" {
                 params["context"] = json!({"includeDeclaration":true});
             }
+            if action == "rename" {
+                params["newName"] = json!(str_arg(input, "query")?);
+            }
+            // A rename answers a WorkspaceEdit, which has no `contents`; only null means "not ready".
+            let blank = |v: &Value| if action == "rename" { v.is_null() } else { empty(v) };
             // A cold server answers null (or `content modified`) until it has loaded the crate; retry briefly.
             // A cold server answers `content modified` or `file not found` until `cargo metadata` and indexing
             // finish, and null while it is still resolving: retry errors for longer than empty answers.
@@ -623,7 +635,7 @@ pub async fn run(cwd: &Path, input: &Value) -> Result<String> {
                     Err(e) => (Value::Null, Some(e)),
                 };
                 let waited = started.elapsed();
-                if (error.is_none() && !empty(&value))
+                if (error.is_none() && !blank(&value))
                     || server.exited.load(Ordering::Acquire)
                     || waited >= Duration::from_secs(15)
                     || (error.is_none() && waited >= Duration::from_secs(5))
@@ -632,10 +644,13 @@ pub async fn run(cwd: &Path, input: &Value) -> Result<String> {
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;
             };
-            if empty(&result) {
+            if blank(&result) {
                 if let Some(e) = error {
                     return Err(e);
                 }
+            }
+            if action == "rename" {
+                return rename(&server, &root, &result).await;
             }
             if action == "hover" {
                 return Ok(cap(hover(&result["contents"])));
@@ -671,14 +686,16 @@ pub(crate) enum After {
 /// Diagnostics already shown per file, for `lsp.diagnosticsDeduplicate`.
 static SHOWN: LazyLock<Mutex<HashMap<PathBuf, BTreeSet<String>>>> = LazyLock::new(Default::default);
 
-/// Diagnostics worth appending: non-empty, and (when deduplicating) only the ones this file has not shown.
+/// Diagnostics worth appending: errors only (warnings would ride along on nearly every edit), and (when
+/// deduplicating) only the ones this file has not shown. The `lsp diagnostics` action still lists everything.
 fn diagnostics_note(path: &Path, published: &Value, deduplicate: bool) -> Option<String> {
-    if published.as_array().is_some_and(Vec::is_empty) {
-        // A clean file forgets its entry, so the same errors after a fix are reported again.
+    let errors: Vec<Value> = published.as_array()?.iter().filter(|d| d["severity"].as_u64() == Some(1)).cloned().collect();
+    if errors.is_empty() {
+        // A file without errors forgets its entry, so the same errors after a fix are reported again.
         SHOWN.lock().unwrap().remove(path);
         return None;
     }
-    let text = diagnostics_text(Some(published)).ok()?;
+    let text = diagnostics_text(Some(&Value::Array(errors))).ok()?;
     if !deduplicate {
         return Some(format!("LSP diagnostics for {}:\n{text}", path.display()));
     }
@@ -728,16 +745,66 @@ fn apply_edits(text: &str, edits: &Value) -> Option<String> {
     if edits.is_empty() {
         return None;
     }
-    // Apply back to front so earlier offsets stay valid.
-    edits.sort_by_key(|(start, ..)| std::cmp::Reverse(*start));
+    // Apply back to front so earlier offsets stay valid; inserts at one position keep their listed order.
+    let mut order: Vec<usize> = (0..edits.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse((edits[i].0, i)));
     let mut out = text.to_string();
-    for (start, end, new) in edits {
-        if start > end || end > out.len() || !out.is_char_boundary(start) || !out.is_char_boundary(end) {
+    let mut limit = text.len();
+    for i in order {
+        let (start, end, new) = std::mem::take(&mut edits[i]);
+        if start > end || end > limit || !out.is_char_boundary(start) || !out.is_char_boundary(end) {
             return None;
         }
         out.replace_range(start..end, new);
+        limit = start;
     }
     Some(out)
+}
+
+/// Applies a rename's `WorkspaceEdit`. Every new text is computed before anything is written, so a malformed
+/// edit, a file outside the project, or a file create/rename/delete leaves every file untouched.
+async fn rename(server: &Server, root: &Path, edit: &Value) -> Result<String> {
+    // Servers send `documentChanges` or `changes`; with both, `documentChanges` is authoritative.
+    let mut per_uri: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    if let Some(changes) = edit["documentChanges"].as_array() {
+        for change in changes {
+            if change.get("kind").is_some() {
+                bail!("the rename would create, rename or delete files; refusing");
+            }
+            let uri = change["textDocument"]["uri"].as_str().context("rename edit without a document uri")?;
+            per_uri.entry(uri.into()).or_default().extend(change["edits"].as_array().into_iter().flatten().cloned());
+        }
+    } else if let Some(changes) = edit["changes"].as_object() {
+        for (uri, edits) in changes {
+            per_uri.entry(uri.clone()).or_default().extend(edits.as_array().into_iter().flatten().cloned());
+        }
+    }
+    per_uri.retain(|_, edits| !edits.is_empty());
+    if per_uri.is_empty() {
+        bail!("the language server found nothing to rename at that position");
+    }
+    let mut planned = Vec::new();
+    for (uri, edits) in per_uri {
+        let path = url::Url::parse(&uri)
+            .ok()
+            .and_then(|u| u.to_file_path().ok())
+            .with_context(|| format!("rename edit for a non-file uri {uri}"))?;
+        let path = std::fs::canonicalize(&path).with_context(|| path.display().to_string())?;
+        if !path.starts_with(root) {
+            bail!("the rename would edit {} outside the project; refusing", path.display());
+        }
+        let text = std::fs::read_to_string(&path).with_context(|| path.display().to_string())?;
+        let new = apply_edits(&text, &Value::Array(edits.clone()))
+            .with_context(|| format!("the language server sent malformed or overlapping edits for {}", path.display()))?;
+        planned.push((path, uri, new, edits.len()));
+    }
+    let mut out = format!("renamed in {} files", planned.len());
+    for (path, uri, new, count) in &planned {
+        std::fs::write(path, new).with_context(|| path.display().to_string())?;
+        server.open(path, uri).await?;
+        out.push_str(&format!("\n{}: {count}", path.strip_prefix(root).unwrap_or(path).display()));
+    }
+    Ok(out)
 }
 
 /// Formats and/or collects diagnostics after `write`/`edit`; `None` leaves the tool output unchanged.
@@ -1096,6 +1163,28 @@ while True:
     }
 
     #[test]
+    fn overlapping_edits_are_refused_and_same_spot_inserts_keep_order() {
+        let edit = |s: u64, e: u64, t: &str| json!({"range":{"start":{"line":0,"character":s},"end":{"line":0,"character":e}},"newText":t});
+        assert!(apply_edits("abcdef", &json!([edit(0, 3, "X"), edit(2, 4, "Y")])).is_none());
+        assert_eq!(apply_edits("abcdef", &json!([edit(1, 1, "A"), edit(1, 1, "B")])).unwrap(), "aABbcdef");
+        assert_eq!(apply_edits("abcdef", &json!([edit(0, 2, "X"), edit(2, 4, "Y")])).unwrap(), "XYef");
+    }
+
+    #[test]
+    fn rename_is_judged_as_an_edit_and_servers_come_from_config() {
+        let input = json!({"action":"rename","path":"src/lib.rs","query":"x"});
+        assert_eq!(crate::tools::ext::effective("lsp", &input), ("edit".to_string(), json!({"path":"src/lib.rs"})));
+        assert!(!crate::permission::read_only("lsp", &input));
+        assert!(crate::permission::read_only("lsp", &json!({"action":"hover"})));
+        let mut cfg = Config::default();
+        cfg.integration_opts.lsp.servers.insert("zls".into(), LspServerCfg { args: vec!["--stdio".into()], extensions: vec![".zigfake".into()] });
+        configure(&cfg);
+        assert_eq!(server_spec("zigfake"), Some(("zls".into(), vec!["--stdio".into()])));
+        assert_eq!(server_spec("go").unwrap().0, "gopls");
+        configure(&Config::default());
+    }
+
+    #[test]
     fn repeated_diagnostics_can_be_deduplicated() {
         let path = Path::new("/tmp/greencode-dedup-lsp.rs");
         let errors = json!([{"severity":1,"range":{"start":{"line":0,"character":0}},"message":"boom"}]);
@@ -1103,12 +1192,13 @@ while True:
         assert!(diagnostics_note(path, &errors, true).is_none());
         // A changed file shows only the diagnostics it has not shown yet.
         let mut both = errors.as_array().unwrap().clone();
-        both.push(json!({"severity":2,"range":{"start":{"line":1,"character":0}},"message":"new one"}));
+        both.push(json!({"severity":1,"range":{"start":{"line":1,"character":0}},"message":"new one"}));
+        both.push(json!({"severity":2,"range":{"start":{"line":2,"character":0}},"message":"just a warning"}));
         let note = diagnostics_note(path, &json!(both), true).unwrap();
-        assert!(note.contains("new one") && !note.contains("boom"), "{note}");
+        assert!(note.contains("new one") && !note.contains("boom") && !note.contains("warning"), "{note}");
         assert!(diagnostics_note(path, &errors, false).is_some());
-        // A clean publication forgets the file, so the same errors after a fix are reported again.
-        assert!(diagnostics_note(path, &json!([]), true).is_none());
+        // A publication without errors forgets the file, so the same errors after a fix are reported again.
+        assert!(diagnostics_note(path, &json!([{"severity":2,"range":{"start":{"line":0,"character":0}},"message":"w"}]), true).is_none());
         assert!(diagnostics_note(path, &errors, true).is_some());
     }
 }

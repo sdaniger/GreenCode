@@ -408,13 +408,16 @@ mod tests {
             cx.update(|window, cx| ws.update(cx, |ws, cx| ws.attach_pending(&dir, window, cx)))
         };
         attach(cx);
-        let value = ws.read_with(cx, |ws, cx| ws.input.read(cx).value().to_string());
-        assert!(value.contains("snap-1.png"), "{value}");
+        let draft = |cx: &mut VisualTestContext| {
+            ws.read_with(cx, |ws, cx| (ws.input.read(cx).value().to_string(), ws.thread().images.clone()))
+        };
+        let (value, images) = draft(cx);
+        assert_eq!(images.len(), 1);
+        assert!(images[0].ends_with("snap-1.png"), "{images:?}");
         assert!(value.contains("スナップショット: Notes — Todo"), "{value}");
         assert!(!dir.join("snap-1.json").exists());
         attach(cx);
-        let again = ws.read_with(cx, |ws, cx| ws.input.read(cx).value().to_string());
-        assert_eq!(again, value);
+        assert_eq!(draft(cx), (value, images));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

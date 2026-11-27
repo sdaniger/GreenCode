@@ -193,7 +193,7 @@ pub fn summarize(rows: &[Row], cfg: &Settings, days: u32, today: u32) -> Summary
 }
 
 /// `(year, month, day)` of a day number.
-fn civil(day: u32) -> (u32, u32, u32) {
+pub fn civil(day: u32) -> (u32, u32, u32) {
     let z = day as i64 + 719468;
     let era = z.div_euclid(146097);
     let doe = z - era * 146097;

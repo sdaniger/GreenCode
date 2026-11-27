@@ -541,7 +541,7 @@ async fn run_cell(kernel: &Kernel, code: &str, cfg: &Config) -> Result<String> {
                 tokio::spawn(async move {
                     let text = done.await.unwrap_or_default();
                     let _ = std::fs::write(&written, &text);
-                    super::job_finished(super::JobResult { command: "eval".into(), log: written.clone(), status: Some(0) });
+                    super::job_finished(super::JobResult { command: "eval".into(), log: written.clone(), status: Some(0), owner: None });
                 });
                 return Ok(format!(
                     "still running after {} ms; moved to the background. Output goes to {} (use `read`).",

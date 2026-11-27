@@ -62,6 +62,7 @@ impl Workspace {
                 });
                 (status, version)
             } else {
+                let is_hermes = greencode_core::hermes::is_backend(&backend.name);
                 let status = if off {
                     "無効".into()
                 } else if backend
@@ -69,21 +70,27 @@ impl Workspace {
                     .first()
                     .and_then(|c| greencode_core::config::executable(c))
                     .is_none()
+                    || (is_hermes && greencode_core::config::executable("hermes").is_none())
                 {
                     format!(
                         "未検出 · {} が見つかりません",
-                        backend
-                            .command
-                            .first()
-                            .map(String::as_str)
-                            .unwrap_or("実行ファイル")
+                        if is_hermes {
+                            "hermes"
+                        } else {
+                            backend
+                                .command
+                                .first()
+                                .map(String::as_str)
+                                .unwrap_or("実行ファイル")
+                        }
                     )
                 } else {
                     "利用可能".into()
                 };
+                let version_key = if is_hermes { "hermes" } else { backend.name.as_str() };
                 let version = self
                     .agent_versions
-                    .get(backend.name.as_str())
+                    .get(version_key)
                     .and_then(Clone::clone);
                 (status, version)
             };
@@ -579,6 +586,13 @@ impl Workspace {
                         ));
                     }
                     detail = detail.child(auth_row).child(actions);
+                } else if greencode_core::hermes::is_backend(name) {
+                    let name = name.to_string();
+                    detail = detail.child(chip("connection-login", "プロバイダ・モデルを設定", pal).on_click(
+                        cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.run(Act::HermesSetup(name.clone()), window, cx);
+                        }),
+                    ));
                 } else {
                     let name = name.to_string();
                     detail = detail.child(chip("connection-login", "サインイン", pal).on_click(
@@ -669,6 +683,39 @@ impl Workspace {
                 .then(|| self.cfg.backends.iter().find(|b| b.name == name))
                 .flatten()
             {
+                if greencode_core::hermes::is_backend(&b.name) {
+                    let mut profile_row = div().flex().flex_wrap().items_center().gap_1();
+                    for (ix, profile) in self.hermes_profiles.iter().enumerate() {
+                        let connected = self
+                            .cfg
+                            .backends
+                            .iter()
+                            .any(|existing| existing.name == format!("hermes:{}", profile.name));
+                        let label = if connected {
+                            format!("{}（接続済み）", profile.name)
+                        } else {
+                            format!("接続: {}", profile.name)
+                        };
+                        let profile = profile.clone();
+                        profile_row = profile_row.child(
+                            chip(("connection-hermes-profile", ix), label, pal).on_click(cx.listener(
+                                move |this, _: &ClickEvent, window, cx| {
+                                    this.run(Act::ImportHermes(profile.clone()), window, cx);
+                                },
+                            )),
+                        );
+                    }
+                    profile_row = profile_row.child(
+                        chip("connection-hermes-folder", "フォルダから接続…", pal).on_click(
+                            cx.listener(|this, _: &ClickEvent, window, cx| {
+                                this.run(Act::ImportHermesFolder, window, cx);
+                            }),
+                        ),
+                    );
+                    detail = detail
+                        .child(div().text_xs().text_color(pal.muted).child("Hermes プロファイル"))
+                        .child(profile_row);
+                }
                 detail = detail
                     .child(format!(
                         "実行ファイル: {}",
@@ -869,6 +916,25 @@ mod tests {
                 .connections()
                 .iter()
                 .any(|r| r.key == "backend:antigravity" && r.status == "無効"));
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn hermes_connection_runs_setup_in_terminal(cx: &mut TestAppContext) {
+        let (ws, cx) = open(cx);
+        ws.update_in(cx, |ws, window, cx| {
+            ws.run(Act::SettingsTab("接続"), window, cx);
+            assert!(ws
+                .connections()
+                .iter()
+                .any(|r| r.key == "backend:hermes" || r.key == "agent:hermes"));
+            ws.run(Act::HermesSetup("hermes".into()), window, cx);
+        });
+        ws.read_with(cx, |ws, _| {
+            assert!(ws.settings.is_none());
+            assert!(ws.terminal_visible);
+            let term = ws.active_terminal().unwrap();
+            assert!(term.lines.iter().any(|l| l.contains("hermes acp --setup")));
         });
     }
 }

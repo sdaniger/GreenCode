@@ -24,6 +24,23 @@ pub struct LoopOpts {
     /// Stop the model the moment it starts writing a tool result inline with in-band tool calls.
     pub abort_on_fabricated_result: bool,
     pub speculative_execution: SpeculativeCfg,
+    pub verify: VerifyCfg,
+}
+
+/// A check run before a turn that changed files ends; a failure goes back to the model.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct VerifyCfg {
+    /// Shell command, e.g. `cargo check`; empty turns verification off.
+    pub command: String,
+    /// Failed checks handed back per turn before the turn ends anyway.
+    pub max_retries: u32,
+}
+
+impl Default for VerifyCfg {
+    fn default() -> Self {
+        Self { command: String::new(), max_retries: 2 }
+    }
 }
 
 /// Discard-safe prefetch of validated local reads before normal tool dispatch.
@@ -59,6 +76,7 @@ impl Default for LoopOpts {
             features: FeatureCfg::default(),
             abort_on_fabricated_result: true,
             speculative_execution: SpeculativeCfg::default(),
+            verify: VerifyCfg::default(),
         }
     }
 }

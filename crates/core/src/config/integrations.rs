@@ -138,6 +138,17 @@ pub struct LspCfg {
     /// Reach language servers through the per-project daemon broker so a released server stays warm for the
     /// next connection; falls back to private servers when the broker is unavailable.
     pub shared: bool,
+    /// Extra or replacement language servers, keyed by executable name; an extension listed here wins over
+    /// the built-in server for it.
+    pub servers: std::collections::BTreeMap<String, LspServerCfg>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct LspServerCfg {
+    pub args: Vec<String>,
+    /// File extensions without the dot, e.g. `["zig", "zon"]`.
+    pub extensions: Vec<String>,
 }
 
 impl Default for LspCfg {
@@ -146,11 +157,12 @@ impl Default for LspCfg {
             lazy: true,
             format_on_write: false,
             diagnostics_on_write: true,
-            diagnostics_on_edit: false,
+            diagnostics_on_edit: true,
             diagnostics_deduplicate: true,
             // Native language servers may need this long on a cold crate; OMP ships 10.
             request_timeout: 20,
             shared: true,
+            servers: Default::default(),
         }
     }
 }

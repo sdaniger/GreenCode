@@ -117,6 +117,8 @@ struct Thread {
     items: Vec<Item>,
     /// Only the visible thread and running ones keep their items in memory.
     loaded: bool,
+    /// A transcript exists on disk; unlike an unsent draft, this thread is real history.
+    has_session: bool,
     status: Status,
     pending: Option<(SharedString, SharedString, oneshot::Sender<Decision>)>,
     approvals: VecDeque<(SharedString, SharedString, oneshot::Sender<Decision>)>,
@@ -131,6 +133,8 @@ struct Thread {
     thinking_levels: Vec<String>,
     pending_thinking: Option<String>,
     opencode_effort: Option<String>,
+    /// The ACP agent advertises mid-turn steering (`_session/steering`).
+    steering: bool,
     config_options: Vec<Value>,
     pending_options: Vec<(String, Value)>,
     dialog: Option<(Value, oneshot::Sender<Value>)>,
@@ -491,6 +495,7 @@ fn terminal_command(
 
 impl Thread {
     fn new(meta: Meta, loaded: bool, mode: Mode) -> Thread {
+        let has_session = Session::open(&meta.id).is_some();
         let view = Session::view(&meta.id).unwrap_or_default().unwrap_or(View {
             meta,
             draft: String::new(),
@@ -509,6 +514,7 @@ impl Thread {
             cmd: None,
             items: vec![],
             loaded,
+            has_session,
             status: Status::Idle,
             pending: None,
             approvals: VecDeque::new(),
@@ -521,6 +527,7 @@ impl Thread {
             thinking_levels: vec![],
             pending_thinking: None,
             opencode_effort: None,
+            steering: false,
             config_options: vec![],
             pending_options: vec![],
             dialog: None,
@@ -572,6 +579,25 @@ impl Thread {
     /// An agent exists for a real conversation, not just for command discovery.
     fn live(&self) -> bool {
         self.cmd.is_some() && !self.warm
+    }
+
+    /// No message was sent and nothing lasting was set: the thread is only an empty composer.
+    /// Such threads are not history; the sidebar hides them and startup only restores the remembered one.
+    fn unstarted(&self) -> bool {
+        self.meta.title.is_empty()
+            && !self.has_session
+            && self.items.is_empty()
+            && self.queue.is_empty()
+            && self.status == Status::Idle
+            && self.bg_wait.is_none()
+            && !self.pinned
+            && !self.archived
+            && self.snoozed == 0
+            && self.auto_settle == AutoSettle::Follow
+            && self.linked_pr.is_none()
+            && self.linked_pr_manual.is_none()
+            && self.last_user_at == 0
+            && self.goal.is_none()
     }
 
     fn save(&self) -> Result<(), String> {
@@ -671,6 +697,8 @@ enum Act {
     PullRequests,
     ToggleGit,
     Delete,
+    /// Deletes a thread picked in the sidebar, without switching to it first.
+    DeleteThread(String),
     Mode(Mode),
     Model(String),
     SubagentModel(Option<String>),
@@ -694,6 +722,7 @@ enum Act {
     /// Browser or device sign-in of a provider in `greencode_core::login::PROVIDERS`.
     SignIn(String),
     OpenCodeLogin,
+    HermesSetup(String),
     CopyMcp,
     Cite,
     Usage,
@@ -1335,8 +1364,14 @@ fn rpc_backend(cfg: &Config, name: &str) -> bool {
         .any(|b| b.name == name && b.protocol != greencode_core::config::Protocol::Acp)
 }
 
-fn can_steer(cfg: &Config, backend: &str) -> bool {
+/// Backends whose live channel carries RPC commands as well as steering.
+fn live_commands(cfg: &Config, backend: &str) -> bool {
     backend == "native" || rpc_backend(cfg, backend)
+}
+
+/// Whether a message sent during a run joins that run instead of waiting for it.
+fn can_steer(cfg: &Config, t: &Thread) -> bool {
+    t.steering || live_commands(cfg, &t.meta.backend)
 }
 
 /// Completions of a thread: what the GUI handles itself plus what its backend advertises.
@@ -1809,6 +1844,38 @@ fn age(created: u64) -> String {
     }
 }
 
+/// Seconds east of UTC in the local zone, so session dates follow the user's calendar.
+fn utc_offset() -> i64 {
+    #[cfg(unix)]
+    unsafe {
+        let t = now() as libc::time_t;
+        let mut tm: libc::tm = std::mem::zeroed();
+        if !libc::localtime_r(&t, &mut tm).is_null() {
+            return tm.tm_gmtoff as i64;
+        }
+    }
+    // shortcut: Windows dates sessions in UTC; read GetTimeZoneInformation if that shows up wrong.
+    0
+}
+
+/// Day number of `secs` in a zone `offset` seconds east of UTC.
+fn local_day(secs: u64, offset: i64) -> u32 {
+    ((secs as i64 + offset).max(0) / 86400) as u32
+}
+
+/// Sidebar heading for a session started on local day `day`, seen on local day `today`.
+fn month_heading(day: u32, today: u32) -> String {
+    let civil = greencode_core::usage_history::civil;
+    let ((y, m, _), (ty, tm, _)) = (civil(day), civil(today));
+    if (y, m) == (ty, tm) {
+        "今月".into()
+    } else if y == ty {
+        format!("{m}月")
+    } else {
+        format!("{y}年{m}月")
+    }
+}
+
 impl Workspace {
     pub fn new(
         cfg: Config,
@@ -1881,11 +1948,26 @@ impl Workspace {
         }
         let mut meta = Meta::new(cwd, cfg.model.clone(), "native".into());
         meta.subagent_model = cfg.subagent_model.clone();
-        let mut threads = vec![Thread::new(meta, true, cfg.mode)];
+        // Reopen the thread that was showing when the app last closed. Empty composers from
+        // earlier launches are not history, so only the remembered one keeps its draft.
+        let mut saved = Session::list();
+        let saved_count = saved.len();
+        let restored = ui["last_thread"]
+            .as_str()
+            .and_then(|id| saved.iter().position(|m| m.id == id))
+            .map(|ix| saved.remove(ix));
+        // A session saved without a view has no permission mode of its own; the current default applies.
+        let restored_view = restored
+            .as_ref()
+            .is_some_and(|m| Session::view(&m.id).ok().flatten().is_some());
+        let fresh = restored.is_none();
+        let mut threads = vec![Thread::new(restored.unwrap_or(meta), fresh, cfg.mode)];
         threads.extend(
-            Session::list()
+            saved
                 .into_iter()
-                .map(|m| Thread::new(m, false, cfg.mode)),
+                .map(|m| Thread::new(m, false, cfg.mode))
+                // Empty composers are not history; only the remembered thread keeps its draft.
+                .filter(|t| !t.unstarted()),
         );
         if let Some(e) = &cfg_error {
             threads[0]
@@ -2123,7 +2205,7 @@ impl Workspace {
             .filter_map(Value::as_str)
             .collect();
         this.threads[1..].sort_by_key(|t| order.iter().position(|id| *id == t.meta.id));
-        if welcome::first_run(&this.ui, this.threads.len() - 1) {
+        if welcome::first_run(&this.ui, saved_count) {
             this.open_welcome(cx);
         }
         advanced::apply_ui(Arc::make_mut(&mut this.cfg), &this.ui);
@@ -2137,12 +2219,14 @@ impl Workspace {
             })
         {
             Arc::make_mut(&mut this.cfg).mode = mode;
-            if this.threads[0].items.is_empty() {
+            if (fresh || !restored_view) && this.threads[0].items.is_empty() {
                 this.threads[0].perms.set_mode(mode);
             }
         }
-        if let Some(model) = this.ui["model"].as_str() {
-            this.threads[0].meta.model = model.into();
+        if fresh {
+            if let Some(model) = this.ui["model"].as_str() {
+                this.threads[0].meta.model = model.into();
+            }
         }
         if let Some(on) = this.ui["sandbox"].as_bool() {
             greencode_core::tools::SANDBOX.store(on, std::sync::atomic::Ordering::Relaxed);
@@ -2234,6 +2318,16 @@ impl Workspace {
         if let Err(e) = saved {
             self.fail(format!("設定を保存できません: {e}"));
         }
+    }
+
+    /// Remembers the thread to reopen on the next launch, writing only when it changes.
+    fn remember_thread(&mut self) {
+        let id = self.thread().meta.id.clone();
+        if self.ui["last_thread"].as_str() == Some(id.as_str()) {
+            return;
+        }
+        self.ui["last_thread"] = json!(id);
+        self.save_ui();
     }
 
     /// Runs `command` in the active project off the UI thread; output goes to the terminal drawer or the thread.
@@ -3437,6 +3531,7 @@ impl Workspace {
             set_input(s, draft, window, cx);
             s.focus(window, cx);
         });
+        self.remember_thread();
         cx.notify();
     }
 
@@ -3461,6 +3556,35 @@ impl Workspace {
             self.threads[active].loaded = false;
         }
         self.activate(ix, window, cx);
+    }
+
+    /// Deletes thread `ix` and its session/view. A worktree and branch stay on disk on purpose.
+    fn delete_thread(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(t) = self.threads.get(ix) else {
+            return;
+        };
+        if t.status != Status::Idle {
+            self.fail("実行を停止してからスレッドを削除してください");
+            cx.notify();
+            return;
+        }
+        let removed_active = ix == self.active;
+        let t = self.threads.remove(ix);
+        Session::delete(&t.meta.id);
+        if self.threads.is_empty() {
+            let mut meta = Meta::new(t.project(), t.meta.model, "native".into());
+            meta.subagent_model = self.cfg.subagent_model.clone();
+            self.threads.push(Thread::new(meta, true, self.cfg.mode));
+        }
+        if ix < self.active {
+            self.active -= 1;
+        }
+        if removed_active {
+            self.active = self.active.min(self.threads.len() - 1);
+            self.activate(self.active, window, cx);
+        } else {
+            cx.notify();
+        }
     }
 
     fn new_thread(
@@ -3648,7 +3772,7 @@ impl Workspace {
         if !t.warm {
             return;
         }
-        (t.cmd, t.warm, t.warmups, t.commands) = (None, false, 0, vec![]);
+        (t.cmd, t.warm, t.warmups, t.commands, t.steering) = (None, false, 0, vec![], false);
         if Session::open(&t.meta.id).is_some() {
             return;
         }
@@ -3803,7 +3927,7 @@ impl Workspace {
         // Follow-up behavior "steer": a message sent during a run goes into that run when the agent supports it.
         if self.ui["follow_up_steer"] == true
             && self.thread().status == Status::Running
-            && can_steer(&self.cfg, &self.thread().meta.backend)
+            && can_steer(&self.cfg, self.thread())
         {
             if let Some(cmd) = &self.thread().cmd {
                 let _ = cmd.send(Command::Steer(text.clone()));
@@ -3890,6 +4014,7 @@ impl Workspace {
         let t = &mut self.threads[ix];
         t.cmd = Some(tx);
         t.warmups = 0;
+        t.steering = false;
         let id = t.meta.id.clone();
         cx.spawn(async move |this, cx| {
             while let Some(ev) = rx.recv().await {
@@ -4260,6 +4385,7 @@ impl Workspace {
                         }
                     }
                     "acp_state" => {
+                        t.steering = data["steering"] == true;
                         t.config_options = data["configOptions"]
                             .as_array()
                             .cloned()
@@ -5880,6 +6006,7 @@ impl Workspace {
                     self.fail("ターミナルで opencode auth login を実行してください");
                 }
             }
+            Act::HermesSetup(backend) => self.hermes_setup(&backend, window, cx),
             Act::NewThread => self.new_thread(self.thread().project(), false, window, cx),
             Act::NewWorktree => self.new_thread(self.thread().project(), true, window, cx),
             Act::ImportHermes(profile) => self.import_hermes(profile, window, cx),
@@ -5942,21 +6069,11 @@ impl Workspace {
                 }
                 self.refresh_diff(cx);
             }
-            Act::Delete => {
-                if self.thread().status != Status::Idle {
-                    self.fail("実行を停止してからスレッドを削除してください");
-                    cx.notify();
-                    return;
+            Act::Delete => self.delete_thread(self.active, window, cx),
+            Act::DeleteThread(id) => {
+                if let Some(ix) = self.threads.iter().position(|t| t.meta.id == id) {
+                    self.delete_thread(ix, window, cx);
                 }
-                // The session file goes; a worktree and its branch are left on disk on purpose.
-                let t = self.threads.remove(self.active);
-                Session::delete(&t.meta.id);
-                if self.threads.is_empty() {
-                    let mut meta = Meta::new(t.project(), t.meta.model, "native".into());
-                    meta.subagent_model = self.cfg.subagent_model.clone();
-                    self.threads.push(Thread::new(meta, true, self.cfg.mode));
-                }
-                self.activate(self.active.min(self.threads.len() - 1), window, cx);
             }
             Act::AutoSettle(value) => self.threads[self.active].auto_settle = value,
             Act::LinkPr(number) => {
@@ -6040,13 +6157,13 @@ impl Workspace {
                 let text = self.input.read(cx).value().trim().to_string();
                 if text.is_empty()
                     && self.thread().status == Status::Running
-                    && can_steer(&self.cfg, &self.thread().meta.backend)
+                    && can_steer(&self.cfg, self.thread())
                     && !self.thread().queue.is_empty()
                 {
                     self.send_queue_now(0, window, cx);
                 } else if !text.is_empty()
                     && self.thread().status == Status::Running
-                    && can_steer(&self.cfg, &self.thread().meta.backend)
+                    && can_steer(&self.cfg, self.thread())
                 {
                     if let Some(cmd) = &self.thread().cmd {
                         let _ = cmd.send(Command::Steer(text.clone()));
@@ -6057,7 +6174,7 @@ impl Workspace {
                     self.list.reset(self.thread().items.len());
                     self.input.update(cx, |s, cx| set_input(s, "", window, cx));
                 } else {
-                    self.fail("実行中の pi / omp に追加指示を送信できます");
+                    self.fail("この接続先では実行中に追加指示を送信できません");
                 }
             }
             Act::Shell(command) => self.run_shell(command, false, cx),
@@ -7145,7 +7262,7 @@ impl Workspace {
             }
             Act::Rpc(value) => {
                 let busy = self.thread().status != Status::Idle
-                    && !can_steer(&self.cfg, &self.thread().meta.backend);
+                    && !live_commands(&self.cfg, &self.thread().meta.backend);
                 let t = &mut self.threads[self.active];
                 let option_id = (value["type"] == "set_config_option")
                     .then(|| value["configId"].as_str())
@@ -7417,6 +7534,30 @@ impl Workspace {
         true
     }
 
+    fn hermes_setup(
+        &mut self,
+        backend: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let command = greencode_core::hermes::setup_command(backend);
+        self.settings = None;
+        if !self.terminal_visible {
+            self.open_terminal(window, cx);
+        }
+        if self.active_terminal().is_some() {
+            if cfg!(test) {
+                self.active_terminal_mut()
+                    .unwrap()
+                    .lines
+                    .push(format!("$ {command}").into());
+            } else {
+                self.write_terminal(format!("{command}\n").into_bytes());
+            }
+        }
+        cx.notify();
+    }
+
     fn import_hermes(
         &mut self,
         profile: hermes::Profile,
@@ -7425,12 +7566,15 @@ impl Workspace {
     ) {
         match hermes::import(&profile, Arc::make_mut(&mut self.cfg)) {
             Ok(backend) => {
+                self.settings = None;
+                self.push_config();
                 self.new_thread(self.thread().project(), false, window, cx);
                 let t = &mut self.threads[self.active];
                 t.meta.backend = backend;
                 t.meta.model = "default".into();
                 t.items.push(Item::Notice(format!("Hermes「{}」をインポートしました。元のプロファイルの設定・認証・スキル・メモリを使用します。", profile.name).into()));
                 self.list.reset(t.items.len());
+                self.refresh_backend_models(false, cx);
             }
             Err(e) => self.fail(format!("Hermesプロファイルをインポートできません: {e:#}")),
         }
@@ -7756,8 +7900,10 @@ impl Workspace {
 
     // ---- rendering ----
 
-    fn thread_row(&self, i: usize, pal: Pal, cx: &mut Context<Self>) -> Stateful<Div> {
+    /// One sidebar row. `offset` (the local UTC offset) switches to the dated look: a status dot and the day of month.
+    fn thread_row(&self, i: usize, offset: Option<i64>, pal: Pal, cx: &mut Context<Self>) -> Stateful<Div> {
         let t = &self.threads[i];
+        let id = t.meta.id.clone();
         let title: SharedString = if t.meta.title.is_empty() {
             "新しいスレッド".into()
         } else {
@@ -7771,6 +7917,7 @@ impl Workspace {
         };
         div()
             .id(("thread", i))
+            .group("thread-row")
             .flex()
             .items_center()
             .gap_2()
@@ -7783,7 +7930,10 @@ impl Workspace {
             .on_click(
                 cx.listener(move |this, _: &ClickEvent, window, cx| this.select(i, window, cx)),
             )
-            .child(avatar(&project_name(&t.project()), pal))
+            .child(match offset {
+                Some(_) => div().size_1p5().flex_shrink_0().rounded_full().bg(dot.unwrap_or(pal.muted.opacity(0.5))),
+                None => avatar(&project_name(&t.project()), pal),
+            })
             .child(div().flex_1().truncate().text_sm().child(title))
             .children(
                 t.linked_pr_manual
@@ -7810,9 +7960,35 @@ impl Workspace {
             .when(t.pinned, |d| {
                 d.child(div().text_xs().text_color(pal.muted).child("•"))
             })
-            .child(match dot {
-                Some(c) => div().size_2().rounded_full().bg(c),
-                None => div()
+            .child(
+                gpui_kit::base::Button::new(("thread-delete", i))
+                    .accessibility_label("スレッドを削除")
+                    .tab_stop(false)
+                    .flex_shrink_0()
+                    .size(px(18.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_md()
+                    .text_xs()
+                    .text_color(pal.muted)
+                    .cursor_pointer()
+                    .invisible()
+                    .group_hover("thread-row", |s| s.visible())
+                    .hover(|s| s.bg(pal.hover).text_color(pal.fg))
+                    .child("×")
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.run(Act::DeleteThread(id.clone()), window, cx);
+                    })),
+            )
+            .child(match (offset, dot) {
+                (Some(o), _) => div().text_xs().text_color(pal.muted).child(SharedString::from(format!(
+                    "{}日",
+                    greencode_core::usage_history::civil(local_day(t.meta.created, o)).2
+                ))),
+                (None, Some(c)) => div().size_2().rounded_full().bg(c),
+                (None, None) => div()
                     .text_xs()
                     .text_color(pal.muted)
                     .child(SharedString::from(age(t.meta.created))),
@@ -7824,6 +8000,10 @@ impl Workspace {
         let mut groups: Vec<(PathBuf, Vec<usize>)> = Vec::new();
         let mut settled: Vec<usize> = Vec::new();
         for (i, t) in self.threads.iter().enumerate() {
+            // An empty composer is not history; its row appears once a message is sent.
+            if t.unstarted() {
+                continue;
+            }
             // Snoozed threads stay hidden until their time, unless they need attention.
             if t.snoozed > now() && i != self.active && t.status != Status::Waiting {
                 continue;
@@ -7850,7 +8030,38 @@ impl Workspace {
             .overflow_y_scroll()
             .px_2()
             .pb_2();
-        for (project, ixs) in groups {
+        // Hermes-style by default: one list by start date under month headings, pinned threads first.
+        let by_date = self.ui["sidebar_group"].as_str() != Some("project");
+        let offset = by_date.then(utc_offset);
+        let mut sections: Vec<(AnyElement, Vec<usize>)> = Vec::new();
+        if let Some(o) = offset {
+            let today = local_day(now(), o);
+            let mut ixs: Vec<usize> = groups.iter().flat_map(|(_, v)| v.iter().copied()).collect();
+            ixs.sort_by_key(|&i| (!self.threads[i].pinned, std::cmp::Reverse(self.threads[i].meta.created)));
+            let mut last = None;
+            for i in ixs {
+                let t = &self.threads[i];
+                let heading =
+                    if t.pinned { "ピン留め".to_string() } else { month_heading(local_day(t.meta.created, o), today) };
+                if last.as_ref() != Some(&heading) {
+                    let el = div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .pt_3()
+                        .pb_1()
+                        .text_xs()
+                        .text_color(pal.muted)
+                        .child(SharedString::from(heading.clone()))
+                        .child(div().flex_1().h(px(1.)).bg(pal.line));
+                    sections.push((el.into_any_element(), Vec::new()));
+                    last = Some(heading);
+                }
+                sections.last_mut().unwrap().1.push(i);
+            }
+        }
+        for (project, ixs) in groups.into_iter().filter(|_| !by_date) {
             let mut ixs = ixs;
             ixs.sort_by_key(|i| !self.threads[*i].pinned);
             let (pinned_now, archived_now) =
@@ -7861,43 +8072,45 @@ impl Workspace {
             let archive_label = if archived_now { "復元" } else { "保管" };
             let pin_id = format!("project-pin-{}", project.display());
             let archive_id = format!("project-archive-{}", project.display());
-            body = body.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .px_2()
-                    .pt_3()
-                    .pb_1()
-                    .text_xs()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(pal.muted)
-                    .child(div().flex_1().truncate().child(SharedString::from(format!(
-                        "{}{}",
-                        project_name(&project),
-                        if archived_now { "（保管済み）" } else { "" }
-                    ))))
-                    .child(chip(pin_id, pin_label, pal).on_click(
-                        cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            this.run(pin_act.clone(), window, cx)
-                        }),
-                    ))
-                    .child(chip(archive_id, archive_label, pal).on_click(
-                        cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            this.run(archive_act.clone(), window, cx)
-                        }),
-                    )),
-            );
+            let header = div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .pt_3()
+                .pb_1()
+                .text_xs()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(pal.muted)
+                .child(div().flex_1().truncate().child(SharedString::from(format!(
+                    "{}{}",
+                    project_name(&project),
+                    if archived_now { "（保管済み）" } else { "" }
+                ))))
+                .child(chip(pin_id, pin_label, pal).on_click(
+                    cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.run(pin_act.clone(), window, cx)
+                    }),
+                ))
+                .child(chip(archive_id, archive_label, pal).on_click(
+                    cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.run(archive_act.clone(), window, cx)
+                    }),
+                ));
+            sections.push((header.into_any_element(), ixs));
+        }
+        for (header, ixs) in sections {
+            body = body.child(header);
             // Delegated child threads sit indented under their parent when both are listed here.
             let is_child = |i: &usize| {
                 let parent = self.threads[*i].meta.parent.as_deref();
                 parent.is_some_and(|p| ixs.iter().any(|j| self.threads[*j].meta.id == p))
             };
             for &i in ixs.iter().filter(|i| !is_child(i)) {
-                body = body.child(self.thread_row(i, pal, cx));
+                body = body.child(self.thread_row(i, offset, pal, cx));
                 let id = self.threads[i].meta.id.as_str();
                 for &c in ixs.iter().filter(|c| self.threads[**c].meta.parent.as_deref() == Some(id)) {
-                    body = body.child(self.thread_row(c, pal, cx).ml_4());
+                    body = body.child(self.thread_row(c, offset, pal, cx).ml_4());
                 }
             }
         }
@@ -7931,7 +8144,7 @@ impl Workspace {
             );
             if open {
                 for i in settled {
-                    body = body.child(self.thread_row(i, pal, cx));
+                    body = body.child(self.thread_row(i, offset, pal, cx));
                 }
             }
         }
@@ -7998,6 +8211,24 @@ impl Workspace {
                             |this, _: &ClickEvent, window, cx| this.run(Act::NewThread, window, cx),
                         ))),
             )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .px_4()
+                    .pt_2()
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(pal.muted)
+                    .child(div().flex_1().child("スレッド"))
+                    .child(chip("sidebar-group", if by_date { "日付順" } else { "プロジェクト別" }, pal).on_click(
+                        cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.ui["sidebar_group"] = json!(if by_date { "project" } else { "date" });
+                            this.save_ui();
+                            cx.notify();
+                        }),
+                    )),
+            )
             .child(body)
             .child(
                 div()
@@ -8026,6 +8257,21 @@ impl Workspace {
                     ),
             )
             .track_focus(&self.sidebar_focus)
+    }
+
+    /// Resets the conversation list after work rows change height, keeping the row at the top in place.
+    fn reset_work_rows(&mut self) {
+        let anchor = self.list.logical_scroll_top();
+        self.list.reset(self.thread().items.len());
+        self.list.scroll_to(anchor);
+    }
+
+    /// Collapses every expanded work group in the active thread.
+    fn collapse_work(&mut self, cx: &mut Context<Self>) {
+        let id = self.thread().meta.id.clone();
+        self.expanded_groups.retain(|(thread, _)| *thread != id);
+        self.reset_work_rows();
+        cx.notify();
     }
 
     fn item(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -8094,8 +8340,12 @@ impl Workspace {
         };
         let group = groups.get(ix).copied().flatten();
         let mut header = None;
+        // An expanded group can be longer than the window, so the header is out of reach by its end.
+        // A footer repeats the collapse control after the last row.
+        let mut footer = None;
         if let Some(start) = group {
             let key = (t.meta.id.clone(), start);
+            let footer_key = key.clone();
             let expanded = self.expanded_groups.contains(&key);
             if start == ix {
                 let n = (start..t.items.len())
@@ -8106,7 +8356,6 @@ impl Workspace {
                     .take_while(|&i| groups[i] == Some(start))
                     .filter(|&i| matches!(t.items[i], Item::Tool { is_error: true, .. }))
                     .count();
-                let len = t.items.len();
                 let label = if errors == 0 {
                     format!("作業内容 · ツール {n} 件")
                 } else {
@@ -8143,7 +8392,7 @@ impl Workspace {
                                 if !this.expanded_groups.remove(&key) {
                                     this.expanded_groups.insert(key.clone());
                                 }
-                                this.list.reset(len);
+                                this.reset_work_rows();
                                 cx.notify();
                             })),
                     ),
@@ -8154,6 +8403,33 @@ impl Workspace {
                     Some(h) => h.into_any_element(),
                     None => div().into_any_element(),
                 };
+            }
+            // The last row of the group carries the way out, next to where the reading ends.
+            if groups.get(ix + 1).copied().flatten() != Some(start) {
+                let key = footer_key;
+                footer = Some(centred(
+                    column().py_0p5().child(
+                        div()
+                            .id(("work-collapse", ix))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .gap_2()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .text_xs()
+                            .text_color(pal.muted)
+                            .cursor_pointer()
+                            .hover(|s| s.bg(pal.hover).text_color(pal.fg))
+                            .child("折りたたむ ‹")
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.expanded_groups.remove(&key);
+                                this.reset_work_rows();
+                                cx.notify();
+                            })),
+                    ),
+                ));
             }
         }
         // Prompts of an idle native thread can be taken back for editing, which rewinds the thread to them.
@@ -8329,6 +8605,7 @@ impl Workspace {
             .children(edit)
             .children(card)
             .children(retry)
+            .children(footer)
             .into_any_element()
     }
 
@@ -8404,7 +8681,7 @@ impl Workspace {
             "送信"
         } else if status == Status::Running
             && self.ui["follow_up_steer"] == true
-            && can_steer(&self.cfg, &backend)
+            && can_steer(&self.cfg, t)
         {
             "実行中に送信"
         } else {
@@ -9224,8 +9501,45 @@ impl Workspace {
             )
             .flex_1()
             .into_any_element();
+            // An expanded group can be far longer than the window; keep a way to close it on screen.
+            let id = &self.thread().meta.id;
+            let expanded = self.tool_visibility() == ToolVisibility::Show
+                && self.expanded_groups.iter().any(|(thread, _)| thread == id);
+            let collapse = expanded.then(|| {
+                div()
+                    .absolute()
+                    .right_4()
+                    .bottom_2()
+                    .child(
+                        gpui_kit::base::Button::new("collapse-work")
+                            .accessibility_label("作業内容を折りたたむ")
+                            .px_3()
+                            .py_1()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(pal.line)
+                            .bg(pal.card)
+                            .text_xs()
+                            .text_color(pal.muted)
+                            .cursor_pointer()
+                            .hover(|s| s.bg(pal.hover).text_color(pal.fg))
+                            .child("折りたたむ ‹")
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.collapse_work(cx)
+                            })),
+                    )
+            });
+            let body = div()
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .child(list)
+                .children(collapse)
+                .into_any_element();
             (
-                list,
+                body,
                 Some(
                     div()
                         .w_full()
@@ -10745,6 +11059,17 @@ mod tests {
     }
 
     #[test]
+    fn sessions_are_headed_by_local_month() {
+        // 2026-11-26 00:30 JST is still 2026-11-25 in UTC; 2026-10-31 23:00 UTC is November in JST.
+        let (jst, now) = (9 * 3600, 1_795_620_600);
+        let today = super::local_day(now, jst);
+        assert_eq!(greencode_core::usage_history::civil(today), (2026, 11, 26));
+        assert_eq!(super::month_heading(super::local_day(1_793_487_600, jst), today), "今月");
+        assert_eq!(super::month_heading(super::local_day(1_793_487_600, 0), today), "10月");
+        assert_eq!(super::month_heading(super::local_day(1_764_000_000, jst), today), "2025年11月");
+    }
+
+    #[test]
     fn finished_tool_runs_collapse_into_work_groups() {
         let user = || Item::User("go".into());
         let items = [
@@ -10791,6 +11116,20 @@ mod tests {
             crate::thread_view::work_groups(&interim, false, true),
             [None, Some(1), Some(1), Some(1), None]
         );
+    }
+
+    #[gpui_kit::test]
+    async fn collapsing_work_clears_only_the_active_thread(cx: &mut TestAppContext) {
+        let (ws, cx) = open(cx);
+        let id = ws.read_with(cx, |ws, _| ws.thread().meta.id.clone());
+        ws.update(cx, |ws, cx| {
+            ws.expanded_groups.insert((id.clone(), 0));
+            ws.expanded_groups.insert((id.clone(), 4));
+            ws.expanded_groups.insert(("other".into(), 2));
+            ws.collapse_work(cx);
+            assert!(!ws.expanded_groups.iter().any(|(thread, _)| *thread == id));
+            assert!(ws.expanded_groups.contains(&("other".to_string(), 2)));
+        });
     }
 
     #[test]
@@ -11200,6 +11539,174 @@ mod tests {
             );
             let _ws = cx.new(|cx| Workspace::new(Config::default(), None, window, cx));
             assert_eq!(cx.theme().is_dark(), expected_dark);
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn restart_reopens_the_thread_that_was_showing(cx: &mut TestAppContext) {
+        use greencode_core::permission::Mode;
+
+        let (ws, cx) = open(cx);
+        let id = ws.read_with(cx, |ws, _| ws.thread().meta.id.clone());
+        let model = ws.read_with(cx, |ws, _| ws.thread().meta.model.clone());
+        // A draft is enough to save the thread, as when the app closes with unsent text.
+        ws.update(cx, |ws, _| {
+            ws.threads[0].draft = "keep me".into();
+            ws.threads[0].perms.set_mode(Mode::Plan);
+            ws.threads[0].save().unwrap();
+            // Global defaults from an earlier run must not override the restored thread.
+            ws.ui["mode"] = json!("ask");
+            ws.ui["model"] = json!("openai/other");
+            ws.save_ui();
+        });
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(greencode_core::home().join("ui.json")).unwrap())
+                .unwrap();
+        assert_eq!(saved["last_thread"], json!(id));
+        let saved_ids: Vec<String> = greencode_core::session::Session::list()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert!(saved_ids.contains(&id));
+
+        cx.update(|window, cx| {
+            let again = cx.new(|cx| Workspace::new(Config::default(), None, window, cx));
+            again.read_with(cx, |ws, _| {
+                // The same saved threads, with the remembered one shown and no fresh one added.
+                let ids: Vec<String> = ws.threads.iter().map(|t| t.meta.id.clone()).collect();
+                assert_eq!(ids.len(), saved_ids.len());
+                assert!(saved_ids.iter().all(|id| ids.contains(id)));
+                assert_eq!(ws.threads[0].meta.id, id);
+                assert_eq!(ws.active, 0);
+                assert_eq!(ws.threads[0].draft, "keep me");
+                assert_eq!(ws.threads[0].meta.model, model);
+                assert_eq!(ws.threads[0].perms.mode(), Mode::Plan);
+                assert_eq!(ws.cfg.mode, Mode::Ask);
+            });
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn restart_replaces_a_thread_with_nothing_saved(cx: &mut TestAppContext) {
+        let (ws, cx) = open(cx);
+        let id = ws.read_with(cx, |ws, _| ws.thread().meta.id.clone());
+        // The fresh thread has no view, so `last_thread` alone must not bring back an empty shell.
+        assert!(!greencode_core::home()
+            .join("threads")
+            .join(format!("{id}.json"))
+            .exists());
+        let saved_ids: Vec<String> = greencode_core::session::Session::list()
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert!(!saved_ids.contains(&id));
+
+        cx.update(|window, cx| {
+            let again = cx.new(|cx| Workspace::new(Config::default(), None, window, cx));
+            again.read_with(cx, |ws, _| {
+                assert_ne!(ws.threads[0].meta.id, id);
+                assert!(!saved_ids.contains(&ws.threads[0].meta.id));
+                assert!(ws.threads.iter().all(|t| t.meta.id != id));
+            });
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn restart_drops_unstarted_threads_but_keeps_the_last_draft(cx: &mut TestAppContext) {
+        let (ws, cx) = open(cx);
+        let first = ws.read_with(cx, |ws, _| ws.thread().meta.id.clone());
+        cx.simulate_input("draft one");
+        // A second thread with a draft but no sent message is still an empty composer.
+        cx.simulate_keystrokes("cmd-n");
+        cx.simulate_input("draft two");
+        cx.simulate_keystrokes("cmd-2");
+        assert_eq!(ws.read_with(cx, |ws, _| ws.thread().meta.id.clone()), first);
+
+        cx.update(|window, cx| {
+            let again = cx.new(|cx| Workspace::new(Config::default(), None, window, cx));
+            again.read_with(cx, |ws, _| {
+                // The saved second draft is not history; the remembered thread keeps its own draft.
+                assert_eq!(ws.threads.len(), 1);
+                assert_eq!(ws.threads[0].meta.id, first);
+                assert_eq!(ws.threads[0].draft, "draft one");
+            });
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn deleting_threads_keeps_the_viewed_thread_and_replaces_the_last_one(
+        cx: &mut TestAppContext,
+    ) {
+        use greencode_core::session::Session;
+        let (ws, cx) = open(cx);
+        let cwd = ws.read_with(cx, |ws, _| ws.thread().meta.cwd.clone());
+        let ids: Vec<String> = ["kept", "removed"]
+            .iter()
+            .map(|title| {
+                let mut meta = Meta::new(cwd.clone(), "m".into(), "native".into());
+                meta.title = title.to_string();
+                Session::create(&meta).unwrap();
+                ws.update(cx, |ws, _| {
+                    let t = super::Thread::new(meta.clone(), false, Default::default());
+                    t.save().unwrap();
+                    ws.threads.push(t);
+                });
+                meta.id
+            })
+            .collect();
+
+        // View the second saved thread; deleting the one above it must keep the view and fix the index.
+        cx.simulate_keystrokes("cmd-3");
+        assert_eq!(ws.read_with(cx, |ws, _| ws.active), 2);
+        cx.update(|window, cx| {
+            ws.update(cx, |ws, cx| {
+                ws.run(super::Act::DeleteThread(ids[0].clone()), window, cx)
+            })
+        });
+        ws.read_with(cx, |ws, _| {
+            assert_eq!(ws.active, 1);
+            assert_eq!(ws.thread().meta.id, ids[1]);
+            assert!(ws.threads.iter().all(|t| t.meta.id != ids[0]));
+        });
+        assert!(Session::open(&ids[0]).is_none());
+        assert!(Session::view(&ids[0]).unwrap().is_none());
+        assert!(Session::view(&ids[1]).unwrap().is_some());
+
+        // A running thread refuses deletion.
+        ws.update(cx, |ws, _| ws.threads[1].status = Status::Running);
+        cx.update(|window, cx| {
+            ws.update(cx, |ws, cx| {
+                ws.run(super::Act::DeleteThread(ids[1].clone()), window, cx)
+            })
+        });
+        ws.update(cx, |ws, _| {
+            assert_eq!(ws.threads.len(), 2);
+            assert!(matches!(
+                ws.thread().items.last(),
+                Some(Item::Error(e)) if e.contains("実行を停止してからスレッドを削除してください")
+            ));
+            ws.threads[1].status = Status::Idle;
+        });
+
+        // Deleting the viewed thread selects the neighbour now at that index.
+        cx.update(|window, cx| {
+            ws.update(cx, |ws, cx| {
+                ws.run(super::Act::DeleteThread(ids[1].clone()), window, cx)
+            })
+        });
+        ws.read_with(cx, |ws, _| {
+            assert_eq!((ws.threads.len(), ws.active), (1, 0));
+            assert!(ws.threads.iter().all(|t| t.meta.id != ids[1]));
+        });
+        assert!(Session::open(&ids[1]).is_none());
+        assert!(Session::view(&ids[1]).unwrap().is_none());
+
+        // Deleting the last thread leaves a fresh composer rather than an empty list.
+        let last = ws.read_with(cx, |ws, _| ws.thread().meta.id.clone());
+        cx.update(|window, cx| ws.update(cx, |ws, cx| ws.run(super::Act::Delete, window, cx)));
+        ws.read_with(cx, |ws, _| {
+            assert_eq!((ws.threads.len(), ws.active), (1, 0));
+            assert_ne!(ws.thread().meta.id, last);
         });
     }
 
@@ -11844,6 +12351,36 @@ mod tests {
         ws.update(cx, |ws, _| {
             let t = &mut ws.threads[0];
             t.meta.backend = "native".into();
+            t.status = super::Status::Running;
+            t.cmd = Some(tx);
+            t.queue.push_back("new direction".into());
+        });
+        cx.update(|window, cx| ws.update(cx, |ws, cx| ws.send_queue_now(0, window, cx)));
+        assert!(
+            matches!(rx.try_recv(), Ok(greencode_core::Command::Steer(text)) if text == "new direction")
+        );
+        ws.read_with(cx, |ws, _| {
+            assert!(ws.thread().queue.is_empty());
+            assert!(matches!(ws.thread().items.last(), Some(super::Item::User(text)) if text.as_ref() == "new direction"));
+        });
+    }
+
+    #[gpui_kit::test]
+    async fn queue_send_now_steers_running_opencode_thread(cx: &mut TestAppContext) {
+        let (ws, cx) = open(cx);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        ws.update(cx, |ws, cx| {
+            let id = ws.threads[0].meta.id.clone();
+            ws.on_event(
+                &id,
+                Event::Remote {
+                    command: "acp_state".into(),
+                    data: json!({"steering": true}),
+                },
+                cx,
+            );
+            let t = &mut ws.threads[0];
+            t.meta.backend = "opencode".into();
             t.status = super::Status::Running;
             t.cmd = Some(tx);
             t.queue.push_back("new direction".into());
@@ -13999,6 +14536,7 @@ mod tests {
     async fn settings_screen_changes_and_persists_settings(cx: &mut TestAppContext) {
         use greencode_core::permission::Mode;
         let (ws, cx) = open(cx);
+        let id = ws.read_with(cx, |ws, _| ws.thread().meta.id.clone());
         cx.simulate_keystrokes("cmd-,");
         assert!(ws.read_with(cx, |ws, _| ws.settings.is_some()));
         // A keybinding typed into the two fields is saved and works at once.
@@ -14023,7 +14561,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             saved,
-            json!({"keys": {"ctrl-g": "/diff"}, "mode": "full", "model": "openai/z", "notify_off": true})
+            json!({"keys": {"ctrl-g": "/diff"}, "last_thread": id, "mode": "full", "model": "openai/z", "notify_off": true})
         );
         // The next launch starts from the saved defaults.
         cx.update(|window, cx| {

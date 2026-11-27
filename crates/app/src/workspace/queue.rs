@@ -123,7 +123,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let steer = self.thread().status == Status::Running
-            && can_steer(&self.cfg, &self.thread().meta.backend)
+            && can_steer(&self.cfg, self.thread())
             && self.thread().cmd.is_some();
         let Some(text) = self.threads[self.active].queue.remove(index) else {
             return;

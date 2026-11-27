@@ -5,7 +5,7 @@ use greencode_core::{
     permission::{Mode, Perms},
     provider::{anthropic, openai, Provider, Reply, Request},
     session::{Meta, Session},
-    tools, Backend, Block, BoxFut, Decision, Event, Message, Role,
+    tools, Backend, Block, BoxFut, Command, Decision, Event, Message, Role,
 };
 use serde_json::{json, Value};
 use std::{
@@ -841,6 +841,63 @@ async fn smart_stop_detection_nudges_a_reply_that_stopped_short() {
     assert!(seen[1].1.contains("call the next tool now"), "{}", seen[1].1);
 }
 
+/// A background command that finishes mid-turn reaches the next request as a message, without polling.
+#[tokio::test]
+async fn finished_background_commands_reach_the_loop() {
+    let mock = Mock::new(vec![
+        vec![call("t1", "bash", json!({"command": "echo hi-from-job", "background": true}))],
+        vec![call("t2", "bash", json!({"command": "sleep 1"}))],
+        vec![text("done")],
+    ]);
+    let (mut a, _) = agent("job-delivery", Mode::Full, &mock);
+    let (result, _) = run(&mut a, "start it", Decision::Allow).await;
+    result.unwrap();
+    let seen = mock.seen.lock().unwrap();
+    assert_eq!(seen.len(), 3);
+    assert!(seen[2].1.contains("Background command `echo hi-from-job` exited 0") && seen[2].1.contains("hi-from-job\\n"), "{}", seen[2].1);
+}
+
+/// `verify.command` runs only after a file changed; a failure goes back to the model, a pass adds nothing.
+#[tokio::test]
+async fn verify_command_hands_failures_back_until_it_passes() {
+    let root = dir("verify-command");
+    let mock = Mock::new(vec![
+        vec![call("t1", "write", json!({"path": "a.txt", "content": "x"}))],
+        vec![text("done")],
+        vec![call("t2", "write", json!({"path": "ok.txt", "content": "y"}))],
+        vec![text("fixed")],
+    ]);
+    let meta = Meta::new(root, "mock/m".into(), "native".into());
+    let mut cfg = Config::default();
+    cfg.learning.auto = false;
+    cfg.loop_opts.verify.command = "test -f ok.txt || { echo missing-ok; exit 3; }".into();
+    let mut a = Agent::with_provider(Arc::new(cfg), &meta, Arc::new(Perms::new(Mode::Full)), mock.clone(), "m".into());
+    let (result, _) = run(&mut a, "make files", Decision::Allow).await;
+    result.unwrap();
+    let seen = mock.seen.lock().unwrap();
+    assert_eq!(seen.len(), 4, "one failed check, then a pass ends the turn");
+    assert!(seen[2].1.contains("verification command") && seen[2].1.contains("missing-ok") && seen[2].1.contains("[exit 3]"), "{}", seen[2].1);
+    assert_eq!(seen[3].1.matches("verification command").count(), 1, "a passing check adds nothing");
+}
+
+/// `goal.max_turns` pauses an open goal after that many automatic turns; `resume` starts the count again.
+#[test]
+fn goal_continuations_stop_at_max_turns() {
+    use greencode_core::config::modes::{ModesOpts, RunMode};
+    use greencode_core::goal;
+    let meta = Meta::new(dir("goal-max-turns"), "mock/m".into(), "native".into());
+    goal::apply(Some(&meta.id), &json!({"action": "create", "objective": "ship it"})).unwrap();
+    let mut modes = ModesOpts::default();
+    modes.goal.max_turns = 2;
+    assert!(goal::next_turn(&meta.id, &modes, RunMode::Interactive).is_some());
+    assert!(goal::next_turn(&meta.id, &modes, RunMode::Interactive).is_some());
+    assert!(goal::next_turn(&meta.id, &modes, RunMode::Interactive).is_none());
+    let paused = goal::Goal::load(&meta.id).unwrap();
+    assert!(paused.line(false).ends_with("(paused)"), "{}", paused.line(false));
+    goal::apply(Some(&meta.id), &json!({"action": "resume"})).unwrap();
+    assert!(goal::next_turn(&meta.id, &modes, RunMode::Interactive).is_some());
+}
+
 #[tokio::test]
 async fn lsp_definition_uses_the_language_server() {
     if greencode_core::config::executable("rust-analyzer").is_none() {
@@ -866,6 +923,32 @@ async fn lsp_definition_uses_the_language_server() {
     .await
     .unwrap();
     assert!(output.contains("src/lib.rs:1"), "{output}");
+}
+
+#[tokio::test]
+async fn lsp_rename_rewrites_every_file() {
+    if greencode_core::config::executable("rust-analyzer").is_none() {
+        return;
+    }
+    let root = dir("lsp-rename");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"lsp_rename\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("src/lib.rs"), "mod other;\npub fn helper() -> u8 { 1 }\n").unwrap();
+    std::fs::write(root.join("src/other.rs"), "pub fn caller() -> u8 { crate::helper() }\n").unwrap();
+    let output = tools::run(
+        "lsp",
+        &json!({"action":"rename","path":"src/lib.rs","line":2,"column":8,"query":"assist"}),
+        &root,
+    )
+    .await
+    .unwrap();
+    assert!(output.starts_with("renamed in 2 files"), "{output}");
+    assert_eq!(std::fs::read_to_string(root.join("src/lib.rs")).unwrap(), "mod other;\npub fn assist() -> u8 { 1 }\n");
+    assert_eq!(std::fs::read_to_string(root.join("src/other.rs")).unwrap(), "pub fn caller() -> u8 { crate::assist() }\n");
 }
 
 #[tokio::test]
@@ -2683,7 +2766,6 @@ async fn compaction_rebases_instructions_and_memory_even_after_resume() {
     );
     run(&mut a, "resume", Decision::Deny).await.0.unwrap();
     let seen = mock.seen.lock().unwrap();
-    assert!(!seen[2].1.contains("STALE_"));
     assert!(!seen[3].1.contains("STALE_"));
     assert!(!seen[3].1.contains(greencode_core::context::CONTEXT_MARKER));
     assert!(seen[3].1.contains("CURRENT_INSTRUCTIONS") && seen[3].1.contains("CURRENT_MEMORY"));
@@ -3073,6 +3155,171 @@ for line in sys.stdin:
     assert_eq!(results(&events), vec![("picked yes".to_string(), false)]);
     let (saved, messages) = Session::load(&meta.id).unwrap();
     assert_eq!((saved.title.as_str(), messages.len()), ("list files", 2));
+}
+
+#[tokio::test]
+async fn acp_steering_injects_a_message_into_the_running_turn() {
+    if std::process::Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return; // the fake agent below needs python3
+    }
+    let d = dir("acp-steer");
+    std::fs::write(
+        d.join("agent.py"),
+        r#"
+import json, sys
+def send(m): print(json.dumps(m), flush=True)
+def update(u): send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1", "update": u}})
+prompt_id = None
+for line in sys.stdin:
+    m = json.loads(line)
+    meth = m.get("method")
+    if meth == "initialize":
+        send({"jsonrpc": "2.0", "id": m["id"], "result": {"protocolVersion": 1, "_meta": {"steering": {"supported": True}}}})
+    elif meth == "session/new":
+        send({"jsonrpc": "2.0", "id": m["id"], "result": {"sessionId": "s1"}})
+    elif meth == "session/prompt":
+        prompt_id = m["id"]
+        update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "working"}})
+    elif meth == "_session/steering":
+        assert m["params"]["prompt"][0]["text"] == "new direction", m
+        send({"jsonrpc": "2.0", "id": m["id"], "result": {"outcome": "injected"}})
+        update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "steered"}})
+        send({"jsonrpc": "2.0", "id": prompt_id, "result": {"stopReason": "end_turn"}})
+"#,
+    )
+    .unwrap();
+    let meta = Meta::new(d.clone(), String::new(), "fake".into());
+    let command = vec!["python3".to_string(), "agent.py".to_string()];
+    let mut acp = greencode_core::acp::Acp::start(
+        &command,
+        &Default::default(),
+        &meta,
+        Arc::new(Perms::new(Mode::Ask)),
+    )
+    .await
+    .unwrap();
+    let live = acp.live().expect("the fake agent advertises steering");
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let events = {
+        let fut = acp.prompt("start".into(), &tx);
+        tokio::pin!(fut);
+        let mut events = Vec::new();
+        let mut steered = false;
+        loop {
+            tokio::select! {
+                r = &mut fut => { r.unwrap(); break }
+                Some(ev) = rx.recv() => {
+                    if !steered && matches!(&ev, Event::Text(t) if t == "working") {
+                        steered = true;
+                        live.send(json!({"type": "steer", "message": "new direction"})).unwrap();
+                    }
+                    events.push(ev);
+                }
+            }
+        }
+        while let Ok(ev) = rx.try_recv() {
+            events.push(ev);
+        }
+        events
+    };
+    assert!(events.iter().any(
+        |e| matches!(e, Event::Remote { command, data } if command == "acp_state" && data["steering"] == true)
+    ));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, Event::Text(t) if t == "steered")));
+    let (_, messages) = Session::load(&meta.id).unwrap();
+    let roles: Vec<Role> = messages.iter().map(|m| m.role).collect();
+    assert_eq!(
+        roles,
+        vec![Role::User, Role::Assistant, Role::User, Role::Assistant]
+    );
+    assert!(matches!(&messages[1].content[..], [Block::Text { text }] if text == "working"));
+    assert!(matches!(&messages[2].content[..], [Block::Text { text }] if text == "new direction"));
+    assert!(matches!(&messages[3].content[..], [Block::Text { text }] if text == "steered"));
+    Session::delete(&meta.id);
+}
+
+/// Steering opens a live channel, but that channel must not swallow Pi/OMP-style RPC commands.
+#[tokio::test]
+async fn acp_rpc_commands_wait_for_a_steering_turn_to_end() {
+    if std::process::Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return; // the fake agent below needs python3
+    }
+    let d = dir("acp-steer-rpc");
+    std::fs::write(
+        d.join("agent.py"),
+        r#"
+import json, sys
+def send(m): print(json.dumps(m), flush=True)
+def update(u): send({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1", "update": u}})
+prompt_id = None
+for line in sys.stdin:
+    m = json.loads(line)
+    meth = m.get("method")
+    if meth == "initialize":
+        send({"jsonrpc": "2.0", "id": m["id"], "result": {"protocolVersion": 1, "_meta": {"steering": {"supported": True}}}})
+    elif meth == "session/new":
+        send({"jsonrpc": "2.0", "id": m["id"], "result": {"sessionId": "s1"}})
+    elif meth == "session/prompt":
+        prompt_id = m["id"]
+        update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "working"}})
+    elif meth == "_session/steering":
+        send({"jsonrpc": "2.0", "id": m["id"], "result": {"outcome": "injected"}})
+        send({"jsonrpc": "2.0", "id": prompt_id, "result": {"stopReason": "end_turn"}})
+"#,
+    )
+    .unwrap();
+    let mut cfg = Config::default();
+    cfg.backends.push(greencode_core::config::AcpCfg {
+        name: "fake-steer-rpc".into(),
+        command: vec!["python3".into(), "agent.py".into()],
+        protocol: greencode_core::config::Protocol::Acp,
+        env: Default::default(),
+    });
+    let meta = Meta::new(d.clone(), "default".into(), "fake-steer-rpc".into());
+    let (tx, mut rx) = greencode_core::spawn(
+        &tokio::runtime::Handle::current(),
+        Arc::new(cfg),
+        meta.clone(),
+        Arc::new(Perms::new(Mode::Ask)),
+    );
+    tx.send(Command::Prompt("start".into())).unwrap();
+    let (mut sent, mut states) = (false, 0);
+    let ok = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while let Some(event) = rx.recv().await {
+            match event {
+                Event::Text(t) if t == "working" && !sent => {
+                    sent = true;
+                    tx.send(Command::Steer("go".into())).unwrap();
+                    tx.send(Command::Remote(json!({"type": "get_state"}))).unwrap();
+                }
+                Event::Remote { command, .. } if command == "acp_state" => {
+                    states += 1;
+                    if states == 2 {
+                        return true;
+                    }
+                }
+                Event::Error(e) => panic!("{e}"),
+                _ => {}
+            }
+        }
+        false
+    })
+    .await
+    .unwrap();
+    assert!(sent);
+    assert!(ok, "the RPC command must run after the turn instead of entering the steering channel");
+    drop(tx);
+    Session::delete(&meta.id);
 }
 
 #[tokio::test]
@@ -5457,4 +5704,39 @@ async fn task_agent_idle_ttl_parks_a_named_subagent_and_revives_it_on_the_next_m
             .gt(&0),
         "a zero TTL must not park anything on disk"
     );
+}
+
+/// Background and foreground summaries resend the turn's exact system, tools and leading messages, so
+/// the provider serves the summarized span from its prompt cache.
+#[tokio::test]
+async fn compaction_summaries_extend_the_cached_request_prefix() {
+    for speculative in [true, false] {
+        let usage = greencode_core::Usage { input: 1000, ..Default::default() };
+        let replies = vec![
+            Reply { blocks: vec![call("t1", "bash", json!({"command": "echo hi"}))], usage, ..Default::default() },
+            Reply { blocks: vec![text("summary or done")], ..Default::default() },
+            Reply { blocks: vec![text("summary or done")], ..Default::default() },
+        ];
+        let mock = Arc::new(Mock { replies: Mutex::new(replies.into()), ..Default::default() });
+        let meta = Meta::new(dir(&format!("summary-prefix-{speculative}")), "mock/m".into(), "native".into());
+        let mut cfg = Config::default();
+        cfg.learning.auto = false;
+        cfg.compact_at = 100;
+        cfg.compaction_opts.maintenance.keep_recent_tokens = Some(1);
+        cfg.compaction_opts.maintenance.async_enabled = speculative;
+        cfg.compaction_mid_turn = !speculative;
+        let mut a = Agent::with_provider(Arc::new(cfg), &meta, Arc::new(Perms::new(Mode::Full)), mock.clone(), "m".into());
+        let (result, _) = run(&mut a, "go", Decision::Allow).await;
+        result.unwrap();
+        // The background summary may land after the turn ends.
+        for _ in 0..50 {
+            if mock.seen.lock().unwrap().iter().any(|(_, m)| m.contains("Stop here and do not call tools")) { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let seen = mock.seen.lock().unwrap();
+        let summary = seen.iter().find(|(_, m)| m.contains("Stop here and do not call tools")).expect("a summary request");
+        let first = &seen[0];
+        assert_eq!(summary.0, first.0, "speculative={speculative}: system and tools differ");
+        assert!(summary.1.starts_with(first.1.trim_end_matches(']')), "speculative={speculative}:\n{}\n{}", first.1, summary.1);
+    }
 }

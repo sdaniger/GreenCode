@@ -221,6 +221,8 @@ pub trait Backend: Send {
         Box::pin(async { Ok(()) })
     }
     fn live(&self) -> Option<mpsc::UnboundedSender<Value>> { None }
+    /// The live channel also accepts Pi/OMP-style RPC commands, not only steering.
+    fn live_commands(&self) -> bool { false }
     fn set_subagent_model(&mut self, _model: Option<String>) -> anyhow::Result<()> {
         anyhow::bail!("sub-agent model selection is managed by this external backend")
     }
@@ -318,7 +320,7 @@ async fn make_backend(
     if bname == antigravity::BACKEND && !antigravity::is_runtime_installed(b) {
         anyhow::bail!("Google Antigravity ランタイムが未インストールです。/login antigravity または 設定 → 接続（CLI では greencode-cli auth login antigravity）を実行してください");
     }
-    if bname.starts_with("hermes:") && config::executable("hermes").is_none() {
+    if hermes::is_backend(bname) && config::executable("hermes").is_none() {
         anyhow::bail!("Hermes is not installed; install Hermes with ACP support and run `hermes acp --check`");
     }
     match b.protocol {
@@ -423,7 +425,7 @@ pub fn cache_backend_options(backend: &str, options: &[Value]) -> std::io::Resul
     std::fs::rename(tmp, path)
 }
 
-/// Options that can be controlled from the model picker.
+/// Options that can be controlled from the model picker; the model option is kept for its display names.
 pub fn picker_backend_option(option: &Value) -> bool {
     matches!(option["category"].as_str(), Some("model" | "reasoning" | "effort" | "thought" | "thinking" | "thought_level" | "thinking_level" | "reasoning_effort"))
         || matches!(option["id"].as_str(), Some("reasoning_effort" | "effort" | "thinking" | "thinking_level" | "reasoning"))
@@ -731,6 +733,7 @@ pub fn spawn(
                     }
                     host.busy.send_replace(true);
                     let live = if matches!(&cmd,Command::Prompt(_) | Command::PromptWithOptions(_, _) | Command::Steer(_)) { b.live() } else { None };
+                    let live_commands = live.is_some() && b.live_commands();
                     let (cancelled, failed) = {
                         let fut = match cmd {
                             Command::Prompt(text) | Command::PromptWithOptions(text, _) | Command::Steer(text) => b.prompt(text,&tx),
@@ -757,7 +760,7 @@ pub fn spawn(
                                     Some(Command::Steer(message)) if live.is_some() => {
                                         let _ = live.as_ref().unwrap().send(serde_json::json!({"type": "steer", "message": message}));
                                     }
-                                    Some(Command::Remote(value)) if live.is_some() => { let _ = live.as_ref().unwrap().send(value); }
+                                    Some(Command::Remote(value)) if live_commands => { let _ = live.as_ref().unwrap().send(value); }
                                     Some(Command::Handoff(reply)) => {
                                         let _ = reply.send(Err("a turn is still running; wait for it to finish or cancel it before handing off".into()));
                                     }

@@ -50,6 +50,7 @@ pub(super) fn harness_icon(backend: &str, size: f32, color: Hsla) -> Option<AnyE
         "grok" => ("harness/grok.svg", color),
         "cursor" => ("harness/cursor.svg", color),
         "devin" => ("harness/devin.svg", color),
+        b if greencode_core::hermes::is_backend(b) => ("harness/hermes.svg", color),
         _ => return None,
     };
     Some(svg().path(path).size(px(size)).flex_shrink_0().text_color(color).into_any_element())
@@ -1413,5 +1414,12 @@ mod tests {
             assert!(ws.offered_models().iter().any(|r| r.id == "a/model"));
             assert!(!ws.offered_models().iter().any(|r| r.id == "b/model"));
         });
+    }
+
+    #[gpui_kit::test]
+    async fn hermes_harness_icon_matches_default_and_profile_backends(_cx: &mut TestAppContext) {
+        assert!(super::harness_icon("hermes", 16., gpui_kit::rgb(0xffffff).into()).is_some());
+        assert!(super::harness_icon("hermes:default", 16., gpui_kit::rgb(0xffffff).into()).is_some());
+        assert!(super::harness_icon("hermes:omh-tui", 16., gpui_kit::rgb(0xffffff).into()).is_some());
     }
 }

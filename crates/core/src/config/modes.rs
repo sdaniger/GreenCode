@@ -29,10 +29,12 @@ pub struct GoalCfg {
     /// Show the objective and token budget in the status line.
     pub status_in_footer: bool,
     pub continuation_modes: Vec<RunMode>,
+    /// Automatic continuations before the goal pauses itself; 0 means no limit.
+    pub max_turns: u32,
 }
 
 impl Default for GoalCfg {
-    fn default() -> Self { Self { enabled: true, status_in_footer: true, continuation_modes: vec![RunMode::Interactive] } }
+    fn default() -> Self { Self { enabled: true, status_in_footer: true, continuation_modes: vec![RunMode::Interactive], max_turns: 20 } }
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, Default, PartialEq, Eq)]

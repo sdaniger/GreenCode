@@ -23,6 +23,7 @@ impl AssetSource for Assets {
             "harness/grok.svg" => include_bytes!("../assets/harness/grok.svg"),
             "harness/cursor.svg" => include_bytes!("../assets/harness/cursor.svg"),
             "harness/devin.svg" => include_bytes!("../assets/harness/devin.svg"),
+            "harness/hermes.svg" => include_bytes!("../assets/harness/hermes.svg"),
             _ => return gpui_kit::assets::Assets.load(path),
         };
         Ok(Some(std::borrow::Cow::Borrowed(bytes)))

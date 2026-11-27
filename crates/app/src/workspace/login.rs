@@ -890,6 +890,10 @@ impl Workspace {
             "OpenCode でログイン（ターミナル）".into(),
             Act::OpenCodeLogin,
         ));
+        rows.push((
+            "Hermes をセットアップ（ターミナル）".into(),
+            Act::HermesSetup("hermes".into()),
+        ));
         #[cfg(unix)]
         rows.push((
             "既存の Claude Code / ChatGPT ログインを取り込む".into(),

@@ -105,6 +105,21 @@ pub struct JobResult {
     pub command: String,
     pub log: PathBuf,
     pub status: Option<i32>,
+    /// The session whose tool call started the job; its agent loop takes the result.
+    pub owner: Option<String>,
+}
+
+tokio::task_local! {
+    /// The session running the current tool call, so a background job knows whose loop to wake.
+    pub static JOB_OWNER: String;
+}
+
+/// Takes `owner`'s finished jobs; the rest stay for `next_job_result`.
+pub fn take_jobs(owner: &str) -> Vec<JobResult> {
+    let mut done = JOBS_DONE.lock().unwrap();
+    let (mine, rest) = std::mem::take(&mut *done).into_iter().partition(|job| job.owner.as_deref() == Some(owner));
+    *done = rest;
+    mine
 }
 
 static JOBS_RUNNING: AtomicUsize = AtomicUsize::new(0);
@@ -1446,10 +1461,11 @@ async fn bash(command: &str, timeout: u64, background: bool, cwd: &Path, cfg: &C
         // `async.widgets`: the widget and its caption are written once, while the job runs.
         jobwidget::start(cfg, &command, &log);
         JOBS_LIVE.lock().unwrap().push((pid, command.clone(), log.clone()));
+        let owner = JOB_OWNER.try_with(Clone::clone).ok();
         tokio::spawn(async move {
             let status = child.wait().await.ok().and_then(|status| status.code());
             JOBS_LIVE.lock().unwrap().retain(|(p, ..)| *p != pid);
-            job_finished(JobResult { command, log, status });
+            job_finished(JobResult { command, log, status, owner });
         });
         pid
     };

@@ -191,6 +191,10 @@ pub fn help(tool: &str) -> Result<String> {
 /// The tool and input that permission, plan-mode and undo checks should judge: `ext` itself says nothing about
 /// what a call does, so each inner tool maps onto the built-in it behaves like.
 pub fn effective(name: &str, input: &Value) -> (String, Value) {
+    // `lsp rename` rewrites files, so it asks and stops in plan mode like `edit`.
+    if name == "lsp" && input["action"] == "rename" {
+        return ("edit".into(), json!({"path": input["path"]}));
+    }
     if name != "ext" {
         return (name.to_string(), input.clone());
     }

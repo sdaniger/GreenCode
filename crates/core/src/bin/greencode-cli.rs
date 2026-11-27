@@ -931,12 +931,11 @@ fn main() -> anyhow::Result<()> {
         let mut command = Some(command);
         let mut ok = true;
         // `goal.continuation_modes`: one-shot/rpc runs keep going while the goal stays open, bounded
-        // by the goal's own budget or `complete`.
+        // by the goal's own budget, `complete`, or `goal.max_turns`.
         while let Some(next) = command.take() {
             ok = turn(next);
             if !ok { break; }
-            let goal = greencode_core::goal::Goal::load(&thread_id);
-            command = goal.and_then(|goal| goal.continues(&modes, greencode_core::config::modes::RunMode::Rpc))
+            command = greencode_core::goal::next_turn(&thread_id, &modes, greencode_core::config::modes::RunMode::Rpc)
                 .map(Command::Prompt);
         }
         if !ok { anyhow::bail!("turn failed or ended without completion"); }

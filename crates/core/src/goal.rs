@@ -10,6 +10,8 @@ pub struct Goal {
     pub status: Status,
     pub tokens_used: u64,
     pub token_budget: Option<u64>,
+    /// Automatic continuations since the goal was created or resumed; `goal.max_turns` caps them.
+    pub turns: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -69,11 +71,12 @@ impl Goal {
             status: value["status"].as_str().and_then(Status::parse).unwrap_or_default(),
             tokens_used: value["tokens_used"].as_u64().unwrap_or(0),
             token_budget: value["token_budget"].as_u64(),
+            turns: value["turns"].as_u64().unwrap_or(0) as u32,
         })
     }
 
     pub fn to_value(&self) -> Value {
-        json!({"objective": self.objective, "status": self.status.as_str(), "tokens_used": self.tokens_used, "token_budget": self.token_budget})
+        json!({"objective": self.objective, "status": self.status.as_str(), "tokens_used": self.tokens_used, "token_budget": self.token_budget, "turns": self.turns})
     }
 
     /// Writes this goal into the session's runtime record, keeping its other keys.
@@ -125,14 +128,17 @@ pub fn apply(session: Option<&str>, input: &Value) -> Result<String> {
                 Some(0) | None => None,
                 Some(budget) => Some(budget),
             };
-            Goal { objective: objective.into(), status: Status::Active, tokens_used: 0, token_budget }.save(session)?;
+            Goal { objective: objective.into(), status: Status::Active, tokens_used: 0, token_budget, turns: 0 }.save(session)?;
             Ok("goal created; it continues between turns until complete or paused".into())
         }
         "pause" | "resume" | "complete" | "drop" | "status" => {
             let Some(mut goal) = goal.take() else { bail!("no goal is set") };
             match action {
                 "pause" => goal.status = Status::Paused,
-                "resume" => goal.status = Status::Active,
+                "resume" => {
+                    goal.status = Status::Active;
+                    goal.turns = 0;
+                }
                 "complete" => goal.status = Status::Complete,
                 "status" => {}
                 "drop" => {
@@ -146,6 +152,22 @@ pub fn apply(session: Option<&str>, input: &Value) -> Result<String> {
         }
         other => bail!("unknown goal action `{other}`; use create, pause, resume, complete, status or drop"),
     }
+}
+
+/// The prompt for `session`'s next automatic goal turn, counted on disk. Every front end (TUI, CLI) calls this,
+/// so `goal.max_turns` holds everywhere: at the cap the goal pauses and the footer shows "(paused)".
+pub fn next_turn(session: &str, modes: &crate::config::modes::ModesOpts, run: crate::config::modes::RunMode) -> Option<String> {
+    let mut goal = Goal::load(session)?;
+    let prompt = goal.continues(modes, run)?;
+    let max = modes.goal.max_turns;
+    if max > 0 && goal.turns >= max {
+        goal.status = Status::Paused;
+        let _ = goal.save(session);
+        return None;
+    }
+    goal.turns += 1;
+    goal.save(session).ok()?;
+    Some(prompt)
 }
 
 /// The folder-level message inbox other GreenCode instances use (`task.crossInstance`).
@@ -166,7 +188,7 @@ mod tests {
     #[test]
     fn goal_lifecycle_and_continuation() {
         let cfg = crate::config::modes::GoalCfg::default();
-        let mut goal = Goal { objective: "ship it".into(), status: Status::Active, tokens_used: 3, token_budget: Some(10) };
+        let mut goal = Goal { objective: "ship it".into(), status: Status::Active, tokens_used: 3, token_budget: Some(10), turns: 0 };
         assert!(goal.continuation().unwrap().contains("ship it"));
         assert_eq!(goal.line(true), "goal: ship it · 3/10 tokens");
         assert_eq!(goal.line(false), "goal: ship it");
@@ -180,7 +202,7 @@ mod tests {
         assert!(crate::config::modes::GoalCfg { enabled: false, ..cfg }.continuation_modes.len() == 1, "interactive is the default run mode");
         use crate::config::modes::{ModesOpts, RunMode};
         let mut modes = ModesOpts::default();
-        let active = Goal { objective: "ship it".into(), status: Status::Active, tokens_used: 0, token_budget: None };
+        let active = Goal { objective: "ship it".into(), status: Status::Active, tokens_used: 0, token_budget: None, turns: 0 };
         assert!(active.continues(&modes, RunMode::Interactive).is_some(), "interactive continues by default");
         assert!(active.continues(&modes, RunMode::Rpc).is_none(), "rpc does not unless configured");
         modes.goal.continuation_modes = vec![RunMode::Rpc];

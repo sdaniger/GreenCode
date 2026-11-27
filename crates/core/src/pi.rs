@@ -1113,6 +1113,8 @@ impl Backend for Pi {
         Some(self.live_tx.clone())
     }
 
+    fn live_commands(&self) -> bool { true }
+
     fn control<'a>(&'a mut self, command: Value, tx: &'a EventTx) -> BoxFut<'a, Result<()>> {
         Box::pin(async move {
             self.initialize(tx).await?;

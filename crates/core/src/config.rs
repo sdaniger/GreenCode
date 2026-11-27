@@ -1226,6 +1226,7 @@ impl Config {
             ("kiro", "kiro-cli", &["acp", "--agent-engine=v3", "--auth-method=cli"][..]),
             ("grok", "grok", &["agent", "stdio"]),
             ("fx", "fx", &["acp"]),
+            ("hermes", "hermes", &["acp"]),
         ] {
             if cfg.backends.iter().any(|b| b.name == name) { continue }
             if let Some(path) = executable(exe) {

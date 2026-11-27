@@ -30,6 +30,12 @@ pub struct Acp {
     images: bool,
     /// GreenCode's MCP server was attached and its usage guide is not sent yet; it goes before the next prompt.
     guide: bool,
+    /// The agent advertises `_session/steering`; `live` exposes this channel only then.
+    steering: bool,
+    steer_tx: mpsc::UnboundedSender<Value>,
+    steer_rx: mpsc::UnboundedReceiver<Value>,
+    /// Assistant output and user steers to save after the prompt, in the order they happened.
+    pending: Vec<Message>,
 }
 
 impl Acp {
@@ -67,11 +73,14 @@ impl Acp {
         }))
         .await?;
         let images = init["agentCapabilities"]["promptCapabilities"]["image"] == true;
+        // OpenCode's interim extension until ACP has native mid-turn steering.
+        let steering = init["_meta"]["steering"]["supported"] == true;
+        let (steer_tx, steer_rx) = mpsc::unbounded_channel();
         let mut mcp = stdio_mcp_servers(&meta.cwd);
         let delegation = crate::delegate::acp_server(meta, &init).await;
         let guide = delegation.is_some();
         mcp.extend(delegation);
-        let (session_id, r) = match open_session(&rpc, saved, &init, meta, &mcp).await {
+        let (session_id, mut r) = match open_session(&rpc, saved, &init, meta, &mcp).await {
             Ok(opened) => {
                 if crate::antigravity::is_alias(&meta.backend) {
                     let _ = crate::antigravity::mark_signed_in(true, None);
@@ -125,7 +134,8 @@ impl Acp {
             Err(err) => return Err(err),
         };
         Session::save_runtime(&meta.id, &json!({"backend":meta.backend,"sessionId":session_id}))?;
-        let mut acp = Acp { rpc, incoming, session_id, cwd: meta.cwd.clone(), perms, meta: meta.clone(), log: vec![], state: r, prompt_text:None, commands:None, idle_inc:Default::default(), images, guide };
+        r["steering"] = json!(steering);
+        let mut acp = Acp { rpc, incoming, session_id, cwd: meta.cwd.clone(), perms, meta: meta.clone(), log: vec![], state: r, prompt_text:None, commands:None, idle_inc:Default::default(), images, guide, steering, steer_tx, steer_rx, pending: vec![] };
         // Agents advertise slash commands in a notification sent right after the session/new|load response, and
         // session/load also replays its transcript (which the UI already has). Collect until the stream goes
         // quiet so those updates are neither missed nor mistaken for the first turn's output; keep only state.
@@ -346,6 +356,9 @@ impl Acp {
             }
         };
         session.append(&Message::user(prompt))?;
+        for message in std::mem::take(&mut self.pending) {
+            session.append(&message)?;
+        }
             if !self.log.is_empty() {
                 session.append(&Message { role: Role::Assistant, content: std::mem::take(&mut self.log) })?;
             }
@@ -354,6 +367,10 @@ impl Acp {
 }
 
 impl Backend for Acp {
+    fn live(&self) -> Option<mpsc::UnboundedSender<Value>> {
+        self.steering.then(|| self.steer_tx.clone())
+    }
+
     fn prompt<'a>(&'a mut self, text: String, tx: &'a EventTx) -> BoxFut<'a, Result<()>> {
         Box::pin(async move {
             while !self.idle_inc.is_empty() { self.handle_idle(tx).await?; } // parked idle message must not be lost to a turn that starts first
@@ -374,6 +391,30 @@ impl Backend for Acp {
                 tokio::select! {
                     r = &mut fut => break r,
                     Some(inc) = self.incoming.recv() => self.handle(inc, tx).await,
+                    Some(command) = self.steer_rx.recv() => {
+                        if command["type"] == "steer" {
+                            if let Some(text) = command["message"].as_str().filter(|s| !s.is_empty()) {
+                                let params = json!({"sessionId": self.session_id, "prompt": self.prompt_content(text)});
+                                match rpc.request("_session/steering", params).await {
+                                    Ok(v) if v["outcome"] == "injected" => {
+                                        // A steer splits the assistant log so the saved transcript keeps the order.
+                                        if !self.log.is_empty() {
+                                            let content = std::mem::take(&mut self.log);
+                                            self.pending.push(Message { role: Role::Assistant, content });
+                                        }
+                                        self.pending.push(Message::user(text));
+                                    }
+                                    Ok(v) if v["outcome"] == "promptRequired" => {
+                                        let _ = tx.send(Event::Notify("実行が終了したため、追加指示を送信できませんでした".into()));
+                                    }
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        let _ = tx.send(Event::Notify(format!("追加指示を送信できませんでした: {e:#}")));
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             };
             // Updates that were queued behind the final response.
